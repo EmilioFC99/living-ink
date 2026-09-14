@@ -1,8 +1,29 @@
 # Living Ink Configuration
 
-# 1. OpenAI Configuration (Required for text cleanup)
-openai:
-  api_key: "sk-proj-YOUR-OPENAI-KEY-HERE"
+# 1. AI Text Cleanup Configuration
+# Choose your AI provider for cleaning up OCR text.
+# Available presets: "openai", "gemini", "ollama", "groq", "openrouter", "mistral", "together", "custom", "none"
+ai:
+  provider: "gemini"                    # Pick your provider
+  api_key: "YOUR-API-KEY-HERE"          # Your API key (not needed for "ollama" or "none")
+  # model: "gemini-2.0-flash"           # Optional — a sensible default is auto-selected per provider
+  # temperature: 0.3                    # Optional — controls creativity (lower = more precise)
+
+  # --- Provider-specific notes ---
+  # "gemini"   → Get a free API key at https://aistudio.google.com/apikey
+  # "openai"   → Get an API key at https://platform.openai.com/api-keys
+  # "ollama"   → Free, local. Install from https://ollama.com, then `ollama pull llama3.2`
+  # "groq"     → Free tier at https://console.groq.com
+  # "openrouter" → Aggregator with free models at https://openrouter.ai
+  # "custom"   → Any OpenAI-compatible endpoint. Requires 'base_url' below.
+  # "none"     → Disable AI cleanup entirely. Raw OCR text only.
+
+  # For provider: "custom" only:
+  # base_url: "https://my-llm.example.com/v1"
+
+# DEPRECATED — still works for backward compatibility:
+# openai:
+#   api_key: "sk-proj-YOUR-OPENAI-KEY-HERE"
 
 # 2. reMarkable Configuration (Required for downloading notes)
 # Get your token by running the registration command or checking ~/.rmapi
@@ -43,8 +64,3 @@ obsidian:
   # Absolute path to your Obsidian Vault root
   # Example: "/Users/username/Documents/MyVault"
   vault_path: ""
-
-  # OR for Obsidian:
-  # type: "obsidian"
-  # vault_path: "/Users/yourname/Documents/Obsidian Vault"
-

@@ -18,6 +18,7 @@ uv run pyinstaller scripts/process_notebook.py \
     --onefile \
     --clean \
     --paths . \
+    --add-data "remarkable_mcp/cleanup_prompt.txt:remarkable_mcp" \
     --add-data "remarkable_mcp/openai_cleanup_prompt.txt:remarkable_mcp" \
     --hidden-import "google.cloud.vision" \
     --hidden-import "yaml" \

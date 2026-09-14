@@ -18,13 +18,9 @@ from PIL import Image, ImageFilter, ImageOps
 # Ensure remarkable_mcp is importable
 sys.path.append(str(Path(__file__).parent.parent))
 
-from remarkable_mcp.destinations import AppleNotesDestination, ObsidianDestination, Destination
-
-try:
-    from remarkable_mcp.clean import repair_text_with_openai
-except ImportError:
-    # If standard import fails, we rely on the sys.path hack above
-    from remarkable_mcp.clean import repair_text_with_openai
+from remarkable_mcp.clean import configure as configure_ai_provider
+from remarkable_mcp.clean import repair_text_with_openai
+from remarkable_mcp.destinations import AppleNotesDestination, Destination, ObsidianDestination
 
 
 # --- LOGGING SUPPRESSION ---
@@ -144,6 +140,9 @@ if YAML_CONFIG_PATH.exists():
                     os.environ["APPLE_NOTES_FOLDER"] = str(
                         yaml_config["apple_notes"]["folder_name"]
                     )
+
+            # 6. AI Provider — initialize from new 'ai' section or legacy 'openai' section
+            configure_ai_provider(yaml_config)
 
     except Exception as e:
         print(f"Critical error loading config.yml: {e}")
@@ -407,14 +406,18 @@ def validate_environment():
     docs_hint = f"See {docs_path} for instructions."
 
     errors = []
+    warnings = []
 
-    # 1. Check OpenAI
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        errors.append("❌ Missing OPENAI_API_KEY environment variable. functionality will fail.")
-    elif "YOUR-OPENAI-KEY-HERE" in api_key:
-        errors.append(
-            "❌ OpenAI API Key still has default placeholder value. Please edit config.yml."
+    # 1. Check AI Provider (replaces hardcoded OpenAI check)
+    from remarkable_mcp.clean import _get_provider
+    from remarkable_mcp.providers import NoneProvider
+
+    provider = _get_provider()
+    if isinstance(provider, NoneProvider):
+        warnings.append(
+            "⚠️ No AI text cleanup provider configured. "
+            "OCR text will not be cleaned up. "
+            "To enable, add an 'ai' section to config.yml."
         )
 
     # 2. Check Google Credentials
@@ -447,6 +450,11 @@ def validate_environment():
         errors.append(
             "❌ No Google Cloud credentials found. Please add 'credentials_json' to config.yml (see SETUP_GUIDE.md)."
         )
+
+    # Print warnings (non-fatal)
+    for w in warnings:
+        log(w)
+        print(w)
 
     if errors:
         msg = "\n".join(errors)
@@ -495,6 +503,7 @@ def main():
 
     # --- Cleanup all cached files for all notebooks at the start of each run ---
     import shutil
+
     # Clean all output folders (PNG, OCR, PDF, Vision) at the start of each run
     for folder in [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR]:
         if folder.exists():
@@ -639,13 +648,15 @@ def main():
                 if n == target_name:
                     exists = True
                     # It exists but is considered processed. Let's force it for the 'single notebook' use case.
-                    log(f"Notebook {target_name} is marked as up-to-date, but forcing due to --notebook flag.")
+                    log(
+                        f"Notebook {target_name} is marked as up-to-date, but forcing due to --notebook flag."
+                    )
                     notebooks_to_process.append(item)
                     # Force all destinations for this single forced run
                     doc_id = get_val(item, "ID")
                     needs_update[doc_id] = ACTIVE_DESTINATIONS
                     break
-            
+
             if not exists:
                 log(f"Notebook {target_name} not found in library. Exiting.")
                 sys.exit(1)
@@ -762,7 +773,7 @@ def main():
             raw_text = txt or ""
             raw_texts.append(raw_text)
 
-            log(f"  Cleaning text with OpenAI for {p.name}...")
+            log(f"  Cleaning text with AI for {p.name}...")
             cleaned_text = repair_text_with_openai(raw_text)
             cleaned_texts.append(cleaned_text)
 
@@ -818,10 +829,10 @@ def main():
 
             # Destinations that specifically request this notebook
             targets = needs_update.get(notebook_id, [])
-            
+
             # Fallback: if 'needs_update' is empty (forced run), target all active
             if not targets and ACTIVE_DESTINATIONS:
-                 targets = ACTIVE_DESTINATIONS
+                targets = ACTIVE_DESTINATIONS
 
             if targets:
                 all_success = True
@@ -844,7 +855,7 @@ def main():
                 success = all_success
             else:
                 log("No destinations need update for this notebook (or none configured).")
-                success = True # Marked as success because we did what was asked (nothing)
+                success = True  # Marked as success because we did what was asked (nothing)
 
         except Exception as e:
             log(f"Failed publishing note: {e}")
@@ -855,9 +866,9 @@ def main():
         # Legacy log update (kept to avoid breakage if referenced elsewhere, but logically handled above)
         # We don't really need a 'global' success anymore, as per-dest success is what matters.
         if success:
-             log(f"Notebook {notebook} processing complete.")
+            log(f"Notebook {notebook} processing complete.")
         else:
-             log(f"Notebook {notebook} processing FAILED.")
+            log(f"Notebook {notebook} processing FAILED.")
 
     log("Pipeline finished.")
 

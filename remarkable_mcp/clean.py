@@ -1,105 +1,104 @@
-import json
+"""
+OCR text cleanup module.
+
+Delegates AI-powered text repair to the provider configured in config.yml.
+See remarkable_mcp/providers.py for available providers.
+
+Backward compatibility:
+    - repair_text_with_openai() still works as the public API entry point.
+    - If no provider is configured, falls back to NoneProvider (raw text).
+    - Legacy OPENAI_API_KEY env var is respected if 'ai' config section is absent.
+"""
+
+import logging
 import os
-import urllib.error
-import urllib.request
 from pathlib import Path
+from typing import Optional
 
-# Load env variables if available
-try:
-    from dotenv import load_dotenv
+from remarkable_mcp.providers import NoneProvider, TextRepairProvider, get_provider
 
-    load_dotenv()
-except ImportError:
-    pass
+logger = logging.getLogger(__name__)
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_REPAIR_MODEL = os.environ.get("OPENAI_REPAIR_MODEL", "gpt-4o-mini").strip()
-# Set to 'true' by default, can be disabled via env
+# Prompt file — provider-agnostic instructions for text cleanup
+PROMPT_FILE = Path(__file__).parent / "cleanup_prompt.txt"
+# Fallback to legacy name if new file doesn't exist yet
+if not PROMPT_FILE.exists():
+    PROMPT_FILE = Path(__file__).parent / "openai_cleanup_prompt.txt"
+
+# Module-level provider instance, initialized lazily via configure()
+_provider: Optional[TextRepairProvider] = None
+
+# Feature toggle (can be disabled via env var)
 ENABLE_REPAIR = os.environ.get("ENABLE_REPAIR", "true").lower() in ("true", "1", "yes")
-
-PROMPT_FILE = Path(__file__).parent / "openai_cleanup_prompt.txt"
 
 
 def _read_prompt_instructions() -> str:
+    """Read the cleanup prompt instructions from the prompt file."""
     if PROMPT_FILE.exists():
         return PROMPT_FILE.read_text(encoding="utf-8").strip()
     return "Clean this OCR text."
 
 
-def _openai_chat(prompt: str) -> str:
+def configure(config: dict) -> None:
     """
-    Minimal OpenAI-compatible chat call via HTTP.
-    Uses OPENAI_API_KEY and OPENAI_REPAIR_MODEL.
+    Initialize the AI provider from the parsed YAML config.
+
+    Should be called once at startup (from process_notebook.py).
+    If not called, repair_text_with_openai() will attempt to
+    auto-configure from legacy env vars.
+
+    Args:
+        config: The parsed YAML configuration dictionary.
     """
-    # Fetch key dynamically to support lazy config loading
+    global _provider
+    _provider = get_provider(config)
+    logger.info(f"AI text cleanup provider: {_provider.name}")
+
+
+def _get_provider() -> TextRepairProvider:
+    """
+    Get the configured provider, with lazy initialization fallback.
+
+    If configure() was never called (e.g., direct script usage),
+    attempts to build a provider from legacy environment variables.
+    """
+    global _provider
+    if _provider is not None:
+        return _provider
+
+    # Lazy fallback: try legacy env var configuration
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    
-    if not api_key:
-        print("Warning: OPENAI_API_KEY not set env var. Skipping text cleanup.")
-        return ""
+    if api_key:
+        logger.info("Auto-configuring from OPENAI_API_KEY env var (legacy mode).")
+        _provider = get_provider({"openai": {"api_key": api_key}})
+    else:
+        logger.info("No AI provider configured. Text cleanup disabled.")
+        _provider = NoneProvider()
 
-    url = "https://api.openai.com/v1/chat/completions"
-    payload = {
-        "model": OPENAI_REPAIR_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an expert editor for handwritten notes. Your goal is to restore the author's original intent by fixing OCR misinterpretations while preserving their voice.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-    }
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = resp.read().decode("utf-8")
-            j = json.loads(body)
-            # Handle potential API errors in response body if status was 200 (less likely with urllib)
-            return j["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        print(f"OpenAI API HTTP Error: {e.code} {e.reason}")
-        # Try to read error body
-        try:
-            err_body = e.read().decode("utf-8")
-            print(f"Details: {err_body}")
-        except Exception:
-            pass
-        return ""
-    except urllib.error.URLError as e:
-        print(f"OpenAI API Connection Error: {e.reason}")
-        return ""
-    except Exception as e:
-        print(f"OpenAI Unexpected Error: {e}")
-        return ""
+    return _provider
 
 
 def repair_text_with_openai(text: str) -> str:
     """
-    Clean up OCR text using OpenAI.
-    Returns the cleaned text, or the original text if repair fails/disabled.
+    Clean up OCR text using the configured AI provider.
+
+    Despite the legacy function name, this works with ANY configured provider
+    (Gemini, Ollama, OpenAI, etc.). The name is kept for backward compatibility
+    with existing callers.
+
+    Args:
+        text: Raw OCR text to clean up.
+
+    Returns:
+        Cleaned text, or the original text if repair fails or is disabled.
     """
     if not ENABLE_REPAIR:
-        return text
-
-    # Fetch key dynamically
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
         return text
 
     if not text or not text.strip():
         return text
 
+    provider = _get_provider()
     instructions = _read_prompt_instructions()
-    prompt = f"{instructions}\n\nTEXT:\n{text}"
 
-    out = _openai_chat(prompt)
-    if not out:
-        return text  # Fallback to original
-
-    return out.strip()
+    return provider.repair_text(text, instructions)

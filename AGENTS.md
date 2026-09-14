@@ -1,0 +1,124 @@
+# AGENTS.md — Living Ink
+
+> AI coding agent guide for the Living Ink codebase.
+
+## Project Overview
+
+**Living Ink** is an automated pipeline that syncs handwritten notebooks from a **reMarkable tablet** to digital note-taking apps (**Apple Notes** and **Obsidian**). It downloads notebooks from reMarkable Cloud (or via USB SSH), renders pages to images, performs OCR via Google Cloud Vision, cleans the text with an LLM, and publishes structured notes to configured destinations.
+
+- **Language**: Python 3.10+
+- **Package Manager**: [uv](https://docs.astral.sh/uv/) (not pip)
+- **Build System**: Hatchling
+- **Linter/Formatter**: Ruff
+- **License**: MIT
+
+## Repository Structure
+
+```
+living-ink/
+├── remarkable_mcp/              # Core Python package
+│   ├── __init__.py              # Package init, version
+│   ├── api.py                   # reMarkable Cloud/SSH API client factory
+│   ├── sync.py                  # Cloud sync protocol (v3/v4) implementation
+│   ├── ssh.py                   # Direct USB SSH transport to tablet
+│   ├── extract.py               # .rm binary → SVG → PNG rendering
+│   ├── clean.py                 # LLM-based OCR text cleanup (⚠️ OpenAI-hardcoded)
+│   ├── destinations.py          # Pluggable publish targets (Apple Notes, Obsidian)
+│   └── openai_cleanup_prompt.txt # System prompt for text repair
+├── scripts/
+│   ├── process_notebook.py      # Main pipeline orchestrator (entry point)
+│   ├── set_env.sh               # Environment variable helper
+│   └── white_background.py      # Standalone image background tool
+├── docs/                        # User and developer documentation
+│   ├── SETUP_GUIDE.md           # API key / credential setup
+│   ├── USER_MANUAL.md           # End-user usage guide
+│   ├── REFACTOR_PLAN.md         # Architecture refactoring roadmap
+│   ├── PARKING_LOT.md           # Known bugs and open questions
+│   ├── future-plans.md          # Upstream feature ideas
+│   ├── execution_plan_folder_mapping.md
+│   ├── development.md           # Dev environment setup
+│   └── ...                      # Additional reference docs
+├── packaging/                   # macOS .pkg installer resources
+├── config.yml.example           # Configuration template
+├── pyproject.toml               # Python project metadata & deps
+├── run_sync.sh                  # Shell wrapper for manual sync
+├── build_binary.sh              # PyInstaller binary build
+├── build_installer.sh           # macOS installer builder
+└── server.json                  # MCP server manifest (legacy)
+```
+
+## Architecture
+
+### Pipeline Flow
+
+```
+reMarkable Tablet
+    ↓ (Cloud API or USB SSH)
+Download .rm notebook zip
+    ↓
+Render pages: .rm → SVG → PNG (white background)
+    ↓
+OCR: Google Cloud Vision (DOCUMENT_TEXT_DETECTION)
+    ↓
+Text Cleanup: LLM (currently OpenAI-only)
+    ↓
+Publish: Destination.publish()
+    ├── AppleNotesDestination (via osascript/AppleScript)
+    └── ObsidianDestination (Markdown + YAML frontmatter + WikiLinks)
+```
+
+### Key Design Patterns
+
+- **Destination ABC**: `remarkable_mcp/destinations.py` defines `Destination` base class. New targets subclass it and implement `publish()`.
+- **Config Loading**: YAML-first (`config/config.yml`), with env var overrides, and legacy `config.py`/`.env` fallback. Config values are pushed into `os.environ` at startup.
+- **State Tracking**: Per-destination JSON files (`processed_notebooks_{DestName}.json`) track notebook hash/version to avoid reprocessing.
+- **Folder Mirroring**: Traverses parent UUID chain from reMarkable metadata, but currently **flattens to top-level only** (e.g., `Work/Projects/Q1` → just `Work`).
+
+## Key Configuration
+
+| Source | Key | Description |
+|--------|-----|-------------|
+| `config.yml` | `openai.api_key` | LLM API key for text cleanup |
+| `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token |
+| `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
+| `config.yml` | `obsidian.enabled` / `obsidian.vault_path` | Obsidian destination toggle |
+| `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination toggle |
+| env var | `OPENAI_REPAIR_MODEL` | Model name (default: `gpt-4o-mini`) |
+| env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
+| env var | `REMARKABLE_USE_SSH` | Use USB SSH instead of Cloud |
+
+## Development Commands
+
+```bash
+# Install dependencies
+uv sync --all-extras
+
+# Run the sync pipeline
+uv run python scripts/process_notebook.py
+
+# Lint
+uv run ruff check .
+
+# Format
+uv run ruff format .
+
+# Tests
+uv run pytest -v
+```
+
+## Known Issues & Tech Debt
+
+1. **OpenAI Lock-in**: `clean.py` hardcodes the OpenAI HTTP endpoint and payload format. No provider abstraction exists.
+2. **Folder Flattening**: Only top-level reMarkable folder is mirrored. Deep hierarchy is lost.
+3. **Obsidian Append Bug**: Updating an existing Obsidian note overwrites instead of appending (documented in `PARKING_LOT.md`).
+4. **No Tests for Pipeline**: Test infrastructure exists but no actual test files for the sync/destination logic.
+5. **Naming**: Package is still called `remarkable-mcp` in `pyproject.toml` despite being renamed to Living Ink.
+
+## Conventions
+
+- Always use `uv` for package management, never raw `pip`.
+- Run `uv run ruff check . && uv run ruff format --check .` before committing.
+- Feature branches: `feat/<description>`, bug fixes: `fix/<description>`.
+- Preserve existing comments and docstrings in code you don't modify.
+- Configuration should support both YAML (`config.yml`) and environment variables.
+- New destinations must subclass `Destination` ABC in `destinations.py`.
