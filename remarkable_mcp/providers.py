@@ -1,23 +1,21 @@
-"""
-AI text repair providers for OCR cleanup.
+"""AI text repair providers for OCR cleanup.
 
 Architecture:
-- UniversalChatProvider: Works with ANY OpenAI-compatible API endpoint.
-- NoneProvider: No-op, returns raw text unchanged.
-- get_provider(config): Factory that reads config and returns the right provider.
+    - ``UniversalChatProvider``: Works with ANY OpenAI-compatible API endpoint.
+    - ``NoneProvider``: No-op, returns raw text unchanged.
+    - ``get_provider``: Factory that reads config and returns the right provider.
 
 No provider-specific code. No external SDKs required.
 Just standard HTTP to a configurable endpoint.
 
 Supported providers (via presets):
     openai, gemini, ollama, groq, openrouter, mistral, together
-    + any custom OpenAI-compatible endpoint via provider: "custom"
+    + any custom OpenAI-compatible endpoint via ``provider: "custom"``
 
-Usage:
-    from remarkable_mcp.providers import get_provider
-
-    provider = get_provider(yaml_config)
-    cleaned = provider.repair_text("messy OCR text", "instructions...")
+Example:
+    >>> from remarkable_mcp.providers import get_provider
+    >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "..."}})
+    >>> cleaned = provider.repair_text("messy OCR text", "Clean this text.")
 """
 
 import abc
@@ -86,19 +84,25 @@ PROVIDER_PRESETS = {
 
 
 class TextRepairProvider(abc.ABC):
-    """Base class for AI text cleanup providers."""
+    """Abstract base class for AI text cleanup providers.
+
+    All providers must implement ``repair_text()`` and the ``name`` property.
+    Subclass this to add new provider types beyond the built-in
+    ``UniversalChatProvider`` and ``NoneProvider``.
+    """
 
     @abc.abstractmethod
     def repair_text(self, raw_text: str, instructions: str) -> str:
-        """
-        Clean up OCR text using AI.
+        """Clean up OCR text using AI.
 
         Args:
             raw_text: The raw OCR output to clean.
-            instructions: Prompt instructions for the AI (from cleanup_prompt.txt).
+            instructions: Prompt instructions for the AI
+                (loaded from cleanup_prompt.txt).
 
         Returns:
-            Cleaned text, or the original raw_text if cleanup fails or is disabled.
+            Cleaned text, or the original ``raw_text`` if cleanup
+            fails or is disabled.
         """
 
     @property
@@ -113,13 +117,27 @@ class TextRepairProvider(abc.ABC):
 
 
 class NoneProvider(TextRepairProvider):
-    """Returns raw OCR text unchanged. No external API calls made."""
+    """No-op provider that returns raw OCR text unchanged.
+
+    Use when AI text cleanup is disabled (``provider: "none"`` in config).
+    Makes no external API calls.
+    """
 
     def repair_text(self, raw_text: str, instructions: str) -> str:
+        """Return raw text unchanged.
+
+        Args:
+            raw_text: The raw OCR output.
+            instructions: Ignored by this provider.
+
+        Returns:
+            The original ``raw_text``, unmodified.
+        """
         return raw_text
 
     @property
     def name(self) -> str:
+        """Return the provider display name."""
         return "None (no AI cleanup)"
 
 
@@ -135,12 +153,22 @@ SYSTEM_MESSAGE = (
 
 
 class UniversalChatProvider(TextRepairProvider):
-    """
-    Works with ANY OpenAI-compatible chat completions API.
+    """Provider that works with any OpenAI-compatible chat completions API.
+
+    Sends standard chat completion requests via HTTP using stdlib ``urllib``.
+    No external SDK dependencies required.
 
     Tested with: OpenAI, Google Gemini, Ollama, Groq, OpenRouter,
     Mistral, Together, LM Studio, vLLM, and any future provider
     that supports the standard chat completions format.
+
+    Attributes:
+        base_url: The API base URL (without trailing slash).
+        api_key: API key for authentication.
+        model: Model identifier string.
+        temperature: Sampling temperature (0.0–2.0).
+        auth_header: HTTP header name for auth (e.g., "Authorization").
+        auth_prefix: Prefix before the key (e.g., "Bearer").
     """
 
     def __init__(
@@ -153,6 +181,23 @@ class UniversalChatProvider(TextRepairProvider):
         auth_prefix: Optional[str] = "Bearer",
         provider_label: str = "custom",
     ):
+        """Initialize the provider with endpoint and auth configuration.
+
+        Args:
+            base_url: The API base URL (e.g., "https://api.openai.com/v1").
+                Trailing slashes are stripped automatically.
+            api_key: API key for authentication. Empty string for local
+                providers like Ollama that don't require auth.
+            model: Model identifier (e.g., "gpt-4o-mini", "gemini-2.0-flash").
+            temperature: Sampling temperature. Lower values produce more
+                deterministic output. Defaults to 0.3.
+            auth_header: HTTP header name for the API key. Set to ``None``
+                to skip auth entirely. Defaults to "Authorization".
+            auth_prefix: Prefix before the API key in the auth header.
+                Set to ``None`` for raw key headers. Defaults to "Bearer".
+            provider_label: Human-readable label for logging.
+                Defaults to "custom".
+        """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -163,17 +208,31 @@ class UniversalChatProvider(TextRepairProvider):
 
     @property
     def name(self) -> str:
+        """Return the provider display name including model."""
         return f"{self._provider_label} ({self.model})"
 
     def _build_url(self) -> str:
-        """Build the chat completions endpoint URL."""
+        """Build the chat completions endpoint URL.
+
+        Returns:
+            Full URL to the chat completions endpoint.
+        """
         return f"{self.base_url}/chat/completions"
 
     def _chat(self, prompt: str) -> str:
-        """
-        Send a chat completion request to the configured endpoint.
+        """Send a chat completion request to the configured endpoint.
 
-        Uses stdlib urllib — no external HTTP libraries required.
+        Constructs an OpenAI-compatible JSON payload with system and user
+        messages, sends it via HTTP POST, and extracts the response content.
+
+        Uses stdlib ``urllib`` — no external HTTP libraries required.
+
+        Args:
+            prompt: The user message content to send.
+
+        Returns:
+            The assistant's response content string, or empty string
+            on any error.
         """
         url = self._build_url()
         payload = {
@@ -189,10 +248,14 @@ class UniversalChatProvider(TextRepairProvider):
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
 
-        # Add auth header if configured (some local providers like Ollama don't need it)
+        # Add auth header if configured (some local providers
+        # like Ollama don't need it)
         if self.auth_header and self.api_key:
             if self.auth_prefix:
-                req.add_header(self.auth_header, f"{self.auth_prefix} {self.api_key}")
+                req.add_header(
+                    self.auth_header,
+                    f"{self.auth_prefix} {self.api_key}",
+                )
             else:
                 req.add_header(self.auth_header, self.api_key)
 
@@ -202,21 +265,48 @@ class UniversalChatProvider(TextRepairProvider):
                 j = json.loads(body)
                 return j["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
-            logger.error(f"AI API HTTP Error ({self.name}): {e.code} {e.reason}")
+            logger.error(
+                "AI API HTTP Error (%s): %s %s",
+                self.name,
+                e.code,
+                e.reason,
+            )
             try:
                 err_body = e.read().decode("utf-8")
-                logger.error(f"Details: {err_body}")
+                logger.error("Details: %s", err_body)
             except Exception:
                 pass
             return ""
         except urllib.error.URLError as e:
-            logger.error(f"AI API Connection Error ({self.name}): {e.reason}")
+            logger.error(
+                "AI API Connection Error (%s): %s",
+                self.name,
+                e.reason,
+            )
             return ""
         except Exception as e:
-            logger.error(f"AI API Unexpected Error ({self.name}): {e}")
+            logger.error(
+                "AI API Unexpected Error (%s): %s",
+                self.name,
+                e,
+            )
             return ""
 
     def repair_text(self, raw_text: str, instructions: str) -> str:
+        """Clean up OCR text by sending it to the configured AI API.
+
+        Combines the prompt instructions with the raw text and sends
+        a chat completion request. Falls back to the original text
+        if the API call fails or returns empty.
+
+        Args:
+            raw_text: The raw OCR output to clean.
+            instructions: Prompt instructions prepended to the text.
+
+        Returns:
+            Cleaned text from the AI, or the original ``raw_text``
+            if the API call fails.
+        """
         if not raw_text or not raw_text.strip():
             return raw_text
 
@@ -224,7 +314,10 @@ class UniversalChatProvider(TextRepairProvider):
         result = self._chat(prompt)
 
         if not result:
-            logger.warning(f"AI cleanup returned empty result ({self.name}). Using raw text.")
+            logger.warning(
+                "AI cleanup returned empty result (%s). Using raw text.",
+                self.name,
+            )
             return raw_text
 
         return result.strip()
@@ -236,25 +329,44 @@ class UniversalChatProvider(TextRepairProvider):
 
 
 def get_provider(config: dict) -> TextRepairProvider:
-    """
-    Factory: reads the YAML config dict and returns the appropriate provider.
+    """Create a text repair provider from a YAML config dictionary.
 
-    Supports:
-        - ai.provider: "openai" | "gemini" | "ollama" | ... (named presets)
-        - ai.provider: "custom" (user supplies base_url)
-        - ai.provider: "none" (no AI cleanup)
-        - Legacy: openai.api_key (backward compatible, maps to provider: "openai")
+    Factory function that reads the ``ai`` section of the config and
+    returns the appropriate provider instance. Supports named presets,
+    custom endpoints, and backward-compatible legacy ``openai`` config.
 
     Args:
-        config: The parsed YAML config dictionary.
+        config: The parsed YAML configuration dictionary. Expected
+            structure::
+
+                {
+                    "ai": {
+                        "provider": "gemini",
+                        "api_key": "...",
+                        "model": "gemini-2.0-flash",  # optional
+                    }
+                }
 
     Returns:
-        A configured TextRepairProvider instance.
+        A configured ``TextRepairProvider`` instance.
+
+    Raises:
+        ValueError: If the provider name is unknown or if ``custom``
+            provider is missing ``base_url``.
+
+    Examples:
+        >>> provider = get_provider({"ai": {"provider": "none"}})
+        >>> isinstance(provider, NoneProvider)
+        True
+
+        >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
+        >>> provider.model
+        'gemini-2.0-flash'
     """
     ai_config = config.get("ai", {})
     provider_name = str(ai_config.get("provider", "")).strip().lower()
 
-    # ── Backward compatibility: legacy 'openai' section without 'ai' section ──
+    # ── Backward compat: legacy 'openai' section without 'ai' ──
     if not provider_name and "openai" in config:
         openai_cfg = config["openai"]
         api_key = str(openai_cfg.get("api_key", "")).strip()
@@ -304,11 +416,12 @@ def get_provider(config: dict) -> TextRepairProvider:
     api_key = str(ai_config.get("api_key", "")).strip()
     model = str(ai_config.get("model", "")).strip() or preset["default_model"]
 
-    # Validate API key for cloud providers (not needed for local like Ollama)
+    # Warn for cloud providers missing API key (not local like Ollama)
     if preset.get("auth_header") and not api_key:
         logger.warning(
-            f"AI provider '{provider_name}' requires an API key but none was provided. "
-            "Text cleanup will likely fail."
+            "AI provider '%s' requires an API key but none was "
+            "provided. Text cleanup will likely fail.",
+            provider_name,
         )
 
     return UniversalChatProvider(
