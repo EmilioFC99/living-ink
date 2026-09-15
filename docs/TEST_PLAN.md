@@ -11,10 +11,10 @@ Before running tests, ensure you have the correct dependencies and a valid confi
 uv sync
 
 # Create a config file from the example
-cp config.yml.example config.yml
+cp config/config.yml.example config/config.yml
 ```
 
-Edit `config.yml` with your API keys:
+Edit `config/config.yml` with your API keys:
 *   `remarkable.device_token`
 *   `openai.api_key`
 *   `google_vision` credentials

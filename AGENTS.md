@@ -41,7 +41,9 @@ living-ink/
 │   ├── execution_plan_folder_mapping.md
 │   ├── development.md           # Dev environment setup
 │   └── ...                      # Additional reference docs
-├── config.yml.example           # Configuration template
+├── config/
+│   └── config.yml.example       # Configuration template
+├── data/                        # Runtime & personal data (logs, images, PDFs, state cache)
 ├── pyproject.toml               # Python project metadata & deps
 ├── install.sh                   # One-line curl installer
 ├── Dockerfile                   # Multi-stage production container image

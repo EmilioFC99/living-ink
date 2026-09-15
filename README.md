@@ -59,7 +59,7 @@ If you prefer to install manually:
     uv run living-ink setup
     ```
 
-    *(Or manually copy `config.yml.example` to `config/config.yml` and edit it).*
+    *(Or manually copy `config/config.yml.example` to `config/config.yml` and edit it).*
     ```yaml
     # 1. AI Provider (e.g. Google Gemini, OpenAI, Ollama, etc.)
     ai:
@@ -88,7 +88,7 @@ If you prefer to install manually:
       mirror_folders: true             # Replicate reMarkable folder tree
       attachments_folder: "attachments"
     ```
-    *(See `config.yml.example` for all options and presets)*
+    *(See `config/config.yml.example` for all options and presets)*
 
 3.  **Run the Pipeline**:
     ```bash
