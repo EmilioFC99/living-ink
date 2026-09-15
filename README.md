@@ -25,7 +25,27 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
 *   **[User Manual](docs/USER_MANUAL.md)**: How to use the application in Automatic or Manual modes.
 *   **[AGENTS.md](AGENTS.md)**: Architecture and contributor guide for AI coding assistants.
 
-## 🛠️ Installation & Config
+## ⚡ Quick Install (Recommended)
+
+Paste this single command into your Terminal to install everything and launch the setup wizard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/EmilioFC99/living-ink/main/install.sh | bash
+```
+
+Once installed, you can use the global `living-ink` command from anywhere:
+```bash
+living-ink           # Sync notes (or runs setup if unconfigured)
+living-ink sync      # Run the sync pipeline
+living-ink setup     # Re-run interactive setup wizard
+living-ink status    # Check tablet, AI, and vault status
+```
+
+---
+
+## 🛠️ Manual Installation
+
+If you prefer to install manually:
 
 1.  **Clone and Install Dependencies**:
     ```bash
@@ -34,13 +54,12 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
     uv sync --all-extras
     ```
 
-2.  **Run the Interactive Setup Wizard (Recommended)**:
+2.  **Run the Interactive Setup Wizard**:
     ```bash
-    uv run python scripts/setup.py
+    uv run living-ink setup
     ```
-    The wizard will automatically pair your tablet, verify your AI key live, detect your Obsidian vaults, and choose your destination folders!
 
-    *(Alternatively, you can manually copy `config.yml.example` to `config/config.yml` and edit it).*
+    *(Or manually copy `config.yml.example` to `config/config.yml` and edit it).*
     ```yaml
     # 1. AI Provider (e.g. Google Gemini, OpenAI, Ollama, etc.)
     ai:

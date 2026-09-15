@@ -48,6 +48,9 @@ ocr = [
     "google-cloud-vision>=3.0.0",
 ]
 
+[project.scripts]
+living-ink = "remarkable_mcp.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
