@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
+import os
 import sys
 from pathlib import Path
 
 from PIL import Image
 
-IN = Path("remarkable_pngs")
-OUT = Path("remarkable_pngs_white")
-OUT.mkdir(exist_ok=True)
+DATA_DIR = Path(os.environ.get("LIVING_INK_DATA_DIR", "data"))
+IN = DATA_DIR / "remarkable_pngs"
+OUT = DATA_DIR / "remarkable_pngs_white"
+OUT.mkdir(parents=True, exist_ok=True)
 
 if not IN.exists():
     print("Input directory not found:", IN)

@@ -78,15 +78,14 @@ BLOG_DRAFT.md
 .env
 secrets/
 
-# Living Ink Runtime & Output
+# Living Ink Runtime & User Data
+data/
 logs/
 output/
 remarkable_pngs_white/
 remarkable_pngs_for_vision/
 remarkable_pdfs/
-processed_notebooks.json
-processed_notebooks_AppleNotesDestination.json
-processed_notebooks_ObsidianDestination.json
+processed_notebooks*.json
 
 # Configuration (Secrets)
 config.yml

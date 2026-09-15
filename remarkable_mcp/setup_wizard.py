@@ -305,11 +305,15 @@ def install_launch_agent(
         repo_dir = Path(__file__).parent.parent.resolve()
 
     uv_path = find_uv_path()
-    script_path = repo_dir / "scripts" / "process_notebook.py"
-    logs_dir = repo_dir / "logs"
+    data_env = os.environ.get("LIVING_INK_DATA_DIR")
+    if data_env:
+        logs_dir = Path(data_env) / "logs"
+    else:
+        logs_dir = repo_dir / "data" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     out_log = logs_dir / "launchagent.log"
     err_log = logs_dir / "launchagent.error.log"
+    script_path = repo_dir / "scripts" / "process_notebook.py"
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

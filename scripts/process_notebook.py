@@ -43,18 +43,28 @@ for logger_name in ["rmscene", "rmc", "rmscene.text"]:
     logging.getLogger(logger_name).addFilter(WarningFilter())
 
 ROOT = Path(".").resolve()
-WHITE_DIR = ROOT / "remarkable_pngs_white"
-VISION_DIR = ROOT / "remarkable_pngs_for_vision"
-OCR_DIR = ROOT / "output"  # Changed from remarkable_ocr to output
-PDF_DIR = ROOT / "remarkable_pdfs"
-PROCESSED_LOG = ROOT / "processed_notebooks.json"
-LOGS_DIR = ROOT / "logs"
-LOGS_DIR.mkdir(exist_ok=True)
+
+# All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under DATA_DIR
+data_dir_env = os.environ.get("LIVING_INK_DATA_DIR")
+if data_dir_env:
+    DATA_DIR = Path(data_dir_env).resolve()
+else:
+    DATA_DIR = (ROOT / "data").resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+WHITE_DIR = DATA_DIR / "remarkable_pngs_white"
+VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
+OCR_DIR = DATA_DIR / "output"  # OCR text files
+PDF_DIR = DATA_DIR / "remarkable_pdfs"
+PROCESSED_LOG = DATA_DIR / "processed_notebooks.json"
+LOGS_DIR = DATA_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOGS_DIR / "pipeline.log"
 
-VISION_DIR.mkdir(exist_ok=True)
-OCR_DIR.mkdir(exist_ok=True)
-PDF_DIR.mkdir(exist_ok=True)
+WHITE_DIR.mkdir(parents=True, exist_ok=True)
+VISION_DIR.mkdir(parents=True, exist_ok=True)
+OCR_DIR.mkdir(parents=True, exist_ok=True)
+PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --- NEW CONFIGURATION LOADING (YAML) ---
@@ -244,14 +254,15 @@ if CONFIG_PATH.exists():
 
 def get_state_file_path(dest_name: str) -> Path:
     """Get the path to the state file for a specific destination."""
-    data_dir_env = os.environ.get("LIVING_INK_DATA_DIR")
-    if data_dir_env:
-        d = Path(data_dir_env)
-        d.mkdir(parents=True, exist_ok=True)
-        return d / f"processed_notebooks_{dest_name}.json"
-    if (ROOT / "data").is_dir():
-        return ROOT / "data" / f"processed_notebooks_{dest_name}.json"
-    return ROOT / f"processed_notebooks_{dest_name}.json"
+    new_path = DATA_DIR / f"processed_notebooks_{dest_name}.json"
+    legacy_path = ROOT / f"processed_notebooks_{dest_name}.json"
+    # Automatically migrate legacy state file from root to data directory if present
+    if not new_path.exists() and legacy_path.exists() and new_path != legacy_path:
+        try:
+            legacy_path.rename(new_path)
+        except Exception:
+            return legacy_path
+    return new_path
 
 
 def load_processed_log(dest_name: str):
@@ -761,7 +772,7 @@ def main():
                 render_page_from_document_zip,
             )
 
-            tmp_zip = ROOT / f"{safe_notebook}.zip"
+            tmp_zip = DATA_DIR / f"{safe_notebook}.zip"
             raw_bytes = client.download(doc)
             if not raw_bytes:
                 log(f"Failed to download notebook zip for {notebook} from cloud.")
