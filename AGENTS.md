@@ -106,18 +106,24 @@ uv run ruff format .
 uv run pytest -v
 ```
 
+## Recent Architecture Improvements
+
+1. **Multi-Provider AI**: `remarkable_mcp/providers.py` provides universal OpenAI-compatible chat completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
+2. **Full Folder Hierarchy Mirroring**: `remarkable_mcp/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
+3. **Comprehensive Test Suite**: `tests/` contains 134 unit tests covering providers, clean, and destination logic.
+4. **Google Docstrings**: All core modules follow Google docstring conventions.
+
 ## Known Issues & Tech Debt
 
-1. **OpenAI Lock-in**: `clean.py` hardcodes the OpenAI HTTP endpoint and payload format. No provider abstraction exists.
-2. **Folder Flattening**: Only top-level reMarkable folder is mirrored. Deep hierarchy is lost.
-3. **Obsidian Append Bug**: Updating an existing Obsidian note overwrites instead of appending (documented in `PARKING_LOT.md`).
-4. **No Tests for Pipeline**: Test infrastructure exists but no actual test files for the sync/destination logic.
-5. **Naming**: Package is still called `remarkable-mcp` in `pyproject.toml` despite being renamed to Living Ink.
+1. **Naming**: Package is still called `remarkable-mcp` in `pyproject.toml` despite being renamed to Living Ink.
+2. **PyInstaller Binary**: Need to ensure binary builds include all new data files (`cleanup_prompt.txt`).
 
 ## Conventions
 
 - Always use `uv` for package management, never raw `pip`.
 - Run `uv run ruff check . && uv run ruff format --check .` before committing.
+- Run `uv run pytest -v` before committing.
+- Follow Google docstrings format for all functions, classes, and modules.
 - Feature branches: `feat/<description>`, bug fixes: `fix/<description>`.
 - Preserve existing comments and docstrings in code you don't modify.
 - Configuration should support both YAML (`config.yml`) and environment variables.

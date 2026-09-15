@@ -1,92 +1,137 @@
 # Setup Guide for Living Ink
 
-This guide explains how to configure the necessary API keys and credentials for the Living Ink application (syncing reMarkable notes to Apple Notes).
+This guide explains how to configure the necessary API keys and credentials for the Living Ink application (syncing reMarkable notes to Apple Notes and/or Obsidian).
 
-## 1. OpenAI API Key (Required for Cleanup)
+---
 
-The application uses OpenAI's GPT-4o to clean up and format the handwritten text converted by OCR.
+## 1. AI Text Cleanup Provider (Required for Text Polish)
 
-1.  **Sign Up/Login**: Go to [platform.openai.com](https://platform.openai.com) and sign in.
-2.  **Create Key**:
-    *   Navigate to **Dashboard** -> **API keys**.
-    *   Click **+ Create new secret key**.
-    *   Name it something like "Remarkable Sync".
-    *   **Copy the key immediately**. You will not be able to see it again.
-3.  **Configuration**:
-    *   Open the `config/config.yml` file.
-    *   Find the `openai:` section.
-    *   Paste your key into the `api_key` field: `api_key: "sk-proj-..."`
+The application uses an AI model to clean up OCR misinterpretations, correct typos, and format notes into readable paragraphs. You can use **Google Gemini**, **OpenAI**, local **Ollama**, or other OpenAI-compatible providers.
 
-## 2. Google Cloud Vision API (Required for OCR)
+### Option A: Google Gemini (Recommended — Free & Fast)
 
-We use Google's enterprise-grade Vision API for handwriting recognition because it is significantly more accurate than on-device models.
+1. **Get Free API Key**:
+   * Visit [Google AI Studio](https://aistudio.google.com/apikey).
+   * Sign in with your Google account.
+   * Click **Create API key** (or **Get API key**).
+   * Copy the generated key (starts with `AIzaSy...`).
+2. **Configure**:
+   * In `config/config.yml`:
+     ```yaml
+     ai:
+       provider: "gemini"
+       api_key: "AIzaSy..."
+       model: "gemini-2.0-flash"  # Default
+     ```
 
-1.  **Create Project**:
-    *   Go to the [Google Cloud Console](https://console.cloud.google.com/).
-    *   Click the project dropdown (top left) and select **New Project**.
-    *   Name it "Remarkable OCR" and create it.
-2.  **Enable API**:
-    *   In the search bar, type "Cloud Vision API".
-    *   Select "Cloud Vision API" from the marketplace results.
-    *   Click **Enable**.
-    *   *Note: You may need to enable billing. This API has a generous free tier (usually 1,000 units/month).*
-3.  **Create Service Account**:
-    *   Go to **IAM & Admin** -> **Service Accounts**.
-    *   Click **+ Create Service Account**.
-    *   Name: `remarkable-ocr-sa`.
-    *   Description: "OCR for remarkable sync".
-    *   Click **Create and Continue**.
-    *   **Role**: Select **Basic** -> **Owner** (or **Cloud Vision API User** for least privilege).
-    *   Click **Done**.
-4.  **Download Key**:
-    *   Click on the newly created email address (e.g., `remarkable-ocr-sa@...`).
-    *   Go to the **Keys** tab.
-    *   Click **Add Key** -> **Create new key**.
-    *   Select **JSON**.
-    *   A `.json` file will download to your computer.
-5.  **Configuration**:
-    *   Open the downloaded JSON file in a text editor (like TextEdit or VS Code).
-    *   Copy the **entire content** of the file.
-    *   Open `config/config.yml`.
-    *   Find the `google_vision:` section and `credentials_json:` key.
-    *   Paste the JSON content as a **block string** (using the `|` character), ensuring proper indentation.
+### Option B: OpenAI
 
-    Example:
-    ```yaml
-    google_vision:
-      credentials_json: |
-        {
-          "type": "service_account",
-          ...
-        }
-    ```
+1. **Get API Key**:
+   * Go to [platform.openai.com](https://platform.openai.com) and sign in.
+   * Navigate to **Dashboard** -> **API keys**.
+   * Click **+ Create new secret key** and copy it immediately.
+2. **Configure**:
+   * In `config/config.yml`:
+     ```yaml
+     ai:
+       provider: "openai"
+       api_key: "sk-proj-..."
+       model: "gpt-4o-mini"       # Default
+     ```
 
-## 4. Advanced Configuration (Optional)
+### Option C: Ollama (100% Local — Free & Private)
 
-You can check `config/config.yml` for additional settings:
+1. Install [Ollama](https://ollama.com).
+2. Download a model: `ollama pull llama3.2`
+3. Configure:
+   ```yaml
+   ai:
+     provider: "ollama"
+     # No API key needed!
+   ```
 
-*   **`sync.max_notebooks_per_run`**: Limits the number of notebooks processed in a single hour to avoid hitting API rate limits (Default: 5).
-*   **`apple_notes.folder_name`**: The folder name in Apple Notes where your synced notes will appear (Default: "Living Ink").
+### Option D: None (Raw OCR Only)
 
-## 3. reMarkable Connection
+To bypass AI cleanup entirely and keep raw Google Vision OCR text:
+```yaml
+ai:
+  provider: "none"
+```
 
-The application needs to download your notebooks. It uses the `rmapi` or `remarkable-mcp` connection.
+---
 
-1.  **Get One-Time Code**:
-    *   Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/device/desktop/connect).
-    *   Log in and click **Connect a new device** -> **Desktop**.
-    *   Copy the 8-letter code.
-2.  **Register**:
-    *   Run the command: `uv run python server.py --register <your-code>`
-    *   Or if installed as a standalone app, run the registration utility provided.
+## 2. Google Cloud Vision API (Required for Handwriting OCR)
 
-## 4. Final Configuration Structure
+We use Google's Cloud Vision API for handwriting recognition because it is significantly more accurate for handwritten notes than on-device models.
 
-Your application folder (often in `~/Library/Application Support/RemarkableSync` or your project root) should look like this:
+1. **Create Project**:
+   * Go to the [Google Cloud Console](https://console.cloud.google.com/).
+   * Click the project dropdown (top left) and select **New Project**.
+   * Name it "Remarkable OCR" and create it.
+2. **Enable API**:
+   * In the search bar, type "Cloud Vision API".
+   * Select **Cloud Vision API** from the marketplace results.
+   * Click **Enable**.
+   * *Note: Google Cloud includes a free tier of 1,000 units/month.*
+3. **Create Service Account**:
+   * Go to **IAM & Admin** -> **Service Accounts**.
+   * Click **+ Create Service Account**.
+   * Name: `remarkable-ocr-sa`.
+   * Description: "OCR for remarkable sync".
+   * Click **Create and Continue**.
+   * **Role**: Select **Cloud Vision API User** (or **Basic** -> **Viewer**).
+   * Click **Done**.
+4. **Download Key**:
+   * Click on the newly created service account email.
+   * Go to the **Keys** tab.
+   * Click **Add Key** -> **Create new key**.
+   * Select **JSON**.
+   * A `.json` file will download to your computer.
+5. **Configuration**:
+   * In `config/config.yml`, set `credentials_path` to the absolute path of your downloaded JSON file:
+     ```yaml
+     google_vision:
+       credentials_path: "/Users/yourname/path/to/my-credentials.json"
+     ```
 
-```text
-config/
-  .env               (Contains OPENAI_API_KEY=...)
-  secrets/
-     my-google-project-key.json
+---
+
+## 3. reMarkable Tablet Connection
+
+The application downloads your notebooks from the official reMarkable cloud.
+
+1. **Get One-Time Code**:
+   * Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/device/desktop/connect).
+   * Log in and click **Connect a new device** -> **Desktop**.
+   * Copy the 8-letter pairing code.
+2. **Generate Device Token**:
+   * Run the command:
+     ```bash
+     uv run python -c "from remarkable_mcp.api import register_and_get_token; print(register_and_get_token('<YOUR-8-LETTER-CODE>'))"
+     ```
+   * Or if you previously used `rmapi`, your token in `~/.rmapi` will be detected automatically.
+3. **Configure**:
+   * Paste the token in `config/config.yml` under `remarkable.device_token`.
+
+---
+
+## 4. Destinations Configuration
+
+You can enable Apple Notes, Obsidian, or both at the same time:
+
+### Apple Notes
+```yaml
+apple_notes:
+  enabled: true
+  folder_name: "Living Ink"  # Top-level folder created in Apple Notes
+```
+
+### Obsidian
+```yaml
+obsidian:
+  enabled: true
+  vault_path: "/Users/yourname/Documents/Obsidian Vault"
+  root_folder: "Living Ink"  # Folder inside vault (leave empty for vault root)
+  mirror_folders: true       # Replicates full reMarkable folder tree
+  attachments_folder: "attachments"
 ```
