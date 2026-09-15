@@ -8,6 +8,7 @@ Commands:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +24,19 @@ def get_root() -> Path:
     if (cwd / "config" / "config.yml").exists() or (cwd / "config.yml").exists():
         return cwd
     return pkg_dir
+
+
+def get_config_path(root: Path) -> Path:
+    """Find the config.yml file, checking LIVING_INK_CONFIG_DIR first."""
+    env_dir = os.environ.get("LIVING_INK_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir) / "config.yml"
+    cfg = root / "config" / "config.yml"
+    if cfg.exists():
+        return cfg
+    if (root / "config.yml").exists():
+        return root / "config.yml"
+    return cfg
 
 
 def cmd_setup(args, root: Path):
@@ -73,9 +87,7 @@ def cmd_status(args, root: Path):
     print()
 
     # 1. Config file
-    config_file = root / "config" / "config.yml"
-    if not config_file.exists():
-        config_file = root / "config.yml"
+    config_file = get_config_path(root)
 
     if not config_file.exists():
         print(f"Configuration: {red('Not found')}")
@@ -181,9 +193,7 @@ def main():
 
     if args.command is None:
         # Default behavior: if config exists, sync; otherwise setup
-        config_file = root / "config" / "config.yml"
-        if not config_file.exists():
-            config_file = root / "config.yml"
+        config_file = get_config_path(root)
 
         if config_file.exists():
             cmd_sync(args, root)

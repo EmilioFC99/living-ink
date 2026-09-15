@@ -474,7 +474,11 @@ def run_wizard(
     if repo_dir is None:
         repo_dir = Path(__file__).parent.parent.resolve()
 
-    config_dir = repo_dir / "config"
+    env_config_dir = os.environ.get("LIVING_INK_CONFIG_DIR")
+    if env_config_dir:
+        config_dir = Path(env_config_dir)
+    else:
+        config_dir = repo_dir / "config"
     config_file = config_dir / "config.yml"
 
     print_func()
@@ -771,7 +775,12 @@ def run_wizard(
         proc_script = repo_dir / "scripts" / "process_notebook.py"
         uv_cmd = find_uv_path()
         try:
-            subprocess.run([uv_cmd, "run", "python", str(proc_script)], check=False)
+            if shutil.which("living-ink"):
+                subprocess.run(["living-ink", "sync"], check=False)
+            elif shutil.which(uv_cmd):
+                subprocess.run([uv_cmd, "run", "python", str(proc_script)], check=False)
+            else:
+                subprocess.run([sys.executable, str(proc_script)], check=False)
         except Exception as e:
             print_func(red(f"Error running sync: {e}"))
 

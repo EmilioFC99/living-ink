@@ -59,9 +59,13 @@ PDF_DIR.mkdir(exist_ok=True)
 
 # --- NEW CONFIGURATION LOADING (YAML) ---
 
-# Try loading from config/config.yml (standard location) or root config.yml
-YAML_CONFIG_PATH = ROOT / "config" / "config.yml"
-if not YAML_CONFIG_PATH.exists():
+# Try loading from LIVING_INK_CONFIG_DIR, config/config.yml (standard location) or root config.yml
+config_dir_env = os.environ.get("LIVING_INK_CONFIG_DIR")
+if config_dir_env:
+    YAML_CONFIG_PATH = Path(config_dir_env) / "config.yml"
+elif (ROOT / "config" / "config.yml").exists():
+    YAML_CONFIG_PATH = ROOT / "config" / "config.yml"
+else:
     YAML_CONFIG_PATH = ROOT / "config.yml"
 
 if YAML_CONFIG_PATH.exists():
@@ -240,6 +244,13 @@ if CONFIG_PATH.exists():
 
 def get_state_file_path(dest_name: str) -> Path:
     """Get the path to the state file for a specific destination."""
+    data_dir_env = os.environ.get("LIVING_INK_DATA_DIR")
+    if data_dir_env:
+        d = Path(data_dir_env)
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"processed_notebooks_{dest_name}.json"
+    if (ROOT / "data").is_dir():
+        return ROOT / "data" / f"processed_notebooks_{dest_name}.json"
     return ROOT / f"processed_notebooks_{dest_name}.json"
 
 

@@ -5,7 +5,7 @@ Covers the CLI argument parsing and subcommands (status, setup, sync).
 
 from unittest.mock import MagicMock, patch
 
-from remarkable_mcp.cli import cmd_status, get_root, main
+from remarkable_mcp.cli import cmd_status, get_config_path, get_root, main
 
 
 def test_get_root(tmp_path):
@@ -14,6 +14,21 @@ def test_get_root(tmp_path):
     with patch("pathlib.Path.cwd", return_value=tmp_path):
         root = get_root()
         assert (root / "pyproject.toml").exists()
+
+
+def test_get_config_path(tmp_path, monkeypatch):
+    """get_config_path respects LIVING_INK_CONFIG_DIR and relative paths."""
+    # Default without env
+    monkeypatch.delenv("LIVING_INK_CONFIG_DIR", raising=False)
+    p = get_config_path(tmp_path)
+    assert p == tmp_path / "config" / "config.yml"
+
+    # With LIVING_INK_CONFIG_DIR
+    custom_dir = tmp_path / "custom_config"
+    custom_dir.mkdir()
+    monkeypatch.setenv("LIVING_INK_CONFIG_DIR", str(custom_dir))
+    p = get_config_path(tmp_path)
+    assert p == custom_dir / "config.yml"
 
 
 @patch("remarkable_mcp.cli.cmd_status")

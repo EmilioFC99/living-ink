@@ -1,0 +1,50 @@
+services:
+  living-ink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: living-ink:latest
+    container_name: living-ink
+    volumes:
+      # Persistent configuration (stores config.yml)
+      - ./config:/app/config
+      # Persistent cache & sync state (stores processed_notebooks_*.json)
+      - ./data:/app/data
+      # Obsidian vault destination on host
+      - ${OBSIDIAN_VAULT_PATH:-./vault}:/vault
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Optional environment variable overrides
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REMARKABLE_DEVICE_TOKEN=${REMARKABLE_DEVICE_TOKEN:-}
+    command: ["sync"]
+
+  # 24/7 background sync service (run with: docker compose --profile daemon up -d)
+  living-ink-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: living-ink:latest
+    container_name: living-ink-daemon
+    restart: unless-stopped
+    profiles:
+      - daemon
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ${OBSIDIAN_VAULT_PATH:-./vault}:/vault
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SYNC_INTERVAL=${SYNC_INTERVAL:-1800}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REMARKABLE_DEVICE_TOKEN=${REMARKABLE_DEVICE_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Starting Living Ink sync daemon (interval: $${SYNC_INTERVAL}s)..."
+        while true; do
+          living-ink sync || echo "Sync completed with warnings, will retry next cycle..."
+          sleep "$${SYNC_INTERVAL}"
+        done

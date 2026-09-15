@@ -10,7 +10,7 @@
 set -euo pipefail
 
 # Reconnect stdin to terminal if piped via curl ... | bash
-if [ ! -t 0 ] && [ -e /dev/tty ]; then
+if [ ! -t 0 ] && (exec < /dev/tty) 2>/dev/null; then
     exec < /dev/tty
 fi
 
@@ -58,6 +58,18 @@ if ! command -v git &> /dev/null; then
         echo -e "Please install Git (e.g. ${BOLD}sudo apt install git${RESET} or ${BOLD}sudo dnf install git${RESET})."
     fi
     exit 1
+fi
+
+# Check Cairo on Linux (required by cairosvg for rendering strokes)
+if [ "$OS" = "Linux" ]; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libcairo\.so\.2' && ! [ -f /usr/lib/libcairo.so.2 ] && ! [ -f /usr/lib64/libcairo.so.2 ] && ! ls /usr/lib/*-linux-gnu/libcairo.so.2 &>/dev/null; then
+        echo -e "${YELLOW}Notice: libcairo2 is recommended on Linux to render handwritten notebook strokes.${RESET}"
+        if command -v apt-get &>/dev/null; then
+            echo -e "${DIM}You can install it with: sudo apt update && sudo apt install -y libcairo2${RESET}"
+        elif command -v dnf &>/dev/null; then
+            echo -e "${DIM}You can install it with: sudo dnf install -y cairo${RESET}"
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------------------------

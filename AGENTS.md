@@ -27,6 +27,9 @@ living-ink/
 │   └── openai_cleanup_prompt.txt # System prompt for text repair
 ├── scripts/
 │   ├── process_notebook.py      # Main pipeline orchestrator (entry point)
+│   ├── cli.py                   # CLI wrapper entry point
+│   ├── setup.py                 # Setup wizard runner
+│   ├── test_docker.sh           # Automated Docker smoke test suite
 │   ├── set_env.sh               # Environment variable helper
 │   └── white_background.py      # Standalone image background tool
 ├── docs/                        # User and developer documentation
@@ -41,6 +44,9 @@ living-ink/
 ├── packaging/                   # macOS .pkg installer resources
 ├── config.yml.example           # Configuration template
 ├── pyproject.toml               # Python project metadata & deps
+├── install.sh                   # One-line curl installer
+├── Dockerfile                   # Multi-stage production container image
+├── docker-compose.yml           # Compose file (CLI & background daemon)
 ├── run_sync.sh                  # Shell wrapper for manual sync
 ├── build_binary.sh              # PyInstaller binary build
 ├── build_installer.sh           # macOS installer builder

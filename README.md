@@ -109,6 +109,31 @@ If you prefer to install manually:
 uv run pytest -v
 ```
 
+## 🐳 Docker & DevOps
+
+Living Ink includes a production-grade container image (non-root user, multi-stage `uv` build, Cairo runtime dependencies) and `docker-compose.yml` for headless servers, NAS, or containerized testing:
+
+### Quick CLI via Docker Compose
+```bash
+# Check status
+docker compose run --rm living-ink status
+
+# Run notebook sync
+docker compose run --rm living-ink sync
+```
+
+### 24/7 Background Sync Daemon
+```bash
+# Run continuous background sync (every 30 mins by default, configurable via SYNC_INTERVAL)
+docker compose --profile daemon up -d
+```
+
+### Run Clean Docker Smoke Tests
+```bash
+# Test build, CLI entrypoint, unconfigured status, and live sync against an ephemeral test vault
+./scripts/test_docker.sh
+```
+
 ## Acknowledgements
 
 Built on top of the generic [remarkable-mcp](https://github.com/SamMorrowDrums/remarkable-mcp) project.
