@@ -45,7 +45,7 @@ PROVIDER_PRESETS = {
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "default_model": "gemini-2.0-flash",
+        "default_model": "gemini-flash-latest",
         "auth_header": "Authorization",
         "auth_prefix": "Bearer",
     },
@@ -493,7 +493,7 @@ def get_provider(config: dict) -> TextRepairProvider:
                     "ai": {
                         "provider": "gemini",
                         "api_key": "...",
-                        "model": "gemini-2.0-flash",  # optional
+                        "model": "gemini-flash-latest",  # optional
                     }
                 }
 
@@ -511,7 +511,7 @@ def get_provider(config: dict) -> TextRepairProvider:
 
         >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
         >>> provider.model
-        'gemini-2.0-flash'
+        'gemini-flash-latest'
     """
     ai_config = config.get("ai", {})
     provider_name = str(ai_config.get("provider", "")).strip().lower()

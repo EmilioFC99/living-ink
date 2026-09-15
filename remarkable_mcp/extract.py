@@ -338,6 +338,44 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
         return None
 
 
+def _patch_rmc() -> None:
+    """Ensure rmc's RM_PALETTE and Pen.create are resilient to new pen/color types.
+
+    Upstream rmc omits PenColor.HIGHLIGHT (value 9) from RM_PALETTE, which causes
+    KeyError: 9 when converting notes that use the highlighter. This function
+    ensures all colors have a fallback and unknown pen types default to Ballpoint.
+    """
+    try:
+        import rmc.exporters.writing_tools as wt
+        import rmscene.scene_items as si
+
+        class SafePalette(dict):
+            def __missing__(self, key):
+                return (0, 0, 0)
+
+        palette = dict(wt.RM_PALETTE)
+        palette[9] = (251, 247, 25)  # Standard highlighter yellow
+        if hasattr(si.PenColor, "HIGHLIGHT"):
+            palette[si.PenColor.HIGHLIGHT] = (251, 247, 25)
+
+        wt.RM_PALETTE = SafePalette(palette)
+
+        orig_create = wt.Pen.create
+
+        @classmethod
+        def safe_create(cls, pen_nr, color_id, width):
+            try:
+                return orig_create(pen_nr, color_id, width)
+            except Exception:
+                from rmc.exporters.writing_tools import Ballpoint
+
+                return Ballpoint(width, color_id)
+
+        wt.Pen.create = safe_create
+    except Exception:
+        pass
+
+
 def render_rm_file_to_png(
     rm_file_path: Path, background_color: Optional[str] = None
 ) -> Optional[bytes]:
@@ -370,8 +408,9 @@ def render_rm_file_to_png(
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_png:
             tmp_png_path = Path(tmp_png.name)
 
-        # Convert .rm to SVG using rmc (Direct library call to avoid subprocess issues in frozen app)
+        # Convert .rm to SVG using rmc (direct library call to avoid subprocess issues)
         try:
+            _patch_rmc()
             from rmc.exporters.svg import rm_to_svg
 
             rm_to_svg(str(rm_file_path), str(tmp_svg_path))
@@ -400,32 +439,33 @@ def render_rm_file_to_png(
         try:
             # Load the SVG into a PDF/Document object
             doc = fitz.open(tmp_svg_path)
-            page = doc[0] # SVGs are single page
-            
+            page = doc[0]  # SVGs are single page
+
             # Determine Scaling
             # We want the output to match output_width/height
             # Rect is usually (0, 0, w, h)
             rect = page.rect
             zoom_x = output_width / rect.width if rect.width > 0 else 1.0
             zoom_y = output_height / rect.height if rect.height > 0 else 1.0
-            
+
             # Trust the calculated matrix
             mat = fitz.Matrix(zoom_x, zoom_y)
-            
+
             # Render to Pixmap
-            # alpha=True gives RGBA. 
+            # alpha=True gives RGBA.
             pix = page.get_pixmap(matrix=mat, alpha=True)
-            
+
             # Save to tmp_png_path
             pix.save(tmp_png_path)
-            
+
             # If no background color specified (transparent), return as-is
             if background_color is None:
-                 with open(tmp_png_path, "rb") as f:
+                with open(tmp_png_path, "rb") as f:
                     return f.read()
 
             # If background color specified, ensure it's applied properly
             from PIL import Image as PILImage
+
             img = PILImage.open(tmp_png_path)
             if img.mode == "RGBA" and background_color:
                 # Parse hex color (supports #RRGGBB and #RRGGBBAA formats)
@@ -440,7 +480,7 @@ def render_rm_file_to_png(
                     # Semi-transparent or transparent background
                     bg = PILImage.new("RGBA", img.size, (r, g, b, a))
                     img = PILImage.alpha_composite(bg, img)
-            
+
             img.save(tmp_png_path)
 
             with open(tmp_png_path, "rb") as f:
@@ -456,12 +496,12 @@ def render_rm_file_to_png(
                     timeout=30,
                 )
                 if result.returncode != 0:
-                     return None
+                    return None
 
                 with open(tmp_png_path, "rb") as f:
                     return f.read()
             except (FileNotFoundError, subprocess.TimeoutExpired):
-                 return None
+                return None
 
     except Exception:
         return None

@@ -559,7 +559,7 @@ class TestGetProviderPresets:
         """Gemini preset has the correct endpoint and model."""
         p = get_provider({"ai": {"provider": "gemini", "api_key": "AIza"}})
         assert "generativelanguage" in p.base_url
-        assert p.model == "gemini-2.0-flash"
+        assert p.model == "gemini-flash-latest"
         assert p.api_key == "AIza"
 
     def test_openai_preset(self):
