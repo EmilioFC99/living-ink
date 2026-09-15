@@ -34,7 +34,7 @@ Edit `config.yml` with your API keys:
     ```
 2.  **Run Sync**:
     ```bash
-    ./run_sync.sh --limit 1
+    living-ink sync --limit 1
     ```
 3.  **Verification**:
     *   [ ] Open Apple Notes.
@@ -58,7 +58,7 @@ Edit `config.yml` with your API keys:
     ```
 3.  **Run Sync**:
     ```bash
-    ./run_sync.sh --limit 1
+    living-ink sync --limit 1
     ```
 4.  **Verification**:
     *   [ ] Check `~/Documents/TestVault`.
@@ -83,7 +83,7 @@ Edit `config.yml` with your API keys:
     ```
 2.  **Run Sync**:
     ```bash
-    ./run_sync.sh --limit 1
+    living-ink sync --limit 1
     ```
 3.  **Verification**:
     *   [ ] Verify note appears in Apple Notes ("Test-Dual").

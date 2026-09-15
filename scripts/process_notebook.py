@@ -945,7 +945,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Required for PyInstaller to handle multiprocessing correctly (especially to avoid infinite spawn loops)
     import multiprocessing
 
     multiprocessing.freeze_support()

@@ -41,16 +41,11 @@ living-ink/
 │   ├── execution_plan_folder_mapping.md
 │   ├── development.md           # Dev environment setup
 │   └── ...                      # Additional reference docs
-├── packaging/                   # macOS .pkg installer resources
 ├── config.yml.example           # Configuration template
 ├── pyproject.toml               # Python project metadata & deps
 ├── install.sh                   # One-line curl installer
 ├── Dockerfile                   # Multi-stage production container image
-├── docker-compose.yml           # Compose file (CLI & background daemon)
-├── run_sync.sh                  # Shell wrapper for manual sync
-├── build_binary.sh              # PyInstaller binary build
-├── build_installer.sh           # macOS installer builder
-└── server.json                  # MCP server manifest (legacy)
+└── docker-compose.yml           # Compose file (CLI & background daemon)
 ```
 
 ## Architecture
