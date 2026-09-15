@@ -98,20 +98,32 @@ If you prefer traditional Google Cloud Vision OCR, or use an AI provider without
 
 ## 3. reMarkable Tablet Connection
 
-The application downloads your notebooks from the official reMarkable cloud.
+Living Ink can sync either via the official reMarkable Cloud or directly over USB via SSH.
 
+### Option A: reMarkable Cloud (Recommended)
 1. **Get One-Time Code**:
    * Go to [my.remarkable.com/device/desktop/connect](https://my.remarkable.com/device/desktop/connect).
    * Log in and click **Connect a new device** -> **Desktop**.
    * Copy the 8-letter pairing code.
-2. **Generate Device Token**:
-   * Run the command:
+2. **Pair Automatically via Setup Wizard**:
+   * Run `living-ink setup` and paste your 8-letter code when prompted.
+   * Or manually generate your token:
      ```bash
      uv run python -c "from remarkable_mcp.api import register_and_get_token; print(register_and_get_token('<YOUR-8-LETTER-CODE>'))"
      ```
-   * Or if you previously used `rmapi`, your token in `~/.rmapi` will be detected automatically.
 3. **Configure**:
    * Paste the token in `config/config.yml` under `remarkable.device_token`.
+
+### Option B: Direct USB SSH (Offline / No Cloud Subscription)
+If you prefer not to use reMarkable Cloud or don't have a Connect subscription:
+1. **Enable Developer Mode**:
+   * On your reMarkable tablet, navigate to **Settings → General → Software → Developer mode**.
+   * Note the root password displayed on screen.
+2. **Connect via USB**:
+   * Connect your tablet to your computer using a USB-C cable (default IP: `10.11.99.1`).
+   * Verify access: `ssh root@10.11.99.1`
+3. **Configure**:
+   * Set the environment variable: `export REMARKABLE_USE_SSH=true` (or configure SSH key authentication).
 
 ---
 

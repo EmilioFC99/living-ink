@@ -35,12 +35,7 @@ living-ink/
 ├── docs/                        # User and developer documentation
 │   ├── SETUP_GUIDE.md           # API key / credential setup
 │   ├── USER_MANUAL.md           # End-user usage guide
-│   ├── REFACTOR_PLAN.md         # Architecture refactoring roadmap
-│   ├── PARKING_LOT.md           # Known bugs and open questions
-│   ├── future-plans.md          # Upstream feature ideas
-│   ├── execution_plan_folder_mapping.md
-│   ├── development.md           # Dev environment setup
-│   └── ...                      # Additional reference docs
+│   └── TEST_PLAN.md             # Test cases and verification matrix
 ├── config/
 │   └── config.yml.example       # Configuration template
 ├── data/                        # Runtime & personal data (logs, images, PDFs, state cache)
