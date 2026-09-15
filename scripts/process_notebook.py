@@ -207,8 +207,19 @@ def get_destinations_from_config(config_dict) -> List[Destination]:
 
     if obs_enabled:
         if vault_path:
-            dests.append(ObsidianDestination(vault_path))
-            print(f"Destination added: Obsidian (Vault: {vault_path})")
+            root_folder = obs_config.get("root_folder")
+            mirror_folders = obs_config.get("mirror_folders", True)
+            attachments_folder = obs_config.get("attachments_folder", "attachments")
+            dests.append(
+                ObsidianDestination(
+                    vault_path=vault_path,
+                    attachments_folder=attachments_folder,
+                    root_folder=root_folder,
+                    mirror_folders=mirror_folders,
+                )
+            )
+            folder_info = f" (Root: {root_folder})" if root_folder else ""
+            print(f"Destination added: Obsidian (Vault: {vault_path}{folder_info})")
         else:
             print("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
 
@@ -819,13 +830,15 @@ def main():
             # Format text
             clean_text = clean_text.replace("--- Page", "\n\n--- Page").lstrip()
 
-            # Determine strict top-level folder name for nesting
-            # folder_path is like "Work / Project A" -> top_level is "Work"
+            # Determine folder paths for nesting
+            # folder_path is like "Work / Project A / Sprint 1"
+            full_subfolder = None
             top_level_subfolder = None
             if folder_path:
-                parts = folder_path.split(" / ")
+                parts = [p.strip() for p in folder_path.split(" / ") if p.strip()]
                 if parts:
                     top_level_subfolder = sanitize_filename(parts[0])
+                    full_subfolder = "/".join(parts)
 
             # Destinations that specifically request this notebook
             targets = needs_update.get(notebook_id, [])
@@ -839,11 +852,19 @@ def main():
                 for dest in targets:
                     dest_name = type(dest).__name__
                     log(f"Publishing to {dest_name}...")
+
+                    # Apple Notes only supports 1 level of sub-folder under rootFolder.
+                    # Obsidian supports full nested hierarchy.
+                    if isinstance(dest, AppleNotesDestination):
+                        target_subfolder = top_level_subfolder
+                    else:
+                        target_subfolder = full_subfolder
+
                     dest_success = dest.publish(
                         notebook_name=display_title,
                         text_content=clean_text,
                         image_paths=imgs,
-                        sub_folder=top_level_subfolder,
+                        sub_folder=target_subfolder,
                     )
                     if dest_success:
                         # Update state for THIS destination immediately

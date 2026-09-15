@@ -64,3 +64,19 @@ obsidian:
   # Absolute path to your Obsidian Vault root
   # Example: "/Users/username/Documents/MyVault"
   vault_path: ""
+
+  # Optional: Folder inside the vault where notes will be stored.
+  # If omitted or empty (""), notes are placed directly in the vault root.
+  # Example: "Living Ink" or "reMarkable"
+  root_folder: "Living Ink"
+
+  # Optional: Whether to replicate the full reMarkable folder hierarchy.
+  # true  → /Work/Projects/Q1/Note becomes {vault}/{root_folder}/Work/Projects/Q1/Note.md
+  # false → all notes placed directly in {vault}/{root_folder}/
+  # Default: true
+  mirror_folders: true
+
+  # Optional: Subfolder name for page images within each note's folder.
+  # Set to "" to place images directly alongside notes.
+  # Default: "attachments"
+  attachments_folder: "attachments"
