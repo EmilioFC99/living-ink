@@ -116,7 +116,7 @@ uv run pytest -v
 
 ## Known Issues & Tech Debt
 
-1. **Naming**: Package is still called `remarkable-mcp` in `pyproject.toml` despite being renamed to Living Ink.
+- None currently tracking. Previous tech debt (package naming, single-provider lock-in, folder flattening) resolved.
 
 ## Conventions
 

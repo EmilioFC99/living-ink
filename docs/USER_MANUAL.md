@@ -1,101 +1,143 @@
 # User Manual: Living Ink
-**Created by Aaron Sahlstrom**
 
 ## Overview
 
-**Living Ink** is an automated pipeline that bridges the gap between your reMarkable tablet and your digital notes apps (Apple Notes or Obsidian). It converts your handwritten notebooks into fully searchable, typed text, While preserving the original handwriting references your "Living Signal".
+**Living Ink** is an automated pipeline that bridges the gap between your reMarkable tablet and your digital notes apps (**Obsidian** and **Apple Notes**). It converts your handwritten notebooks into fully searchable, typed notes while preserving the original handwriting drawings as embedded images ("Living Signal").
+
+---
 
 ## How It Works
 
-1.  **Detect**: The app periodically checks your reMarkable Cloud account.
-    *   **New Notebooks**: Automatically detected and processed.
-    *   **Updated Notebooks**: If you write more pages or edit an existing notebook, the app detects the version change and re-syncs the note.
-    *   **Trash**: Notebooks in the Trash folder (or named starting with `[TRASH]`) are ignored.
-2.  **Download & Render**: It downloads the notebook pages and converts them into high-quality images.
-3.  **OCR (Optical Character Recognition)**: It sends these images to Google Cloud Vision to read your handwriting.
-4.  **AI Cleanup**: It uses OpenAI (GPT-4o) to fix spelling, formatting, and structure (converting bullet points, fixing broken sentences).
-5.  **Publish**: It sends the result to your configured destinations:
-    *   **Apple Notes**: Creates a rich text note with embedded images.
-    *   **Obsidian**: Creates a Markdown file with YAML properties and local attachments.
+```
+reMarkable Tablet
+    ↓ (Cloud API or USB SSH)
+Download .rm notebook zip
+    ↓
+Render pages: .rm → SVG → PNG
+    ↓
+OCR & Text Transcription:
+    ├── AI Vision OCR (Default: Gemini, GPT-4o — reads handwriting + formats in 1 step)
+    └── Google Cloud Vision (Optional fallback: DOCUMENT_TEXT_DETECTION → AI cleanup)
+    ↓
+Publish: Destination.publish()
+    ├── Obsidian (Markdown + YAML frontmatter + WikiLinks + full folder mirroring)
+    └── Apple Notes (Rich text note with embedded images)
+```
 
-## Folder Syncing
+1. **Detect**: Checks your reMarkable account for new or updated notebooks.
+   - **New Notebooks**: Automatically detected and processed.
+   - **Updated Notebooks**: When you write new pages or edit an existing note, Living Ink detects the version change and re-syncs.
+   - **Trash**: Notebooks in the Trash folder (or prefixed with `[TRASH]`) are automatically ignored.
+2. **Download & Render**: Downloads the notebook pages and converts vector strokes into clean PNG images.
+3. **OCR & Text Processing**:
+   - **AI Vision OCR (Recommended)**: Sends page images to multimodal AI models (**Google Gemini**, **OpenAI GPT-4o**), which read handwriting and format clean text in a single step using your existing AI API key.
+   - **Google Cloud Vision (Optional)**: Traditional OCR fallback if configured, followed by AI text repair.
+4. **Publish**: Writes structured notes to your active destinations (**Obsidian**, **Apple Notes**, or both).
 
-The application now supports **Automatic Folder Nesting**. It mirrors your **top-level** folder structure from reMarkable into your destination.
+---
 
-*   **reMarkable:** `/Finance/Budget 2026`
-*   **Apple Notes:** `Living Ink > Finance > Budget 2026`
-*   **Obsidian:** `Vault Root/Finance/Budget 2026.md`
+## Folder Syncing & Mirroring
 
-If a notebook is at the root level (not in any folder), it will appear directly in the main folder.
+### Obsidian (Full Hierarchy Mirroring)
+Living Ink replicates your **complete nested reMarkable folder structure** inside your Obsidian vault:
 
-**Note on Renaming:**
-If you rename a top-level folder on your reMarkable (e.g., from "Finance" to "Money"), the application will create a **new** folder called "Money" in the destination and sync your notes there. The old "Finance" folder will remain (containing the old versions) and you can safely delete it manually.
+- **reMarkable:** `/Work/Projects/2026/Q1 Planning`
+- **Obsidian:** `Vault/Living Ink/Work/Projects/2026/Q1 Planning.md`
+- **Attachments:** `Vault/Living Ink/Work/Projects/2026/attachments/Q1 Planning_page-1.png`
+
+You can customize this in `config/config.yml`:
+- `root_folder`: Place all notes in a designated subfolder (e.g., `"Living Ink"`) or directly in the vault root (`""`).
+- `mirror_folders`: Set to `true` to replicate nested folders, or `false` to store all notes flat in the root folder.
+- `attachments_folder`: Subfolder name for page images (defaults to `"attachments"`).
+
+### Apple Notes (Top-Level Folder Nesting)
+- **reMarkable:** `/Work/Projects/Q1 Planning`
+- **Apple Notes:** `Living Ink > Work > Q1 Planning`
+
+---
 
 ## Usage
 
-### Automatic Mode
-Once installed, the application runs in the background (typically every hour). You simply write on your reMarkable, force a sync (by swiping down on the tablet list view), and wait. The note will appear in your "Living Ink" folder in Apple Notes (this folder name can be configured).
-
-### Manual Mode (Advanced)
-If you want to force a run immediately (instead of waiting for the hourly schedule):
-
-1.  Open the folder `/Applications/Living Ink`.
-2.  Double-click the **Run Manual Sync.command** file.
-3.  A terminal window will open, show the progress, and you can close it when finished.
-
-Alternatively, you can run the command in the terminal:
-
-**Process all new notes:**
+### Process All New Notes
+To scan and sync all new or updated notebooks:
 ```bash
 uv run python scripts/process_notebook.py
 ```
 
-**Process a specific notebook:**
+### Process a Specific Notebook
+To force-sync a single notebook by its reMarkable name:
 ```bash
 uv run python scripts/process_notebook.py --notebook "My Notebook Name"
 ```
 
-## Configuration
+### Command-Line Options
+```text
+options:
+  -h, --help            Show help message and exit
+  --notebook NOTEBOOK   Process only the specified notebook name
+  --limit LIMIT         Max notebooks to process per run (overrides config)
+  --folder FOLDER       Apple Notes folder override
+```
 
-You can customize the behavior by editing `config/config.yml`:
+---
 
-*   **Sync Limit**: Control how many notebooks are processed in one run (to avoid hitting API limits).
-    ```yaml
-    sync:
-      max_notebooks_per_run: 5
-    ```
+## Configuration Reference
 
-*   **Apple Notes Folder**: Change the destination folder name.
-    ```yaml
-    apple_notes:
-      enabled: true
-      folder_name: "My Journal"
-    ```
+Edit `config/config.yml` (or `config.yml` in project root):
 
-*   **Obsidian Vault**: Enable Obsidian sync and set your vault path.
-    ```yaml
-    obsidian:
-      enabled: true
-      # Absolute path to your Obsidian Vault root
-      vault_path: "/Users/username/Documents/MyVault"
-      # (Optional) Folder name for images, defaults to "attachments"
-      # attachments_folder: "attachments"
-    ```
+```yaml
+# 1. AI Provider & Vision OCR
+ai:
+  provider: "gemini"               # "gemini", "openai", "ollama", "groq", "none", etc.
+  api_key: "AIzaSy..."             # From https://aistudio.google.com/apikey
+  model: "gemini-flash-latest"     # Default model
+
+# 2. reMarkable Tablet Connection
+remarkable:
+  device_token: "YOUR-DEVICE-TOKEN-HERE"
+
+# 3. Google Cloud Vision (OPTIONAL — Not needed if using Gemini or OpenAI)
+google_vision:
+  credentials_path: ""
+
+# 4. Sync Settings
+sync:
+  max_notebooks_per_run: 5
+
+# 5. Obsidian Destination
+obsidian:
+  enabled: true
+  vault_path: "/Users/username/Documents/MyVault"
+  root_folder: "Living Ink"
+  mirror_folders: true
+  attachments_folder: "attachments"
+
+# 6. Apple Notes Destination
+apple_notes:
+  enabled: false
+  folder_name: "Living Ink"
+```
+
+---
 
 ## Troubleshooting
 
 ### "Configuration Error"
-If you see an error about missing keys or credentials, please refer to `SETUP_GUIDE.md`. The app cannot function without the OpenAI API key and Google Cloud Vision credentials.
+Refer to `docs/SETUP_GUIDE.md` for credential setup:
+- Living Ink only requires an **AI API key** (e.g. Google Gemini or OpenAI) and your **reMarkable token**.
+- Google Cloud Vision credentials are **optional** and only required if you do not use an AI Vision provider.
 
-### Note Not Appearing? or Obsidian Vault
-1.  **Sync**: Ensure your reMarkable tablet has actually synced to the cloud. Check the reMarkable desktop or mobile app to confirm.
-2.  **Naming**: If you renamed a notebook recently, wait for the sync to propagate.
-3.  **Logs**: Check the log files (location varies by install, usually `logs/pipeline.log`) for specific error messages.
+### Note Not Appearing in Obsidian or Apple Notes?
+1. **Cloud Sync**: Ensure your reMarkable tablet has finished syncing to the cloud (swipe down on the notebook list to force a sync).
+2. **Processed State**: If a notebook was already synced and hasn't changed on the tablet, Living Ink skips it. Use `--notebook "Name"` to force reprocessing.
+3. **Logs**: Check `logs/pipeline.log` for detailed step-by-step logs and error messages.
 
-### "Limit Exceeded"
-The Google Cloud Vision API has a free tier, but if you process thousands of pages effectively instantly, you might hit a rate limit or billing limit. The app will retry automatically.
+### Highlighting or Drawing Glitches
+Living Ink includes built-in safeguards for reMarkable Paper Pro and newer pen formats (including color highlighters and shader tools). If you encounter rendering issues on custom pen types, check `logs/pipeline.log`.
+
+---
 
 ## Data Privacy
-*   **Google**: Your handwriting images are sent to Google Cloud Vision for processing.
-*   **OpenAI**: The raw text is sent to OpenAI for cleanup.
-*   **Local**: All final notes are stored locally in your Apple Notes database.
+- **AI Provider**: When using Google Gemini or OpenAI, page images and text prompts are processed according to the respective provider's privacy terms (e.g. Google AI Studio API data terms).
+- **Ollama (Local)**: If you configure `provider: "ollama"`, all processing runs 100% locally on your machine with zero data sent to external AI servers.
+- **Local Storage**: All rendered notes and image attachments are stored locally inside your Obsidian vault or Apple Notes database.
