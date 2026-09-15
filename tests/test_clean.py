@@ -45,6 +45,22 @@ def mock_prompt_file(tmp_path):
         yield prompt
 
 
+@pytest.fixture
+def mock_ocr_prompt_file(tmp_path):
+    """Create a temporary OCR prompt file and patch OCR_PROMPT_FILE.
+
+    Args:
+        tmp_path: Pytest temporary directory fixture.
+
+    Yields:
+        Path to the temporary OCR prompt file.
+    """
+    prompt = tmp_path / "ocr_prompt.txt"
+    prompt.write_text("Test OCR instructions: transcribe this image.")
+    with patch.object(clean, "OCR_PROMPT_FILE", prompt):
+        yield prompt
+
+
 # =========================================================================
 # configure()
 # =========================================================================
@@ -230,3 +246,100 @@ class TestReadPromptInstructions:
         with patch.object(clean, "PROMPT_FILE", prompt):
             result = clean._read_prompt_instructions()
             assert result == "instructions here"
+
+
+# =========================================================================
+# vision_ocr_available()
+# =========================================================================
+
+
+class TestVisionOcrAvailable:
+    """Tests for vision_ocr_available()."""
+
+    def test_returns_true_when_supported_and_enabled(self):
+        """Returns True when provider supports vision and repair is enabled."""
+        clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+        assert clean.vision_ocr_available() is True
+
+    def test_returns_false_when_repair_disabled(self):
+        """Returns False when ENABLE_REPAIR is False."""
+        original = clean.ENABLE_REPAIR
+        try:
+            clean.ENABLE_REPAIR = False
+            clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+            assert clean.vision_ocr_available() is False
+        finally:
+            clean.ENABLE_REPAIR = original
+
+    def test_returns_false_for_none_provider(self):
+        """Returns False when configured with NoneProvider."""
+        clean.configure({"ai": {"provider": "none"}})
+        assert clean.vision_ocr_available() is False
+
+
+# =========================================================================
+# ocr_and_repair()
+# =========================================================================
+
+
+class TestOcrAndRepair:
+    """Tests for ocr_and_repair()."""
+
+    def test_returns_none_when_repair_disabled(self):
+        """Returns None when ENABLE_REPAIR is False."""
+        original = clean.ENABLE_REPAIR
+        try:
+            clean.ENABLE_REPAIR = False
+            clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+            assert clean.ocr_and_repair("/path/to/img.png") is None
+        finally:
+            clean.ENABLE_REPAIR = original
+
+    def test_returns_none_when_provider_lacks_vision(self):
+        """Returns None when provider does not support vision."""
+        clean.configure({"ai": {"provider": "none"}})
+        assert clean.ocr_and_repair("/path/to/img.png") is None
+
+    def test_calls_ocr_image_when_supported(self, mock_ocr_prompt_file):
+        """Calls provider.ocr_image with image path and instructions."""
+        mock_provider = MagicMock(spec=UniversalChatProvider)
+        mock_provider.supports_vision = True
+        mock_provider.ocr_image.return_value = "Page content transcribed"
+        clean._provider = mock_provider
+
+        result = clean.ocr_and_repair("/path/to/page.png")
+        assert result == "Page content transcribed"
+        mock_provider.ocr_image.assert_called_once()
+        assert mock_provider.ocr_image.call_args[0][0] == "/path/to/page.png"
+        assert "Test OCR instructions" in mock_provider.ocr_image.call_args[0][1]
+
+    def test_returns_none_when_ocr_image_empty(self, mock_ocr_prompt_file):
+        """Returns None when provider returns an empty string."""
+        mock_provider = MagicMock(spec=UniversalChatProvider)
+        mock_provider.supports_vision = True
+        mock_provider.ocr_image.return_value = ""
+        clean._provider = mock_provider
+
+        result = clean.ocr_and_repair("/path/to/page.png")
+        assert result is None
+
+
+# =========================================================================
+# _read_ocr_instructions()
+# =========================================================================
+
+
+class TestReadOcrInstructions:
+    """Tests for OCR prompt file reading."""
+
+    def test_reads_from_file(self, mock_ocr_prompt_file):
+        """Reads instructions from the OCR prompt file."""
+        result = clean._read_ocr_instructions()
+        assert "Test OCR instructions" in result
+
+    def test_fallback_when_file_missing(self, tmp_path):
+        """Returns fallback text when prompt file doesn't exist."""
+        missing = tmp_path / "nonexistent.txt"
+        with patch.object(clean, "OCR_PROMPT_FILE", missing):
+            result = clean._read_ocr_instructions()
+            assert "Transcribe the handwritten text" in result

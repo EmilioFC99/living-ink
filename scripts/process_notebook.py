@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process one notebook: preprocess PNGs, run Google Vision OCR, aggregate text, build PDF, create Apple Note."""
+"""Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
 import argparse
 import datetime
@@ -19,7 +19,7 @@ from PIL import Image, ImageFilter, ImageOps
 sys.path.append(str(Path(__file__).parent.parent))
 
 from remarkable_mcp.clean import configure as configure_ai_provider
-from remarkable_mcp.clean import repair_text_with_openai
+from remarkable_mcp.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
 from remarkable_mcp.destinations import AppleNotesDestination, Destination, ObsidianDestination
 
 
@@ -458,9 +458,18 @@ def validate_environment():
             has_creds = True
 
     if not has_creds:
-        errors.append(
-            "❌ No Google Cloud credentials found. Please add 'credentials_json' to config.yml (see SETUP_GUIDE.md)."
-        )
+        if vision_ocr_available():
+            # AI vision OCR available — Google Vision not needed
+            warnings.append(
+                "ℹ️ No Google Cloud Vision credentials found. "
+                "Using AI vision OCR instead (reads images directly)."
+            )
+        else:
+            errors.append(
+                "❌ No OCR method available. Either:\n"
+                "   • Add an AI provider with vision support (e.g., Gemini) to config.yml, OR\n"
+                "   • Add Google Cloud Vision credentials (see SETUP_GUIDE.md)."
+            )
 
     # Print warnings (non-fatal)
     for w in warnings:
@@ -772,14 +781,32 @@ def main():
             preprocess_image(p, out_p)
             pre_paths.append(out_p)
 
-        # OCR via Google Vision (always use service account)
+        # OCR — try AI vision first, fall back to Google Cloud Vision
+        use_vision_ocr = vision_ocr_available()
+        if use_vision_ocr:
+            log("Using AI vision OCR (single-step: reads image + cleans text)")
+        else:
+            log("Using Google Cloud Vision OCR + AI text cleanup")
+
         raw_texts = []
         cleaned_texts = []
         for p in pre_paths:
-            log(f"Vision OCR (service account): {p.name}")
+            if use_vision_ocr:
+                # Single-step: AI reads the image and returns clean text
+                log(f"  AI Vision OCR: {p.name}...")
+                cleaned_text = ocr_and_repair(str(p))
+                if cleaned_text:
+                    raw_texts.append(cleaned_text)  # No separate raw text in vision mode
+                    cleaned_texts.append(cleaned_text)
+                    continue
+                # Vision returned None/empty — fall through to Google Vision
+                log(f"  AI Vision returned empty for {p.name}, trying Google Vision...")
+
+            # Two-step: Google Cloud Vision OCR → AI text cleanup
+            log(f"  Google Vision OCR: {p.name}...")
             txt = vision_ocr_image_service_account(p)
             if txt is None:
-                log(f"Vision failed for {p}")
+                log(f"  Vision failed for {p}")
 
             raw_text = txt or ""
             raw_texts.append(raw_text)

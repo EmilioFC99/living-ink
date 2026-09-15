@@ -58,9 +58,9 @@ Download .rm notebook zip
     ↓
 Render pages: .rm → SVG → PNG (white background)
     ↓
-OCR: Google Cloud Vision (DOCUMENT_TEXT_DETECTION)
-    ↓
-Text Cleanup: LLM (currently OpenAI-only)
+OCR & Text Processing:
+    ├── AI Vision OCR (Default: Gemini, GPT-4o — reads handwriting + cleans in 1 step)
+    └── Google Cloud Vision (Optional fallback: DOCUMENT_TEXT_DETECTION → AI cleanup)
     ↓
 Publish: Destination.publish()
     ├── AppleNotesDestination (via osascript/AppleScript)
@@ -108,15 +108,15 @@ uv run pytest -v
 
 ## Recent Architecture Improvements
 
-1. **Multi-Provider AI**: `remarkable_mcp/providers.py` provides universal OpenAI-compatible chat completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
-2. **Full Folder Hierarchy Mirroring**: `remarkable_mcp/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
-3. **Comprehensive Test Suite**: `tests/` contains 134 unit tests covering providers, clean, and destination logic.
-4. **Google Docstrings**: All core modules follow Google docstring conventions.
+1. **AI Vision OCR (Single API Key)**: Multimodal AI models (Gemini, GPT-4o) perform handwriting OCR directly from page images via standard OpenAI-compatible `image_url` data URIs, combining OCR + text cleanup in one step and making Google Cloud Vision optional.
+2. **Multi-Provider AI**: `remarkable_mcp/providers.py` provides universal OpenAI-compatible completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
+3. **Full Folder Hierarchy Mirroring**: `remarkable_mcp/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
+4. **Comprehensive Test Suite**: `tests/` contains 158 unit tests covering providers, vision OCR, clean, and destination logic.
+5. **Google Docstrings**: All core modules follow Google docstring conventions.
 
 ## Known Issues & Tech Debt
 
 1. **Naming**: Package is still called `remarkable-mcp` in `pyproject.toml` despite being renamed to Living Ink.
-2. **PyInstaller Binary**: Need to ensure binary builds include all new data files (`cleanup_prompt.txt`).
 
 ## Conventions
 

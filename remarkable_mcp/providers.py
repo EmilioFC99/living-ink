@@ -1,7 +1,9 @@
-"""AI text repair providers for OCR cleanup.
+"""AI text repair and vision OCR providers.
 
 Architecture:
     - ``UniversalChatProvider``: Works with ANY OpenAI-compatible API endpoint.
+      Supports both text-only cleanup and multimodal vision OCR (reads
+      handwritten images directly via the standard ``image_url`` format).
     - ``NoneProvider``: No-op, returns raw text unchanged.
     - ``get_provider``: Factory that reads config and returns the right provider.
 
@@ -16,9 +18,11 @@ Example:
     >>> from remarkable_mcp.providers import get_provider
     >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "..."}})
     >>> cleaned = provider.repair_text("messy OCR text", "Clean this text.")
+    >>> text = provider.ocr_image("/path/to/page.png", "Transcribe this page.")
 """
 
 import abc
+import base64
 import json
 import logging
 import urllib.error
@@ -110,6 +114,35 @@ class TextRepairProvider(abc.ABC):
     def name(self) -> str:
         """Human-readable provider name for logging."""
 
+    @property
+    def supports_vision(self) -> bool:
+        """Whether this provider can perform vision-based OCR on images.
+
+        Returns:
+            ``True`` if the provider supports multimodal image input
+            via the OpenAI-compatible vision format. Defaults to ``False``.
+        """
+        return False
+
+    def ocr_image(self, image_path: str, instructions: str) -> str:
+        """Perform OCR on an image using the AI provider's vision capability.
+
+        Reads the image file, encodes it as base64, and sends it to the AI
+        along with transcription instructions in a single API call. This
+        combines OCR + text cleanup into one step.
+
+        Args:
+            image_path: Absolute path to the PNG image file.
+            instructions: Prompt instructions for transcription and cleanup.
+
+        Returns:
+            Transcribed and cleaned text from the image.
+
+        Raises:
+            NotImplementedError: If the provider does not support vision OCR.
+        """
+        raise NotImplementedError(f"Provider '{self.name}' does not support vision OCR.")
+
 
 # ---------------------------------------------------------------------------
 # NoneProvider — no AI cleanup
@@ -149,6 +182,12 @@ SYSTEM_MESSAGE = (
     "You are an expert editor for handwritten notes. "
     "Your goal is to restore the author's original intent "
     "by fixing OCR misinterpretations while preserving their voice."
+)
+
+VISION_SYSTEM_MESSAGE = (
+    "You are an expert handwriting transcription assistant. "
+    "Your goal is to accurately read handwritten text from notebook page "
+    "images and produce clean, well-formatted plain text output."
 )
 
 
@@ -321,6 +360,117 @@ class UniversalChatProvider(TextRepairProvider):
             return raw_text
 
         return result.strip()
+
+    @property
+    def supports_vision(self) -> bool:
+        """Whether this provider supports vision-based OCR.
+
+        Returns:
+            Always ``True`` — all OpenAI-compatible endpoints supported
+            by this class handle multimodal image input.
+        """
+        return True
+
+    def ocr_image(self, image_path: str, instructions: str) -> str:
+        """Perform OCR on an image via the provider's vision capability.
+
+        Reads the PNG image, encodes it as base64, and sends a multimodal
+        chat completion request. The AI reads the handwriting and returns
+        clean text in a single step — no separate OCR service required.
+
+        Uses the standard OpenAI vision format (``image_url`` with data URI),
+        which is supported by Gemini, OpenAI GPT-4o, Ollama (LLaVA),
+        Groq, OpenRouter, Mistral Pixtral, and others.
+
+        Args:
+            image_path: Absolute path to the PNG image file.
+            instructions: Prompt instructions for transcription
+                (loaded from ``ocr_prompt.txt``).
+
+        Returns:
+            Transcribed and cleaned text from the image, or empty
+            string on any error.
+        """
+        with open(image_path, "rb") as f:
+            image_data = f.read()
+
+        b64_string = base64.b64encode(image_data).decode("ascii")
+
+        # Determine MIME type from file extension
+        path_str = str(image_path)
+        ext = path_str.rsplit(".", 1)[-1].lower() if "." in path_str else "png"
+        mime_map = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+        }
+        mime_type = mime_map.get(ext, "image/png")
+
+        data_uri = f"data:{mime_type};base64,{b64_string}"
+
+        # Build multimodal message with text + image
+        user_content = [
+            {"type": "text", "text": instructions},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ]
+
+        url = self._build_url()
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": VISION_SYSTEM_MESSAGE},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.2,
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+
+        if self.auth_header and self.api_key:
+            if self.auth_prefix:
+                req.add_header(
+                    self.auth_header,
+                    f"{self.auth_prefix} {self.api_key}",
+                )
+            else:
+                req.add_header(self.auth_header, self.api_key)
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = resp.read().decode("utf-8")
+                j = json.loads(body)
+                result = j["choices"][0]["message"]["content"]
+                return result.strip() if result else ""
+        except urllib.error.HTTPError as e:
+            logger.error(
+                "Vision OCR HTTP Error (%s): %s %s",
+                self.name,
+                e.code,
+                e.reason,
+            )
+            try:
+                err_body = e.read().decode("utf-8")
+                logger.error("Details: %s", err_body)
+            except Exception:
+                pass
+            return ""
+        except urllib.error.URLError as e:
+            logger.error(
+                "Vision OCR Connection Error (%s): %s",
+                self.name,
+                e.reason,
+            )
+            return ""
+        except Exception as e:
+            logger.error(
+                "Vision OCR Unexpected Error (%s): %s",
+                self.name,
+                e,
+            )
+            return ""
 
 
 # ---------------------------------------------------------------------------

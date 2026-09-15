@@ -7,12 +7,13 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
 ## 🚀 Features
 
 *   **Smart Sync**: Automatically detects new or updated notebooks on your reMarkable.
-*   **High-Fidelity OCR**: Uses **Google Cloud Vision** to recognize handwriting with superior accuracy compared to on-device conversion.
-*   **Multi-Provider AI Cleanup**: Clean up OCR misinterpretations using your preferred AI provider:
-    *   **Google Gemini** (recommended, fast & free tier via Google AI Studio)
-    *   **OpenAI** (GPT-4o, GPT-4o-mini)
+*   **AI Vision OCR (Single API Key)**: Uses multimodal AI models (**Google Gemini**, **OpenAI GPT-4o**) to read handwritten pages directly and format them into clean text in a single step — **no Google Cloud Console or service accounts needed**.
+*   **Multi-Provider AI**: Supports:
+    *   **Google Gemini** (recommended: fast, free tier, vision OCR + text repair)
+    *   **OpenAI** (GPT-4o / GPT-4o-mini with vision OCR)
     *   **Ollama** (100% local, no API key needed)
     *   **Groq, OpenRouter, Mistral, Together AI**, or any custom OpenAI-compatible endpoint
+    *   **Google Cloud Vision** as an optional traditional OCR fallback
     *   Option to disable AI cleanup entirely for raw OCR text
 *   **Apple Notes Integration**: Creates formatted notes containing cleaned text and original handwritten page images.
 *   **Obsidian Integration**: Exports notes as Markdown files with YAML frontmatter, WikiLinked page attachments, and **full folder hierarchy mirroring** inside your vault (or a configurable root folder).
@@ -45,9 +46,9 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
     remarkable:
       device_token: "YOUR-DEVICE-TOKEN-HERE"
 
-    # 3. Google Cloud Vision (Handwriting OCR)
-    google_vision:
-      credentials_path: "/path/to/credentials.json"
+    # 3. Google Cloud Vision (Optional fallback — not needed if using Gemini or OpenAI)
+    # google_vision:
+    #   credentials_path: "/path/to/credentials.json"
 
     # 4. Destination: Apple Notes
     apple_notes:

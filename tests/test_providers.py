@@ -68,6 +68,35 @@ class TestTextRepairProviderABC:
         assert p.name == "test"
         assert p.repair_text("hello", "") == "HELLO"
 
+    def test_supports_vision_defaults_to_false(self):
+        """TextRepairProvider subclasses default to supports_vision=False."""
+
+        class Complete(TextRepairProvider):
+            def repair_text(self, raw_text, instructions):
+                return raw_text
+
+            @property
+            def name(self):
+                return "test"
+
+        p = Complete()
+        assert p.supports_vision is False
+
+    def test_ocr_image_raises_not_implemented(self):
+        """TextRepairProvider default ocr_image raises NotImplementedError."""
+
+        class Complete(TextRepairProvider):
+            def repair_text(self, raw_text, instructions):
+                return raw_text
+
+            @property
+            def name(self):
+                return "test"
+
+        p = Complete()
+        with pytest.raises(NotImplementedError, match="does not support vision OCR"):
+            p.ocr_image("/path/to/img.png", "instructions")
+
 
 # =========================================================================
 # NoneProvider
@@ -102,6 +131,17 @@ class TestNoneProvider:
         """Name includes 'no AI cleanup' for clarity in logs."""
         p = NoneProvider()
         assert "no AI cleanup" in p.name.lower() or "none" in p.name.lower()
+
+    def test_supports_vision_is_false(self):
+        """NoneProvider does not support vision."""
+        p = NoneProvider()
+        assert p.supports_vision is False
+
+    def test_ocr_image_raises_not_implemented(self):
+        """NoneProvider ocr_image raises NotImplementedError."""
+        p = NoneProvider()
+        with pytest.raises(NotImplementedError, match="does not support vision OCR"):
+            p.ocr_image("/path/to/img.png", "instructions")
 
 
 # =========================================================================
@@ -327,6 +367,160 @@ class TestUniversalChatProviderChat:
 
         p = UniversalChatProvider(base_url="https://api.test.com/v1")
         result = p._chat("test")
+        assert result == ""
+
+
+# =========================================================================
+# UniversalChatProvider — vision OCR capabilities
+# =========================================================================
+
+
+class TestUniversalChatProviderVision:
+    """Tests for vision OCR via UniversalChatProvider."""
+
+    def _make_response(self, content: str) -> bytes:
+        """Helper to create a mock OpenAI-compatible JSON response."""
+        return json.dumps(
+            {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        ).encode("utf-8")
+
+    def test_supports_vision_is_true(self):
+        """UniversalChatProvider reports supports_vision=True."""
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p.supports_vision is True
+
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_sends_multimodal_payload(self, mock_urlopen, tmp_path):
+        """ocr_image sends correct multimodal payload with base64 data URI."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"fake-png-bytes")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self._make_response("Transcribed notes")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(
+            base_url="https://api.test.com/v1",
+            api_key="secret",
+            model="gemini-2.0-flash",
+        )
+        result = p.ocr_image(str(img_path), "Transcribe this page.")
+
+        assert result == "Transcribed notes"
+
+        # Check request
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url == "https://api.test.com/v1/chat/completions"
+        assert request.get_header("Authorization") == "Bearer secret"
+
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["model"] == "gemini-2.0-flash"
+        assert len(payload["messages"]) == 2
+        assert payload["messages"][0]["role"] == "system"
+
+        user_content = payload["messages"][1]["content"]
+        assert isinstance(user_content, list)
+        assert user_content[0]["type"] == "text"
+        assert user_content[0]["text"] == "Transcribe this page."
+        assert user_content[1]["type"] == "image_url"
+        url = user_content[1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+
+    @pytest.mark.parametrize(
+        "filename, expected_mime",
+        [
+            ("page.png", "image/png"),
+            ("page.jpg", "image/jpeg"),
+            ("page.jpeg", "image/jpeg"),
+            ("page.webp", "image/webp"),
+            ("page.unknown", "image/png"),
+        ],
+    )
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_mime_types(self, mock_urlopen, tmp_path, filename, expected_mime):
+        """ocr_image detects correct MIME type from extension."""
+        img_path = tmp_path / filename
+        img_path.write_bytes(b"image-data")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self._make_response("ok")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        p.ocr_image(str(img_path), "prompt")
+
+        request = mock_urlopen.call_args[0][0]
+        payload = json.loads(request.data.decode("utf-8"))
+        url = payload["messages"][1]["content"][1]["image_url"]["url"]
+        assert url.startswith(f"data:{expected_mime};base64,")
+
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_raw_auth_header(self, mock_urlopen, tmp_path):
+        """ocr_image supports auth header without prefix."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = self._make_response("ok")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(
+            base_url="https://api.test.com/v1",
+            api_key="raw-token",
+            auth_header="X-API-Key",
+            auth_prefix=None,
+        )
+        p.ocr_image(str(img_path), "prompt")
+
+        request = mock_urlopen.call_args[0][0]
+        assert request.get_header("X-api-key") == "raw-token"
+
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_http_error_returns_empty(self, mock_urlopen, tmp_path):
+        """ocr_image returns empty string on HTTPError."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="https://api.test.com/v1",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=MagicMock(read=MagicMock(return_value=b"invalid request")),
+        )
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        result = p.ocr_image(str(img_path), "prompt")
+        assert result == ""
+
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_url_error_returns_empty(self, mock_urlopen, tmp_path):
+        """ocr_image returns empty string on URLError."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_urlopen.side_effect = urllib.error.URLError("Connection reset")
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        result = p.ocr_image(str(img_path), "prompt")
+        assert result == ""
+
+    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    def test_ocr_image_unexpected_error_returns_empty(self, mock_urlopen, tmp_path):
+        """ocr_image returns empty string on general Exception."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_urlopen.side_effect = RuntimeError("File I/O failure")
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        result = p.ocr_image(str(img_path), "prompt")
         assert result == ""
 
 

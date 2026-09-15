@@ -60,35 +60,35 @@ ai:
 
 ---
 
-## 2. Google Cloud Vision API (Required for Handwriting OCR)
+## 2. Handwriting OCR (AI Vision vs Google Cloud Vision)
 
-We use Google's Cloud Vision API for handwriting recognition because it is significantly more accurate for handwritten notes than on-device models.
+Living Ink supports two ways to recognize handwritten notes:
+
+### Option A: AI Vision OCR (Recommended — Zero Extra Setup)
+If you configure an AI provider with vision capabilities (**Google Gemini** or **OpenAI**), you **do not need Google Cloud Vision at all**.
+- Uses the **exact same API key** you configured in Step 1.
+- Gemini 2.0 Flash reads handwriting directly from page images with high accuracy.
+- Performs handwriting transcription and text cleanup in a single step.
+- No Google Cloud Console, no billing accounts, no service account JSON files.
+
+Simply leave `google_vision.credentials_path` empty in `config/config.yml`.
+
+### Option B: Google Cloud Vision API (Optional Fallback)
+If you prefer traditional Google Cloud Vision OCR, or use an AI provider without vision (or `provider: "none"`):
 
 1. **Create Project**:
    * Go to the [Google Cloud Console](https://console.cloud.google.com/).
    * Click the project dropdown (top left) and select **New Project**.
    * Name it "Remarkable OCR" and create it.
 2. **Enable API**:
-   * In the search bar, type "Cloud Vision API".
-   * Select **Cloud Vision API** from the marketplace results.
-   * Click **Enable**.
-   * *Note: Google Cloud includes a free tier of 1,000 units/month.*
+   * Search for "Cloud Vision API" and click **Enable**.
 3. **Create Service Account**:
-   * Go to **IAM & Admin** -> **Service Accounts**.
-   * Click **+ Create Service Account**.
-   * Name: `remarkable-ocr-sa`.
-   * Description: "OCR for remarkable sync".
-   * Click **Create and Continue**.
-   * **Role**: Select **Cloud Vision API User** (or **Basic** -> **Viewer**).
-   * Click **Done**.
+   * Go to **IAM & Admin** -> **Service Accounts** -> **+ Create Service Account**.
+   * Assign role **Cloud Vision API User**.
 4. **Download Key**:
-   * Click on the newly created service account email.
-   * Go to the **Keys** tab.
-   * Click **Add Key** -> **Create new key**.
-   * Select **JSON**.
-   * A `.json` file will download to your computer.
+   * Under the service account's **Keys** tab, click **Add Key** -> **Create new key** (JSON).
 5. **Configuration**:
-   * In `config/config.yml`, set `credentials_path` to the absolute path of your downloaded JSON file:
+   * In `config/config.yml`:
      ```yaml
      google_vision:
        credentials_path: "/Users/yourname/path/to/my-credentials.json"

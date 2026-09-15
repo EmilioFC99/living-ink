@@ -1,0 +1,12 @@
+Transcribe the handwritten text from this notebook page image.
+
+Rules:
+- Read all handwritten text carefully and accurately.
+- Correct obvious spelling errors and contextually impossible words.
+- Remove any crossed-out or scribbled-over text.
+- Preserve the original structure: headings, lists, numbered items, indentation.
+- Format the output as clean, readable plain text with proper paragraphs.
+- Preserve the author's original meaning and voice; do not summarize or add content.
+- Ignore page numbers, margin doodles, and non-text marks.
+
+Output plain text only.

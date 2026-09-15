@@ -30,9 +30,12 @@ ai:
 remarkable:
   device_token: "YOUR-DEVICE-TOKEN-HERE"
 
-# 3. Google Cloud Vision Configuration (Required for OCR)
+# 3. Google Cloud Vision Configuration (OPTIONAL)
+# Not needed if you use an AI provider with vision support (e.g., Gemini, OpenAI GPT-4o).
+# These providers can read handwriting directly from images — no separate OCR service needed.
+# Only configure this if you prefer Google Cloud Vision for OCR accuracy or already have credentials.
 google_vision:
-  # Option A: Path to your Service Account JSON file (Recommended)
+  # Option A: Path to your Service Account JSON file
   # Example: "/Users/alice/Documents/my-google-creds.json"
   credentials_path: ""
 
