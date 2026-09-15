@@ -494,7 +494,19 @@ def validate_environment():
         print(docs_hint)
         print("=" * 60 + "\n")
 
-        # We perform a hard exit here to prevent partial runs
+        if sys.stdin.isatty():
+            try:
+                prompt_text = "Would you like to run the interactive setup wizard now? [Y/n]: "
+                choice = input(prompt_text).strip().lower()
+                if choice in ("", "y", "yes"):
+                    from remarkable_mcp.setup_wizard import run_wizard
+
+                    run_wizard(repo_dir=ROOT)
+                    sys.exit(0)
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        # Hard exit if non-interactive or user declines
         sys.exit(1)
 
     log("Configuration valid.")

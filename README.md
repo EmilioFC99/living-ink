@@ -34,7 +34,13 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
     uv sync --all-extras
     ```
 
-2.  **Configure Keys**: Copy `config.yml.example` to `config/config.yml` (or `config.yml` in the root) and edit with your credentials:
+2.  **Run the Interactive Setup Wizard (Recommended)**:
+    ```bash
+    uv run python scripts/setup.py
+    ```
+    The wizard will automatically pair your tablet, verify your AI key live, detect your Obsidian vaults, and choose your destination folders!
+
+    *(Alternatively, you can manually copy `config.yml.example` to `config/config.yml` and edit it).*
     ```yaml
     # 1. AI Provider (e.g. Google Gemini, OpenAI, Ollama, etc.)
     ai:

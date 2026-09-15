@@ -10,6 +10,7 @@ import zipfile
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 import fitz  # PyMuPDF
 
 # reMarkable tablet screen dimensions (in pixels) - used as fallback

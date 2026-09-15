@@ -1,0 +1,324 @@
+"""Tests for remarkable_mcp.setup_wizard module.
+
+Covers Obsidian vault auto-detection, folder listing, reMarkable pairing,
+AI provider verification, LaunchAgent creation, YAML generation,
+and the interactive wizard workflow.
+"""
+
+import json
+from unittest.mock import MagicMock, patch
+
+import yaml
+
+from remarkable_mcp import setup_wizard
+from remarkable_mcp.setup_wizard import (
+    detect_obsidian_vaults,
+    generate_config_yaml,
+    get_existing_remarkable_token,
+    install_launch_agent,
+    list_vault_folders,
+    pair_remarkable_device,
+    run_wizard,
+    uninstall_launch_agent,
+    verify_ai_provider,
+    verify_remarkable_token,
+)
+
+# =========================================================================
+# Obsidian Detection & Vault Listing
+# =========================================================================
+
+
+class TestObsidianDetection:
+    """Tests for auto-detecting Obsidian vaults and folders."""
+
+    def test_detect_obsidian_vaults_missing_config(self):
+        """Returns empty list if obsidian.json does not exist."""
+        with patch("remarkable_mcp.setup_wizard.get_obsidian_config_path", return_value=None):
+            vaults = detect_obsidian_vaults()
+            assert vaults == []
+
+    def test_detect_obsidian_vaults_parses_json(self, tmp_path):
+        """Correctly extracts existing vaults from obsidian.json."""
+        v1 = tmp_path / "MyVault"
+        v1.mkdir()
+        v2 = tmp_path / "Work Vault"
+        v2.mkdir()
+        v_missing = tmp_path / "NonExistent"
+
+        config_file = tmp_path / "obsidian.json"
+        config_data = {
+            "vaults": {
+                "id1": {"path": str(v1), "open": True},
+                "id2": {"path": str(v2), "open": False},
+                "id3": {"path": str(v_missing), "open": False},
+            }
+        }
+        config_file.write_text(json.dumps(config_data), encoding="utf-8")
+
+        with patch(
+            "remarkable_mcp.setup_wizard.get_obsidian_config_path", return_value=config_file
+        ):
+            vaults = detect_obsidian_vaults()
+            assert len(vaults) == 2
+            names = [v["name"] for v in vaults]
+            assert "MyVault" in names
+            assert "Work Vault" in names
+
+    def test_list_vault_folders(self, tmp_path):
+        """Lists non-hidden subdirectories inside a vault."""
+        (tmp_path / "Notes").mkdir()
+        (tmp_path / "Projects").mkdir()
+        (tmp_path / ".obsidian").mkdir()
+        (tmp_path / ".trash").mkdir()
+        (tmp_path / "hello.txt").write_text("file")
+
+        folders = list_vault_folders(tmp_path)
+        assert folders == ["Notes", "Projects"]
+
+    def test_list_vault_folders_nonexistent(self, tmp_path):
+        """Handles non-existent directory gracefully."""
+        folders = list_vault_folders(tmp_path / "ghost")
+        assert folders == []
+
+
+# =========================================================================
+# reMarkable Token & Pairing
+# =========================================================================
+
+
+class TestRemarkablePairing:
+    """Tests for reMarkable device pairing and token checks."""
+
+    def test_get_existing_remarkable_token(self, tmp_path):
+        """Reads token from ~/.rmapi if present."""
+        rmapi = tmp_path / ".rmapi"
+        rmapi.write_text("valid-jwt-token", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            token = get_existing_remarkable_token()
+            assert token == "valid-jwt-token"
+
+    def test_get_existing_remarkable_token_ignores_placeholder(self, tmp_path):
+        """Ignores placeholder token values."""
+        rmapi = tmp_path / ".rmapi"
+        rmapi.write_text("YOUR-TOKEN-HERE", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            token = get_existing_remarkable_token()
+            assert token is None
+
+    def test_verify_remarkable_token_empty(self):
+        """Empty or placeholder token fails verification."""
+        ok, msg = verify_remarkable_token("")
+        assert ok is False
+        assert "empty" in msg.lower()
+
+    @patch("remarkable_mcp.sync.load_client_from_token")
+    def test_verify_remarkable_token_success(self, mock_load):
+        """Valid token connects and reports notebook count."""
+        mock_client = MagicMock()
+        mock_doc = MagicMock()
+        mock_doc.Type = "DocumentType"
+        mock_client.get_meta_items.return_value = [mock_doc]
+        mock_load.return_value = mock_client
+
+        ok, msg = verify_remarkable_token("good-token")
+        assert ok is True
+        assert "1 notebooks found" in msg
+
+    def test_pair_remarkable_device_length_check(self):
+        """Rejects codes that are not 8 characters."""
+        ok, token, msg = pair_remarkable_device("abc")
+        assert ok is False
+        assert "8 letters" in msg
+
+    @patch("remarkable_mcp.api.register_and_get_token")
+    def test_pair_remarkable_device_success(self, mock_register):
+        """Exchanges 8-letter code for device token."""
+        mock_register.return_value = "new-device-token"
+        ok, token, msg = pair_remarkable_device("abcdefgh")
+        assert ok is True
+        assert token == "new-device-token"
+
+
+# =========================================================================
+# AI Provider Verification
+# =========================================================================
+
+
+class TestAiVerification:
+    """Tests for AI provider connection testing."""
+
+    def test_verify_none_provider(self):
+        """Provider 'none' always passes without making network calls."""
+        ok, msg = verify_ai_provider("none")
+        assert ok is True
+        assert "disabled" in msg.lower()
+
+    @patch("remarkable_mcp.providers.get_provider")
+    def test_verify_provider_success(self, mock_get_provider):
+        """Provider returning valid response passes verification."""
+        mock_p = MagicMock()
+        mock_p.name = "gemini (gemini-flash-latest)"
+        mock_p.repair_text.return_value = "READY"
+        mock_get_provider.return_value = mock_p
+
+        ok, msg = verify_ai_provider("gemini", api_key="secret")
+        assert ok is True
+        assert "Verified" in msg
+
+    @patch("remarkable_mcp.providers.get_provider")
+    def test_verify_provider_failure(self, mock_get_provider):
+        """Provider returning empty string fails verification."""
+        mock_p = MagicMock()
+        mock_p.name = "gemini"
+        mock_p.repair_text.return_value = ""
+        mock_get_provider.return_value = mock_p
+
+        ok, msg = verify_ai_provider("gemini", api_key="bad-key")
+        assert ok is False
+        assert "empty response" in msg.lower()
+
+
+# =========================================================================
+# Configuration YAML Generation
+# =========================================================================
+
+
+class TestConfigGeneration:
+    """Tests for config.yml generation."""
+
+    def test_generate_config_yaml_valid(self):
+        """Generated YAML parses back into valid python dict."""
+        yaml_str = generate_config_yaml(
+            ai_provider="gemini",
+            ai_api_key="my-key",
+            ai_model="gemini-flash-latest",
+            remarkable_token="tok123",
+            obsidian_enabled=True,
+            obsidian_vault_path="/Users/test/Vault",
+            obsidian_root_folder="Living Ink",
+            obsidian_mirror_folders=True,
+            apple_notes_enabled=False,
+        )
+        parsed = yaml.safe_load(yaml_str)
+        assert parsed["ai"]["provider"] == "gemini"
+        assert parsed["ai"]["api_key"] == "my-key"
+        assert parsed["remarkable"]["device_token"] == "tok123"
+        assert parsed["obsidian"]["enabled"] is True
+        assert parsed["obsidian"]["vault_path"] == "/Users/test/Vault"
+        assert parsed["obsidian"]["root_folder"] == "Living Ink"
+        assert parsed["obsidian"]["mirror_folders"] is True
+        assert parsed["apple_notes"]["enabled"] is False
+
+
+# =========================================================================
+# LaunchAgent Management
+# =========================================================================
+
+
+class TestLaunchAgent:
+    """Tests for macOS LaunchAgent installation."""
+
+    def test_install_launch_agent_non_macos(self):
+        """Rejects installation on non-macOS systems."""
+        with patch("platform.system", return_value="Linux"):
+            ok, msg = install_launch_agent()
+            assert ok is False
+            assert "only supported on macOS" in msg
+
+    @patch("subprocess.run")
+    @patch("platform.system", return_value="Darwin")
+    def test_install_launch_agent_macos(self, mock_system, mock_run, tmp_path):
+        """Generates valid LaunchAgent plist file and runs launchctl."""
+        mock_run.return_value = MagicMock(returncode=0)
+
+        mock_plist_path = tmp_path / "com.livingink.sync.plist"
+        with patch.object(setup_wizard, "LAUNCH_AGENT_PLIST", mock_plist_path):
+            ok, msg = install_launch_agent(repo_dir=tmp_path, interval_seconds=3600)
+            assert ok is True
+            assert mock_plist_path.exists()
+            content = mock_plist_path.read_text(encoding="utf-8")
+            assert "com.livingink.sync" in content
+            assert "<integer>3600</integer>" in content
+
+    @patch("subprocess.run")
+    def test_uninstall_launch_agent(self, mock_run, tmp_path):
+        """Uninstalls and removes existing LaunchAgent plist."""
+        mock_plist = tmp_path / "com.livingink.sync.plist"
+        mock_plist.write_text("<plist></plist>", encoding="utf-8")
+        mock_run.return_value = MagicMock(returncode=0)
+
+        with patch.object(setup_wizard, "LAUNCH_AGENT_PLIST", mock_plist):
+            ok, msg = uninstall_launch_agent()
+            assert ok is True
+            assert not mock_plist.exists()
+
+
+# =========================================================================
+# Interactive Wizard Execution
+# =========================================================================
+
+
+class TestRunWizard:
+    """Tests for the interactive walkthrough workflow."""
+
+    @patch("remarkable_mcp.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
+    @patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch(
+        "remarkable_mcp.setup_wizard.get_existing_remarkable_token", return_value="existing-token"
+    )
+    @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
+    def test_run_wizard_standard_flow(
+        self,
+        mock_detect_vaults,
+        mock_get_token,
+        mock_verify_ai,
+        mock_verify_rm,
+        tmp_path,
+    ):
+        """Walkthrough runs through all steps and creates config/config.yml."""
+        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
+        (tmp_path / "MyVault").mkdir()
+        (tmp_path / "MyVault" / "Living Ink").mkdir()
+
+        # Simulated user responses:
+        # Step 1: Use existing token -> "y"
+        # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
+        # Step 3: Enable Obsidian -> "y", Select vault -> "1",
+        #         Choose folder -> "1" (Living Ink), Mirror -> "y"
+        # Apple Notes -> "n"
+        # macOS background sync -> "n"
+        # First sync -> "n"
+        inputs = iter(
+            [
+                "y",  # Use existing token
+                "1",  # Gemini
+                "AIzaTestKey",  # API Key
+                "y",  # Enable Obsidian
+                "1",  # Vault 1
+                "1",  # Existing folder 1
+                "y",  # Mirror folders
+                "n",  # Apple notes
+                "n",  # Background sync
+                "n",  # First sync
+            ]
+        )
+
+        outputs = []
+        result = run_wizard(
+            input_func=lambda prompt="": next(inputs),
+            print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
+            repo_dir=tmp_path,
+        )
+
+        assert result is True
+        saved_config = tmp_path / "config" / "config.yml"
+        assert saved_config.exists()
+        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
+        assert cfg["ai"]["provider"] == "gemini"
+        assert cfg["ai"]["api_key"] == "AIzaTestKey"
+        assert cfg["remarkable"]["device_token"] == "existing-token"
+        assert cfg["obsidian"]["enabled"] is True
+        assert cfg["obsidian"]["root_folder"] == "Living Ink"

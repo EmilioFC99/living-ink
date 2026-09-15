@@ -56,6 +56,20 @@ You can customize this in `config/config.yml`:
 
 ---
 
+## Quick Start: Setup Wizard
+
+The easiest way to get started is the interactive setup wizard:
+```bash
+uv run python scripts/setup.py
+```
+It guides you through:
+1. **reMarkable Pairing**: Pair using your 8-letter code from [my.remarkable.com](https://my.remarkable.com/device/desktop/connect) (or auto-detects `~/.rmapi`).
+2. **AI Provider**: Select Google Gemini, OpenAI, Ollama, etc., and verifies your key live.
+3. **Obsidian Vault Auto-Detection**: Automatically detects your vaults and lets you pick an existing or new destination folder.
+4. **Background Sync**: Optionally installs a macOS background daemon to sync your notes every hour.
+
+---
+
 ## Usage
 
 ### Process All New Notes
