@@ -146,7 +146,18 @@ def cmd_status(args, root: Optional[Path] = None):
             backup_note = f" {dim('(Cloud backup ready)')}" if cloud_ok else ""
             print(f"reMarkable:    {green('Connected')} (USB SSH — Preferred){backup_note}")
         elif cloud_ok:
-            print(f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB SSH unplugged)")
+            # Check if USB is physically plugged in and reachable
+            if "Tablet reached" in ssh_msg or "unauthorized" in ssh_msg.lower():
+                print(
+                    f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB plugged in but SSH key unauthorized)"
+                )
+                print(
+                    f"               {dim(f'→ Run: ssh-copy-id root@{ssh_host} to enable USB SSH')}"
+                )
+            else:
+                print(
+                    f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB SSH unplugged)"
+                )
         else:
             print(f"reMarkable:    {red('Disconnected')} (USB SSH: {ssh_msg})")
     else:  # preferred == "cloud"
