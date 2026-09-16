@@ -15,6 +15,7 @@ from remarkable_mcp.setup_wizard import (
     detect_obsidian_vaults,
     generate_config_yaml,
     get_existing_remarkable_token,
+    install_cli_command,
     install_launch_agent,
     list_vault_folders,
     pair_remarkable_device,
@@ -303,6 +304,26 @@ class TestLaunchAgent:
             ok, msg = uninstall_launch_agent()
             assert ok is True
             assert not mock_plist.exists()
+
+
+class TestInstallCliCommand:
+    """Tests for global living-ink CLI launcher installation."""
+
+    def test_install_cli_command_success(self, tmp_path):
+        """Creates executable wrapper pointing to repository root."""
+        repo_dir = tmp_path / "my-repo"
+        bin_dir = tmp_path / "bin"
+        repo_dir.mkdir()
+
+        ok, msg = install_cli_command(repo_dir=repo_dir, bin_dir=bin_dir)
+        assert ok is True
+        assert "Global command 'living-ink' installed" in msg
+
+        wrapper = bin_dir / "living-ink"
+        assert wrapper.exists()
+        content = wrapper.read_text(encoding="utf-8")
+        assert f'--directory "{repo_dir.resolve()}"' in content
+        assert 'living-ink "$@"' in content
 
 
 # =========================================================================

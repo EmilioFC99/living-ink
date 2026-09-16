@@ -424,6 +424,32 @@ def uninstall_launch_agent() -> Tuple[bool, str]:
         return False, f"Failed to uninstall LaunchAgent: {e}"
 
 
+def install_cli_command(repo_dir: Path, bin_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Install or update the global 'living-ink' CLI command wrapper in ~/.local/bin.
+
+    Args:
+        repo_dir: Absolute path to the Living Ink repository root.
+        bin_dir: Target directory for the executable (default: ~/.local/bin).
+
+    Returns:
+        Tuple of (success_bool, message_str).
+    """
+    if bin_dir is None:
+        bin_dir = Path.home() / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bin_dir / "living-ink"
+    script = f"""#!/usr/bin/env bash
+export PATH="$HOME/.local/bin:$PATH"
+exec uv run --directory "{repo_dir.resolve()}" living-ink "$@"
+"""
+    try:
+        wrapper.write_text(script, encoding="utf-8")
+        wrapper.chmod(0o755)
+        return True, f"Global command 'living-ink' installed to {wrapper}"
+    except Exception as e:
+        return False, f"Could not create global command wrapper: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Config File Generation
 # ---------------------------------------------------------------------------
@@ -899,6 +925,11 @@ def run_wizard(
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file.write_text(yaml_content, encoding="utf-8")
     print_func(green(f"✓ Configuration saved to {bold(str(config_file))}"))
+
+    # Install/update global CLI launcher in ~/.local/bin
+    ok_cli, msg_cli = install_cli_command(repo_dir=repo_dir)
+    if ok_cli:
+        print_func(green(f"  ✓ {msg_cli}"))
 
     # Optional: macOS Background Sync Setup
     if platform.system() == "Darwin":
