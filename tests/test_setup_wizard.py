@@ -322,8 +322,8 @@ class TestInstallCliCommand:
         wrapper = bin_dir / "living-ink"
         assert wrapper.exists()
         content = wrapper.read_text(encoding="utf-8")
-        assert f'--directory "{repo_dir.resolve()}"' in content
-        assert 'python -m remarkable_mcp.cli "$@"' in content
+        assert f'VENV_BIN="{repo_dir.resolve()}/.venv/bin/living-ink"' in content
+        assert 'exec "$VENV_BIN" "$@"' in content
 
 
 # =========================================================================
