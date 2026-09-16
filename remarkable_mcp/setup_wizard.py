@@ -709,7 +709,7 @@ def run_wizard(
         )
         print_func("  3. Make sure Developer Mode / SSH is enabled on your tablet:")
         print_func(
-            f"     → Paper Pro: {bold('Settings → General → Software → Advanced → Developer mode')}"
+            f"     → Paper Pro / Pure: {bold('Settings → General → Software → Advanced → Developer mode')}"
         )
         print_func(
             f"     → reMarkable 2: {bold('Settings → General → Help → About → Copyrights & licenses')}"
