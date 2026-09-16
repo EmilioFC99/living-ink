@@ -426,7 +426,9 @@ def uninstall_launch_agent() -> Tuple[bool, str]:
         return False, f"Failed to uninstall LaunchAgent: {e}"
 
 
-def install_cli_command(repo_dir: Path, bin_dir: Optional[Path] = None) -> Tuple[bool, str]:
+def install_cli_command(
+    repo_dir: Optional[Path] = None, bin_dir: Optional[Path] = None
+) -> Tuple[bool, str]:
     """Install or update the global 'living-ink' CLI command wrapper in ~/.local/bin.
 
     Args:
@@ -444,6 +446,11 @@ def install_cli_command(repo_dir: Path, bin_dir: Optional[Path] = None) -> Tuple
     # Don't overwrite if living-ink is already managed by uv tool
     if wrapper.is_symlink() and bin_dir == Path.home() / ".local" / "bin":
         return True, f"Global command 'living-ink' is active at {wrapper} (managed by uv tool)"
+
+    if repo_dir is None:
+        if shutil.which("living-ink"):
+            return True, "Global command 'living-ink' is already active in PATH"
+        return False, "No repository directory provided to create CLI wrapper"
 
     script = f"""#!/usr/bin/env bash
 VENV_BIN="{repo_dir.resolve()}/.venv/bin/living-ink"
@@ -971,15 +978,19 @@ def run_wizard(
         print_func()
         print_func(cyan("Starting sync pipeline..."))
         print_func()
-        proc_script = repo_dir / "scripts" / "process_notebook.py"
+        proc_script = (repo_dir / "scripts" / "process_notebook.py") if repo_dir else None
         uv_cmd = find_uv_path()
         try:
             if shutil.which("living-ink"):
                 subprocess.run(["living-ink", "sync"], check=False)
-            elif shutil.which(uv_cmd):
+            elif proc_script and proc_script.exists() and shutil.which(uv_cmd):
                 subprocess.run([uv_cmd, "run", "python", str(proc_script)], check=False)
-            else:
+            elif proc_script and proc_script.exists():
                 subprocess.run([sys.executable, str(proc_script)], check=False)
+            else:
+                from remarkable_mcp.pipeline import main as pipeline_main
+
+                pipeline_main()
         except Exception as e:
             print_func(red(f"Error running sync: {e}"))
 

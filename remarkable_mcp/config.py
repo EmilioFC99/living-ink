@@ -60,15 +60,15 @@ def get_config_path(repo_dir: Optional[Path] = None) -> Path:
     if user_repo_cfg.exists():
         return user_repo_cfg.resolve()
 
-    # Legacy: ~/.living-ink/config.yml
-    legacy_cfg = Path.home() / ".living-ink" / "config.yml"
-    if legacy_cfg.exists():
-        return legacy_cfg.resolve()
+    # Legacy config: ~/.living-ink/config.yml
+    legacy_config = Path.home() / ".living-ink" / "config.yml"
+    if legacy_config.exists():
+        return legacy_config.resolve()
 
-    # Default target for new setups
-    if repo_dir and (repo_dir / "pyproject.toml").exists():
+    if repo_dir:
         return (repo_dir / "config" / "config.yml").resolve()
-    return xdg_config
+
+    return xdg_config.resolve()
 
 
 def get_config_dir(repo_dir: Optional[Path] = None) -> Path:

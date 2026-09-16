@@ -15,8 +15,8 @@ from typing import Optional
 
 
 # Find project root or current working directory
-def get_root() -> Path:
-    """Find the Living Ink root directory."""
+def get_root() -> Optional[Path]:
+    """Find the Living Ink root directory if running from a repo checkout."""
     pkg_dir = Path(__file__).parent.parent.resolve()
     if (pkg_dir / "pyproject.toml").exists():
         return pkg_dir
@@ -24,7 +24,7 @@ def get_root() -> Path:
     cwd = Path.cwd()
     if (cwd / "config" / "config.yml").exists() or (cwd / "config.yml").exists():
         return cwd
-    return pkg_dir
+    return None
 
 
 def get_config_path(root: Optional[Path] = None) -> Path:
@@ -34,17 +34,17 @@ def get_config_path(root: Optional[Path] = None) -> Path:
     return _get_config_path(root)
 
 
-def cmd_setup(args, root: Path):
+def cmd_setup(args, root: Optional[Path] = None):
     """Run the interactive setup wizard."""
     from remarkable_mcp.setup_wizard import run_wizard
 
     run_wizard(repo_dir=root)
 
 
-def cmd_sync(args, root: Path):
+def cmd_sync(args, root: Optional[Path] = None):
     """Run the notebook sync pipeline."""
-    # Ensure root is in sys.path
-    if str(root) not in sys.path:
+    # Ensure root is in sys.path if running from a repo checkout
+    if root and str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
     # Handle connection overrides
@@ -80,7 +80,7 @@ def cmd_sync(args, root: Path):
     sync_main()
 
 
-def cmd_status(args, root: Path):
+def cmd_status(args, root: Optional[Path] = None):
     """Display system and connection status."""
     from remarkable_mcp.setup_wizard import (
         LAUNCH_AGENT_PLIST,
