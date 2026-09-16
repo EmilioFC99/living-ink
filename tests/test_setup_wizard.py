@@ -166,7 +166,7 @@ class TestRemarkablePairing:
 
         ok, msg = verify_remarkable_ssh()
         assert ok is False
-        assert "Could not establish SSH connection" in msg
+        assert "Could not establish passwordless SSH connection" in msg
 
 
 # =========================================================================
@@ -251,7 +251,6 @@ class TestConfigGeneration:
             use_ssh=True,
             ssh_host="10.11.99.1",
             ssh_port=22,
-            ssh_password="my-password",
             obsidian_enabled=True,
             obsidian_vault_path="/Users/test/Vault",
         )
@@ -260,7 +259,6 @@ class TestConfigGeneration:
         assert parsed["remarkable"]["preferred_connection"] == "ssh"
         assert parsed["remarkable"]["use_ssh"] is True
         assert parsed["remarkable"]["ssh_host"] == "10.11.99.1"
-        assert parsed["remarkable"]["ssh_password"] == "my-password"
         assert parsed["remarkable"]["device_token"] == ""
 
 
@@ -394,7 +392,7 @@ class TestRunWizard:
         (tmp_path / "MyVault" / "Living Ink").mkdir()
 
         # Simulated user responses:
-        # Step 1: Default (1 - SSH) -> password "secret" -> host default "" -> Cloud backup -> "n"
+        # Step 1: Default (1 - SSH) -> host default "" -> Cloud backup -> "n"
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
         #         Choose folder -> "1" (Living Ink), Mirror -> "y"
@@ -404,7 +402,6 @@ class TestRunWizard:
         inputs = iter(
             [
                 "1",  # SSH connection (option 1)
-                "secret",  # Root password
                 "",  # Host default (10.11.99.1)
                 "n",  # Cloud backup -> no
                 "1",  # Gemini
@@ -434,7 +431,6 @@ class TestRunWizard:
         assert cfg["ai"]["api_key"] == "AIzaTestKey"
         assert cfg["remarkable"]["preferred_connection"] == "ssh"
         assert cfg["remarkable"]["use_ssh"] is True
-        assert cfg["remarkable"]["ssh_password"] == "secret"
         assert cfg["remarkable"]["ssh_host"] == "10.11.99.1"
         assert cfg["remarkable"]["device_token"] == ""
         assert cfg["obsidian"]["enabled"] is True
@@ -461,7 +457,7 @@ class TestRunWizard:
         (tmp_path / "MyVault").mkdir()
         (tmp_path / "MyVault" / "Living Ink").mkdir()
 
-        # Step 1: Option 1 (SSH) -> password "secret" -> host default ""
+        # Step 1: Option 1 (SSH) -> host default ""
         #         -> Cloud backup: "y" -> use existing token: "y"
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
@@ -470,7 +466,6 @@ class TestRunWizard:
         inputs = iter(
             [
                 "1",  # SSH connection
-                "secret",  # Root password
                 "",  # Host default
                 "y",  # Configure Cloud backup
                 "y",  # Use existing token
@@ -500,4 +495,3 @@ class TestRunWizard:
         assert cfg["remarkable"]["preferred_connection"] == "ssh"
         assert cfg["remarkable"]["use_ssh"] is True
         assert cfg["remarkable"]["device_token"] == "existing-token"
-        assert cfg["remarkable"]["ssh_password"] == "secret"

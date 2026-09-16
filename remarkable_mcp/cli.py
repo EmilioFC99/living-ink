@@ -120,11 +120,7 @@ def cmd_status(args, root: Path):
     # 2. reMarkable Tablet
     rm_cfg = cfg.get("remarkable", {})
     preferred = rm_cfg.get("preferred_connection", "").strip().lower()
-    has_ssh = (
-        rm_cfg.get("use_ssh", False)
-        or cfg.get("use_ssh", False)
-        or bool(rm_cfg.get("ssh_password"))
-    )
+    has_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
     token = rm_cfg.get("device_token", "")
 
     if not preferred:
@@ -136,8 +132,7 @@ def cmd_status(args, root: Path):
     if has_ssh or preferred == "ssh":
         ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
         ssh_port = rm_cfg.get("ssh_port", 22)
-        ssh_password = rm_cfg.get("ssh_password", "") or None
-        ssh_ok, ssh_msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port, password=ssh_password)
+        ssh_ok, ssh_msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port)
 
     cloud_ok, cloud_msg = False, ""
     if token:

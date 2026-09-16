@@ -31,12 +31,10 @@ remarkable:
   preferred_connection: "ssh"          # "ssh" (Recommended — Free, fast, offline) or "cloud"
 
   # USB SSH Settings (Used first if preferred_connection: "ssh", or as backup if "cloud")
-  # Connect tablet via USB-C. Enable developer mode on tablet:
-  # Settings → General → Software → Developer mode
+  # Connect tablet via USB-C. Authorize once: ssh-copy-id root@10.11.99.1
   use_ssh: true
   ssh_host: "10.11.99.1"               # Default USB IP for reMarkable
   ssh_port: 22
-  ssh_password: ""                     # Root password from Developer mode screen (or leave empty if using SSH keys)
   # ssh_user: "root"                   # Default: root
 
   # reMarkable Cloud Settings (Used first if preferred_connection: "cloud", or as backup if "ssh")

@@ -79,14 +79,14 @@ Publish: Destination.publish()
 | `config.yml` | `ai.provider` / `ai.api_key` | LLM provider preset & API key for text cleanup |
 | `config.yml` | `remarkable.preferred_connection` | Preferred connection method (`ssh` or `cloud`) |
 | `config.yml` | `remarkable.use_ssh` | Enable USB SSH connection (`true`/`false`) |
-| `config.yml` | `remarkable.ssh_host` / `remarkable.ssh_password` | SSH connection parameters |
+| `config.yml` | `remarkable.ssh_host` / `remarkable.ssh_port` | SSH connection parameters (passwordless auth) |
 | `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token |
 | `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` | Obsidian destination toggle |
 | `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination toggle |
 | env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method (`ssh` or `cloud`) |
 | env var | `REMARKABLE_USE_SSH` | Use USB SSH instead of Cloud (`true`/`false`) |
-| env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PASSWORD` | SSH connection overrides |
+| env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH connection overrides |
 | env var | `OPENAI_REPAIR_MODEL` | Model name override |
 | env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
 

@@ -123,9 +123,6 @@ if YAML_CONFIG_PATH.exists():
                 if "ssh_host" in rm_cfg and rm_cfg["ssh_host"]:
                     os.environ["REMARKABLE_SSH_HOST"] = str(rm_cfg["ssh_host"]).strip()
 
-                if "ssh_password" in rm_cfg and rm_cfg["ssh_password"]:
-                    os.environ["REMARKABLE_SSH_PASSWORD"] = str(rm_cfg["ssh_password"]).strip()
-
                 if "ssh_port" in rm_cfg and rm_cfg["ssh_port"]:
                     os.environ["REMARKABLE_SSH_PORT"] = str(rm_cfg["ssh_port"]).strip()
 

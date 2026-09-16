@@ -105,15 +105,19 @@ Living Ink supports both direct USB SSH (free & offline) and the official reMark
 
 ### Option A: Direct USB SSH (Recommended — Free, No Subscription)
 SSH connects directly to your tablet over USB. No cloud account or subscription needed.
+Living Ink uses standard, secure **passwordless SSH key authentication** (`ssh -o BatchMode=yes`) — passwords are never stored in config files.
 
-1. **Enable Developer Mode**:
-   * On your reMarkable tablet, navigate to **Settings → General → Software → Developer mode** (or **Help → About → Copyrights and licenses**).
-   * Note the root password displayed on screen.
-2. **Connect via USB**:
+1. **Connect via USB**:
    * Connect your tablet to your computer using a USB-C cable (default IP: `10.11.99.1`).
-   * Verify access: `ssh root@10.11.99.1`
+2. **Authorize Your Computer Once**:
+   * Run in your terminal:
+     ```bash
+     ssh-copy-id root@10.11.99.1
+     ```
+   * Enter your tablet's root password when prompted (found on tablet under **Settings → General → Software → Developer mode** or **Help → About → Copyrights and licenses**).
+   * Once copied, your computer is permanently authorized!
 3. **Configure** (choose one):
-   * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`. The wizard will also offer to configure Cloud as a backup.
+   * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`.
    * **Manual**: In `config/config.yml`:
      ```yaml
      remarkable:
@@ -121,15 +125,8 @@ SSH connects directly to your tablet over USB. No cloud account or subscription 
        use_ssh: true
        ssh_host: "10.11.99.1"
        ssh_port: 22
-       ssh_password: "your-root-password"
        device_token: "YOUR-CLOUD-TOKEN"  # Optional backup
      ```
-
-> **Tip**: For passwordless auth, copy your SSH key to the tablet:
-> ```bash
-> ssh-copy-id root@10.11.99.1
-> ```
-> Then leave `ssh_password` empty in your config.
 
 ### Option B: reMarkable Cloud (Requires Connect Subscription)
 1. **Get One-Time Code**:

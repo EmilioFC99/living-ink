@@ -219,15 +219,13 @@ def verify_remarkable_ssh(
     host: str = "10.11.99.1",
     user: str = "root",
     port: int = 22,
-    password: Optional[str] = None,
 ) -> Tuple[bool, str]:
-    """Test SSH connection to reMarkable tablet over USB.
+    """Test passwordless SSH connection to reMarkable tablet over USB.
 
     Args:
         host: SSH host address (default: 10.11.99.1 for USB).
         user: SSH user (default: root).
         port: SSH port (default: 22).
-        password: SSH password (optional, uses key-based auth if None).
 
     Returns:
         Tuple of (success_bool, message_str).
@@ -235,12 +233,15 @@ def verify_remarkable_ssh(
     try:
         from remarkable_mcp.ssh import SSHClient
 
-        client = SSHClient(host=host, user=user, port=port, password=password)
+        client = SSHClient(host=host, user=user, port=port)
         if client.check_connection():
             items = client.get_meta_items()
             docs = [it for it in items if getattr(it, "Type", "") == "DocumentType"]
             return True, f"Connected via USB SSH ({len(docs)} notebooks found)"
-        return False, "Could not establish SSH connection. Is the tablet connected via USB?"
+        return (
+            False,
+            "Could not establish passwordless SSH connection. Is the tablet connected via USB and authorized?",
+        )
     except Exception as e:
         return False, f"SSH connection failed: {e}"
 
@@ -437,7 +438,6 @@ def generate_config_yaml(
     use_ssh: bool = True,
     ssh_host: str = "10.11.99.1",
     ssh_port: int = 22,
-    ssh_password: str = "",
     obsidian_enabled: bool = False,
     obsidian_vault_path: str = "",
     obsidian_root_folder: str = "Living Ink",
@@ -457,7 +457,6 @@ def generate_config_yaml(
         use_ssh: Whether USB SSH connection is enabled.
         ssh_host: SSH host address.
         ssh_port: SSH port number.
-        ssh_password: SSH root password (empty if using key-based auth).
         obsidian_enabled: Whether Obsidian destination is enabled.
         obsidian_vault_path: Absolute path to Obsidian vault.
         obsidian_root_folder: Root folder inside the vault.
@@ -487,7 +486,6 @@ remarkable:
   use_ssh: {"true" if use_ssh else "false"}
   ssh_host: "{ssh_host}"
   ssh_port: {ssh_port}
-  ssh_password: "{ssh_password}"
   device_token: "{remarkable_token}"
 
 # 3. Google Cloud Vision (OPTIONAL — Not needed when using Gemini or OpenAI)
@@ -616,7 +614,6 @@ def run_wizard(
     use_ssh = True
     ssh_host = "10.11.99.1"
     ssh_port = 22
-    ssh_password = ""
 
     conn_choice = input_func(bold("Select preferred connection [1-2] (default: 1): ")).strip()
     if conn_choice in ("", "1"):
@@ -625,30 +622,24 @@ def run_wizard(
         print_func()
         print_func("To use USB SSH:")
         print_func("  1. Connect your reMarkable to this computer via USB-C cable.")
-        print_func("  2. On the tablet: " + bold("Settings → General → Software → Developer mode"))
-        print_func("  3. Note the root password shown on screen.")
+        print_func(
+            "  2. Living Ink uses passwordless SSH keys (BatchMode=yes) — no passwords are ever stored."
+        )
         print_func()
-
-        ssh_pass_input = input_func(
-            bold("Enter root password from tablet (or press Enter for SSH key auth): ")
-        ).strip()
-        ssh_password = ssh_pass_input
 
         host_input = input_func(bold("SSH host [10.11.99.1]: ")).strip()
         if host_input:
             ssh_host = host_input
 
-        print_func(dim("  Verifying SSH connection..."))
-        ok, msg = verify_remarkable_ssh(
-            host=ssh_host,
-            password=ssh_password if ssh_password else None,
-        )
+        print_func(dim("  Verifying passwordless SSH connection..."))
+        ok, msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port)
         if ok:
             print_func(green(f"  ✓ {msg}"))
         else:
             print_func(yellow(f"  ⚠️ {msg}"))
+            print_func(f"  To authorize this computer, run: {bold(f'ssh-copy-id root@{ssh_host}')}")
             retry = (
-                input_func(bold("Continue anyway (you can plug it in later)? [Y/n]: "))
+                input_func(bold("Continue anyway (you can run ssh-copy-id later)? [Y/n]: "))
                 .strip()
                 .lower()
             )
@@ -683,30 +674,19 @@ def run_wizard(
         )
         if ssh_backup in ("y", "yes"):
             use_ssh = True
-            print_func()
-            print_func("To set up USB SSH backup:")
-            print_func("  1. Connect your reMarkable via USB-C cable.")
-            print_func(
-                "  2. Check root password: "
-                + bold("Settings → General → Software → Developer mode")
-            )
-            print_func()
-            ssh_pass_input = input_func(
-                bold("Enter root password (or press Enter for SSH key auth): ")
-            ).strip()
-            ssh_password = ssh_pass_input
             host_input = input_func(bold("SSH host [10.11.99.1]: ")).strip()
             if host_input:
                 ssh_host = host_input
-            print_func(dim("  Verifying SSH connection..."))
-            ok, msg = verify_remarkable_ssh(
-                host=ssh_host,
-                password=ssh_password if ssh_password else None,
-            )
+            print_func(dim("  Verifying passwordless SSH connection..."))
+            ok, msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port)
             if ok:
                 print_func(green(f"  ✓ {msg}"))
             else:
-                print_func(yellow(f"  ⚠️ {msg} (Saved as backup anyway)"))
+                print_func(
+                    yellow(
+                        f"  ⚠️ {msg} (Saved as backup; run ssh-copy-id root@{ssh_host} to enable)"
+                    )
+                )
         else:
             use_ssh = False
 
@@ -908,7 +888,6 @@ def run_wizard(
         use_ssh=use_ssh,
         ssh_host=ssh_host,
         ssh_port=ssh_port,
-        ssh_password=ssh_password,
         obsidian_enabled=obsidian_enabled,
         obsidian_vault_path=obsidian_vault_path,
         obsidian_root_folder=obsidian_root_folder,
