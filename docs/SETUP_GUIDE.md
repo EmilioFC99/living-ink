@@ -108,15 +108,21 @@ SSH connects directly to your tablet over USB. No cloud account or subscription 
 Living Ink uses standard, secure **passwordless SSH key authentication** (`ssh -o BatchMode=yes`) — passwords are never stored in config files.
 
 1. **Connect via USB**:
-   * Connect your tablet to your computer using a USB-C cable (default IP: `10.11.99.1`).
-2. **Authorize Your Computer Once**:
+   * Connect your tablet to your computer using a data-capable USB-C cable (default IP: `10.11.99.1`).
+   * *(MacBook tip: If the tablet doesn't connect, try plugging into the other USB-C port)*.
+2. **Turn on USB Web Interface & Developer Mode**:
+   * **USB Web Interface**: On the tablet, open **Settings → Storage** and toggle **USB web interface** to **ON**.
+   * **Developer Mode / SSH**:
+     * **Paper Pro**: Go to **Settings → General → Software → Advanced → Developer mode** and enable it.
+     * **reMarkable 2**: Go to **Settings → General → Help → About → Copyrights and licenses** to view your root password.
+3. **Authorize Your Computer Once**:
    * Run in your terminal:
      ```bash
      ssh-copy-id root@10.11.99.1
      ```
-   * Enter your tablet's root password when prompted (found on tablet under **Settings → General → Software → Developer mode** or **Help → About → Copyrights and licenses**).
+   * Enter your tablet's root password when prompted.
    * Once copied, your computer is permanently authorized!
-3. **Configure** (choose one):
+4. **Configure** (choose one):
    * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`.
    * **Manual**: In `config/config.yml`:
      ```yaml

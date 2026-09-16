@@ -238,10 +238,40 @@ def verify_remarkable_ssh(
             items = client.get_meta_items()
             docs = [it for it in items if getattr(it, "Type", "") == "DocumentType"]
             return True, f"Connected via USB SSH ({len(docs)} notebooks found)"
-        return (
-            False,
-            "Could not establish passwordless SSH connection. Is the tablet connected via USB and authorized?",
-        )
+
+        # Perform targeted network diagnostics to provide precise guidance
+        import socket
+
+        web_interface_active = False
+        ssh_port_open = False
+
+        try:
+            with socket.create_connection((host, 80), timeout=0.6):
+                web_interface_active = True
+        except Exception:
+            pass
+
+        try:
+            with socket.create_connection((host, port), timeout=0.6):
+                ssh_port_open = True
+        except Exception:
+            pass
+
+        if web_interface_active and not ssh_port_open:
+            return (
+                False,
+                "Could not establish passwordless SSH connection: USB Web Interface is active, but SSH is disabled. Please ensure Developer Mode is enabled on your tablet (Settings → General → Software → Advanced → Developer mode).",
+            )
+        elif web_interface_active and ssh_port_open:
+            return (
+                False,
+                f"Could not establish passwordless SSH connection: Tablet reached, but SSH key authentication failed. Run 'ssh-copy-id {user}@{host}' to authorize this computer.",
+            )
+        else:
+            return (
+                False,
+                "Could not establish passwordless SSH connection. Is the tablet connected via USB, awake, and 'USB web interface' toggled ON under Settings → Storage?",
+            )
     except Exception as e:
         return False, f"SSH connection failed: {e}"
 
@@ -668,10 +698,24 @@ def run_wizard(
         preferred_connection = "ssh"
         use_ssh = True
         print_func()
-        print_func("To use USB SSH:")
-        print_func("  1. Connect your reMarkable to this computer via USB-C cable.")
+        print_func(bold("How to set up USB SSH on your reMarkable:"))
+        print_func("  1. Connect your tablet to this computer via USB-C cable.")
         print_func(
-            "  2. Living Ink uses passwordless SSH keys (BatchMode=yes) — no passwords are ever stored."
+            dim("     (Tip: If using a MacBook, try the other USB-C port if it doesn't connect)")
+        )
+        print_func("  2. Turn on the USB interface on the tablet:")
+        print_func(
+            f"     → Open {bold('Settings → Storage')} and toggle {bold('USB web interface')} to {green('ON')}."
+        )
+        print_func("  3. Make sure Developer Mode / SSH is enabled on your tablet:")
+        print_func(
+            f"     → Paper Pro: {bold('Settings → General → Software → Advanced → Developer mode')}"
+        )
+        print_func(
+            f"     → reMarkable 2: {bold('Settings → General → Help → About → Copyrights & licenses')}"
+        )
+        print_func(
+            "  4. Living Ink uses passwordless SSH keys (BatchMode=yes) — no passwords are ever stored."
         )
         print_func()
 
@@ -685,9 +729,18 @@ def run_wizard(
             print_func(green(f"  ✓ {msg}"))
         else:
             print_func(yellow(f"  ⚠️ {msg}"))
-            print_func(f"  To authorize this computer, run: {bold(f'ssh-copy-id root@{ssh_host}')}")
+            print_func()
+            print_func(cyan("  Troubleshooting tips:"))
+            print_func("    • Make sure the tablet is awake and screen is unlocked.")
+            print_func(
+                f"    • Check that {bold('USB web interface')} is toggled {green('ON')} under {bold('Settings → Storage')}."
+            )
+            print_func(
+                f"    • Authorize this computer with: {bold(f'ssh-copy-id root@{ssh_host}')}"
+            )
+            print_func()
             retry = (
-                input_func(bold("Continue anyway (you can run ssh-copy-id later)? [Y/n]: "))
+                input_func(bold("Continue anyway (you can finish setting up SSH later)? [Y/n]: "))
                 .strip()
                 .lower()
             )
