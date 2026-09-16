@@ -95,10 +95,53 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     (cfg_dir / "config.yml").write_text(
-        "remarkable:\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
+        "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
     )
     args = MagicMock()
     cmd_status(args, root=tmp_path)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
+    assert "USB SSH — Preferred" in captured.out
     mock_verify_ssh.assert_called_once()
+
+
+@patch("remarkable_mcp.cli.cmd_sync")
+def test_main_sync_command_with_cloud(mock_sync):
+    """'living-ink sync --cloud' passes cloud flag to cmd_sync."""
+    with patch("sys.argv", ["living-ink", "sync", "--cloud"]):
+        main()
+        mock_sync.assert_called_once()
+        args = mock_sync.call_args[0][0]
+        assert args.cloud is True
+
+
+def test_cmd_sync_sets_cloud_env(tmp_path, monkeypatch):
+    """cmd_sync sets REMARKABLE_PREFERRED_CONNECTION=cloud when --cloud is passed."""
+    import os
+
+    from remarkable_mcp.cli import cmd_sync
+
+    monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
+    args = MagicMock(ssh=False, cloud=True, notebook=None, limit=0, folder=None)
+    with patch("scripts.process_notebook.main"):
+        cmd_sync(args, root=tmp_path)
+        assert os.environ.get("REMARKABLE_PREFERRED_CONNECTION") == "cloud"
+
+
+@patch("remarkable_mcp.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
+@patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
+@patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+def test_cmd_status_ssh_unplugged_cloud_backup(
+    mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, capsys
+):
+    """cmd_status reports Cloud backup active when preferred SSH is unplugged."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yml").write_text(
+        "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  device_token: 'tok'\nai:\n  provider: 'none'\n"
+    )
+    args = MagicMock()
+    cmd_status(args, root=tmp_path)
+    captured = capsys.readouterr()
+    assert "Connected" in captured.out
+    assert "Cloud backup active" in captured.out

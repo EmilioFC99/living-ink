@@ -26,18 +26,21 @@ ai:
 #   api_key: "sk-proj-YOUR-OPENAI-KEY-HERE"
 
 # 2. reMarkable Tablet Connection
+# Choose your preferred connection method: "ssh" (USB first, Cloud backup) or "cloud" (Cloud first, USB backup).
 remarkable:
-  # Option A: Direct USB SSH (Recommended — free, fast, works offline)
+  preferred_connection: "ssh"          # "ssh" (Recommended — Free, fast, offline) or "cloud"
+
+  # USB SSH Settings (Used first if preferred_connection: "ssh", or as backup if "cloud")
   # Connect tablet via USB-C. Enable developer mode on tablet:
   # Settings → General → Software → Developer mode
   use_ssh: true
   ssh_host: "10.11.99.1"               # Default USB IP for reMarkable
   ssh_port: 22
-  ssh_password: ""                     # Root password from Developer mode screen
+  ssh_password: ""                     # Root password from Developer mode screen (or leave empty if using SSH keys)
   # ssh_user: "root"                   # Default: root
 
-  # Option B: reMarkable Cloud (Requires Connect subscription)
-  # Get your token by running the registration command or checking ~/.rmapi
+  # reMarkable Cloud Settings (Used first if preferred_connection: "cloud", or as backup if "ssh")
+  # Get your token by running 'living-ink setup' or checking ~/.rmapi
   # device_token: "YOUR-DEVICE-TOKEN-HERE"
 
 # 3. Google Cloud Vision Configuration (OPTIONAL)

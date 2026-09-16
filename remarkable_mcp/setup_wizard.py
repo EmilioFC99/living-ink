@@ -433,7 +433,8 @@ def generate_config_yaml(
     ai_api_key: str,
     ai_model: str,
     remarkable_token: str = "",
-    use_ssh: bool = False,
+    preferred_connection: str = "ssh",
+    use_ssh: bool = True,
     ssh_host: str = "10.11.99.1",
     ssh_port: int = 22,
     ssh_password: str = "",
@@ -451,8 +452,9 @@ def generate_config_yaml(
         ai_provider: AI provider preset name.
         ai_api_key: API key for the AI provider.
         ai_model: Model name for the AI provider.
-        remarkable_token: reMarkable Cloud device token (empty if using SSH).
-        use_ssh: Whether to use USB SSH instead of Cloud.
+        remarkable_token: reMarkable Cloud device token (empty if using SSH only).
+        preferred_connection: Preferred method ('ssh' or 'cloud').
+        use_ssh: Whether USB SSH connection is enabled.
         ssh_host: SSH host address.
         ssh_port: SSH port number.
         ssh_password: SSH root password (empty if using key-based auth).
@@ -481,6 +483,7 @@ ai:
 
 # 2. reMarkable Tablet Connection
 remarkable:
+  preferred_connection: "{preferred_connection}"
   use_ssh: {"true" if use_ssh else "false"}
   ssh_host: "{ssh_host}"
   ssh_port: {ssh_port}
@@ -513,6 +516,56 @@ apple_notes:
 # ---------------------------------------------------------------------------
 # Interactive Setup Wizard CLI
 # ---------------------------------------------------------------------------
+
+
+def _prompt_cloud_pairing(
+    input_func: Callable[[str], str],
+    print_func: Callable[..., None],
+) -> str:
+    """Helper to prompt user for reMarkable Cloud pairing or token."""
+    existing_token = get_existing_remarkable_token()
+
+    if existing_token:
+        print_func(green("Found existing reMarkable pairing token on this computer."))
+        choice = input_func(bold("Use existing reMarkable pairing? [Y/n]: ")).strip().lower()
+        if choice in ("", "y", "yes"):
+            print_func(dim("  Verifying token with reMarkable Cloud..."))
+            ok, msg = verify_remarkable_token(existing_token)
+            if ok:
+                print_func(green(f"  ✓ {msg}"))
+                return existing_token
+            else:
+                print_func(yellow(f"  ⚠️ Existing token could not connect: {msg}"))
+
+    while True:
+        print_func()
+        print_func("To pair with reMarkable Cloud:")
+        print_func(cyan("  1. Visit: ") + bold("https://my.remarkable.com/device/desktop/connect"))
+        print_func("  2. Sign in and copy the 8-letter code.")
+        print_func()
+        code_or_token = input_func(
+            bold("Enter your 8-letter code (or paste token, or press Enter to skip): ")
+        ).strip()
+
+        if not code_or_token:
+            return ""
+
+        if len(code_or_token) == 8:
+            print_func(dim("  Pairing device with reMarkable Cloud..."))
+            ok, token, msg = pair_remarkable_device(code_or_token)
+            if ok:
+                print_func(green(f"  ✓ {msg}"))
+                return token
+            else:
+                print_func(red(f"  ✗ {msg}"))
+        else:
+            print_func(dim("  Verifying token..."))
+            ok, msg = verify_remarkable_token(code_or_token)
+            if ok:
+                print_func(green(f"  ✓ {msg}"))
+                return code_or_token
+            else:
+                print_func(red(f"  ✗ {msg}"))
 
 
 def run_wizard(
@@ -552,19 +605,22 @@ def run_wizard(
     # -----------------------------------------------------------------------
     print_func(bold("[Step 1 of 4] reMarkable Tablet Connection"))
     print_func(dim("-" * 60))
-    print_func("Choose how to connect to your reMarkable tablet:")
-    print_func(f"  {bold('[1]')} USB SSH {green('(Recommended — Free, fast, no subscription)')}")
-    print_func(f"  {bold('[2]')} reMarkable Cloud (Requires Connect subscription)")
+    print_func("Choose your preferred connection method:")
+    print_func(
+        f"  {bold('[1]')} USB SSH {green('(Recommended — Free, fast, works offline, Cloud backup)')}"
+    )
+    print_func(f"  {bold('[2]')} reMarkable Cloud (Wireless sync, USB SSH backup)")
 
     remarkable_token = ""
-    use_ssh = False
+    preferred_connection = "ssh"
+    use_ssh = True
     ssh_host = "10.11.99.1"
     ssh_port = 22
     ssh_password = ""
 
-    conn_choice = input_func(bold("Select connection [1-2] (default: 1): ")).strip()
+    conn_choice = input_func(bold("Select preferred connection [1-2] (default: 1): ")).strip()
     if conn_choice in ("", "1"):
-        # --- SSH Mode ---
+        preferred_connection = "ssh"
         use_ssh = True
         print_func()
         print_func("To use USB SSH:")
@@ -574,7 +630,7 @@ def run_wizard(
         print_func()
 
         ssh_pass_input = input_func(
-            bold("Enter the root password from the tablet (or press Enter for SSH key auth): ")
+            bold("Enter root password from tablet (or press Enter for SSH key auth): ")
         ).strip()
         ssh_password = ssh_pass_input
 
@@ -591,59 +647,68 @@ def run_wizard(
             print_func(green(f"  ✓ {msg}"))
         else:
             print_func(yellow(f"  ⚠️ {msg}"))
-            retry = input_func(bold("Continue anyway (you can fix later)? [Y/n]: ")).strip().lower()
+            retry = (
+                input_func(bold("Continue anyway (you can plug it in later)? [Y/n]: "))
+                .strip()
+                .lower()
+            )
             if retry not in ("", "y", "yes"):
                 print_func(red("Setup aborted."))
                 return False
-    else:
-        # --- Cloud Mode ---
-        existing_token = get_existing_remarkable_token()
 
-        if existing_token:
-            print_func(green("Found existing reMarkable pairing token on this computer."))
-            choice = input_func(bold("Use existing reMarkable pairing? [Y/n]: ")).strip().lower()
-            if choice in ("", "y", "yes"):
-                print_func(dim("  Verifying token with reMarkable Cloud..."))
-                ok, msg = verify_remarkable_token(existing_token)
-                if ok:
-                    print_func(green(f"  ✓ {msg}"))
-                    remarkable_token = existing_token
-                else:
-                    print_func(yellow(f"  ⚠️ Existing token could not connect: {msg}"))
-
-        while not remarkable_token:
-            print_func()
-            print_func("To pair your reMarkable tablet:")
-            print_func(
-                cyan("  1. Visit: ") + bold("https://my.remarkable.com/device/desktop/connect")
+        # Offer Cloud as automatic backup
+        print_func()
+        cloud_backup = (
+            input_func(
+                bold("Configure reMarkable Cloud as an automatic backup (when unplugged)? [y/N]: ")
             )
-            print_func("  2. Sign in and copy the 8-letter code.")
+            .strip()
+            .lower()
+        )
+        if cloud_backup in ("y", "yes"):
+            remarkable_token = _prompt_cloud_pairing(input_func, print_func)
+    else:
+        preferred_connection = "cloud"
+        remarkable_token = _prompt_cloud_pairing(input_func, print_func)
+        if not remarkable_token:
+            print_func(red("reMarkable Cloud pairing is required for Cloud mode. Setup aborted."))
+            return False
+
+        # Offer USB SSH as automatic backup
+        print_func()
+        ssh_backup = (
+            input_func(bold("Configure USB SSH as an automatic backup (when plugged in)? [y/N]: "))
+            .strip()
+            .lower()
+        )
+        if ssh_backup in ("y", "yes"):
+            use_ssh = True
             print_func()
-            code_or_token = input_func(
-                bold("Enter your 8-letter code (or paste an existing token): ")
+            print_func("To set up USB SSH backup:")
+            print_func("  1. Connect your reMarkable via USB-C cable.")
+            print_func(
+                "  2. Check root password: "
+                + bold("Settings → General → Software → Developer mode")
+            )
+            print_func()
+            ssh_pass_input = input_func(
+                bold("Enter root password (or press Enter for SSH key auth): ")
             ).strip()
-
-            if not code_or_token:
-                print_func(red("A code or token is required. Please try again."))
-                continue
-
-            if len(code_or_token) == 8:
-                print_func(dim("  Pairing device with reMarkable Cloud..."))
-                ok, token, msg = pair_remarkable_device(code_or_token)
-                if ok:
-                    print_func(green(f"  ✓ {msg}"))
-                    remarkable_token = token
-                else:
-                    print_func(red(f"  ✗ {msg}"))
+            ssh_password = ssh_pass_input
+            host_input = input_func(bold("SSH host [10.11.99.1]: ")).strip()
+            if host_input:
+                ssh_host = host_input
+            print_func(dim("  Verifying SSH connection..."))
+            ok, msg = verify_remarkable_ssh(
+                host=ssh_host,
+                password=ssh_password if ssh_password else None,
+            )
+            if ok:
+                print_func(green(f"  ✓ {msg}"))
             else:
-                # Assume raw token pasted
-                print_func(dim("  Verifying token..."))
-                ok, msg = verify_remarkable_token(code_or_token)
-                if ok:
-                    print_func(green(f"  ✓ {msg}"))
-                    remarkable_token = code_or_token
-                else:
-                    print_func(red(f"  ✗ {msg}"))
+                print_func(yellow(f"  ⚠️ {msg} (Saved as backup anyway)"))
+        else:
+            use_ssh = False
 
     # -----------------------------------------------------------------------
     # Step 2: AI Handwriting OCR Provider
@@ -839,6 +904,7 @@ def run_wizard(
         ai_api_key=ai_key,
         ai_model=ai_model,
         remarkable_token=remarkable_token,
+        preferred_connection=preferred_connection,
         use_ssh=use_ssh,
         ssh_host=ssh_host,
         ssh_port=ssh_port,

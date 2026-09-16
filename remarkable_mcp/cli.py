@@ -52,9 +52,13 @@ def cmd_sync(args, root: Path):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
-    # Handle --ssh flag override
+    # Handle connection overrides
     if hasattr(args, "ssh") and args.ssh:
+        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "ssh"
         os.environ["REMARKABLE_USE_SSH"] = "true"
+    elif hasattr(args, "cloud") and args.cloud:
+        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
+        os.environ["REMARKABLE_USE_SSH"] = "false"
 
     from scripts.process_notebook import main as sync_main
 
@@ -68,6 +72,8 @@ def cmd_sync(args, root: Path):
         sys.argv.extend(["--folder", args.folder])
     if hasattr(args, "ssh") and args.ssh:
         sys.argv.extend(["--ssh"])
+    if hasattr(args, "cloud") and args.cloud:
+        sys.argv.extend(["--cloud"])
 
     sync_main()
 
@@ -113,26 +119,49 @@ def cmd_status(args, root: Path):
 
     # 2. reMarkable Tablet
     rm_cfg = cfg.get("remarkable", {})
-    use_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
+    preferred = rm_cfg.get("preferred_connection", "").strip().lower()
+    has_ssh = (
+        rm_cfg.get("use_ssh", False)
+        or cfg.get("use_ssh", False)
+        or bool(rm_cfg.get("ssh_password"))
+    )
+    token = rm_cfg.get("device_token", "")
 
-    if use_ssh:
-        from remarkable_mcp.setup_wizard import verify_remarkable_ssh
+    if not preferred:
+        preferred = "ssh" if has_ssh else "cloud"
 
+    from remarkable_mcp.setup_wizard import verify_remarkable_ssh
+
+    ssh_ok, ssh_msg = False, ""
+    if has_ssh or preferred == "ssh":
         ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
         ssh_port = rm_cfg.get("ssh_port", 22)
         ssh_password = rm_cfg.get("ssh_password", "") or None
-        ok, msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port, password=ssh_password)
-        if ok:
-            print(f"reMarkable:    {green('Connected')} ({msg})")
+        ssh_ok, ssh_msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port, password=ssh_password)
+
+    cloud_ok, cloud_msg = False, ""
+    if token:
+        cloud_ok, cloud_msg = verify_remarkable_token(token)
+
+    # Format status output
+    if preferred == "ssh":
+        if ssh_ok:
+            backup_note = f" {dim('(Cloud backup ready)')}" if cloud_ok else ""
+            print(f"reMarkable:    {green('Connected')} (USB SSH — Preferred){backup_note}")
+        elif cloud_ok:
+            print(f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB SSH unplugged)")
         else:
-            print(f"reMarkable:    {red('Disconnected')} ({msg})")
-    else:
-        token = rm_cfg.get("device_token", "")
-        ok, msg = verify_remarkable_token(token)
-        if ok:
-            print(f"reMarkable:    {green('Connected')} ({msg})")
+            print(f"reMarkable:    {red('Disconnected')} (USB SSH: {ssh_msg})")
+    else:  # preferred == "cloud"
+        if cloud_ok:
+            backup_note = f" {dim('(USB SSH backup ready)')}" if ssh_ok else ""
+            print(f"reMarkable:    {green('Connected')} (Cloud — Preferred){backup_note}")
+        elif ssh_ok:
+            print(
+                f"reMarkable:    {yellow('Connected')} (USB SSH backup active — Cloud unavailable)"
+            )
         else:
-            print(f"reMarkable:    {red('Disconnected')} ({msg})")
+            print(f"reMarkable:    {red('Disconnected')} (Cloud: {cloud_msg})")
 
     # 3. AI Provider
     ai_cfg = cfg.get("ai", {})
@@ -205,6 +234,9 @@ def main():
     sync_parser.add_argument("--folder", help="Apple Notes folder override")
     sync_parser.add_argument(
         "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
+    )
+    sync_parser.add_argument(
+        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
     )
 
     # setup command

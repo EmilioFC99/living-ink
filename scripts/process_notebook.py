@@ -100,6 +100,11 @@ if YAML_CONFIG_PATH.exists():
             if "remarkable" in yaml_config:
                 rm_cfg = yaml_config["remarkable"]
 
+                if "preferred_connection" in rm_cfg and rm_cfg["preferred_connection"]:
+                    os.environ["REMARKABLE_PREFERRED_CONNECTION"] = (
+                        str(rm_cfg["preferred_connection"]).strip().lower()
+                    )
+
                 if "device_token" in rm_cfg and rm_cfg["device_token"]:
                     os.environ["REMARKABLE_TOKEN"] = str(rm_cfg["device_token"]).strip()
 
@@ -581,10 +586,17 @@ def main():
     parser.add_argument(
         "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
     )
+    parser.add_argument(
+        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
+    )
     args = parser.parse_args()
 
     if args.ssh:
+        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "ssh"
         os.environ["REMARKABLE_USE_SSH"] = "true"
+    elif args.cloud:
+        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
+        os.environ["REMARKABLE_USE_SSH"] = "false"
 
     # --- Cleanup all cached files for all notebooks at the start of each run ---
     import shutil

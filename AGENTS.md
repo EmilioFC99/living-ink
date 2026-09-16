@@ -77,12 +77,14 @@ Publish: Destination.publish()
 | Source | Key | Description |
 |--------|-----|-------------|
 | `config.yml` | `ai.provider` / `ai.api_key` | LLM provider preset & API key for text cleanup |
-| `config.yml` | `remarkable.use_ssh` | Use USB SSH instead of Cloud (default: true) |
+| `config.yml` | `remarkable.preferred_connection` | Preferred connection method (`ssh` or `cloud`) |
+| `config.yml` | `remarkable.use_ssh` | Enable USB SSH connection (`true`/`false`) |
 | `config.yml` | `remarkable.ssh_host` / `remarkable.ssh_password` | SSH connection parameters |
-| `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token (fallback) |
+| `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token |
 | `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` | Obsidian destination toggle |
 | `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination toggle |
+| env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method (`ssh` or `cloud`) |
 | env var | `REMARKABLE_USE_SSH` | Use USB SSH instead of Cloud (`true`/`false`) |
 | env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PASSWORD` | SSH connection overrides |
 | env var | `OPENAI_REPAIR_MODEL` | Model name override |
@@ -112,9 +114,9 @@ uv run pytest -v
 1. **AI Vision OCR (Single API Key)**: Multimodal AI models (Gemini, GPT-4o) perform handwriting OCR directly from page images via standard OpenAI-compatible `image_url` data URIs, combining OCR + text cleanup in one step and making Google Cloud Vision optional.
 2. **Multi-Provider AI**: `remarkable_mcp/providers.py` provides universal OpenAI-compatible completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
 3. **Full Folder Hierarchy Mirroring**: `remarkable_mcp/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
-4. **Comprehensive Test Suite**: `tests/` contains 193 unit tests covering providers, vision OCR, clean, destination logic, SSH, and CLI.
+4. **Comprehensive Test Suite**: `tests/` contains 201 unit tests covering providers, vision OCR, clean, destination logic, SSH, and CLI.
 5. **Google Docstrings**: All core modules follow Google docstring conventions.
-6. **Direct USB SSH First**: Free, subscriptionless USB SSH connection is the primary recommended option across setup wizard, CLI (`--ssh`), and `config.yml` (`remarkable.use_ssh`).
+6. **Preferred Connection with Automatic Fallback**: Users select their preferred method in setup wizard (USB SSH or Cloud). `FallbackClient` automatically tries the preferred method first and seamlessly falls back to the secondary method if the primary is unavailable. CLI flags `--ssh` and `--cloud` allow forcing either method.
 
 ## Known Issues & Tech Debt
 

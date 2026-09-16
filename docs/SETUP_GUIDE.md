@@ -98,26 +98,31 @@ If you prefer traditional Google Cloud Vision OCR, or use an AI provider without
 
 ## 3. reMarkable Tablet Connection
 
-Living Ink can sync either directly over USB via SSH (free) or via the official reMarkable Cloud.
+Living Ink supports both direct USB SSH (free & offline) and the official reMarkable Cloud. You can choose which one is **preferred**, and configure the other as an **automatic backup**!
+
+- **If USB SSH is preferred**: Living Ink syncs via USB when plugged in. If unplugged, it seamlessly falls back to Cloud.
+- **If Cloud is preferred**: Living Ink syncs wirelessly via Cloud. If Cloud is unreachable or offline, it falls back to USB SSH.
 
 ### Option A: Direct USB SSH (Recommended — Free, No Subscription)
 SSH connects directly to your tablet over USB. No cloud account or subscription needed.
 
 1. **Enable Developer Mode**:
-   * On your reMarkable tablet, navigate to **Settings → General → Software → Developer mode**.
+   * On your reMarkable tablet, navigate to **Settings → General → Software → Developer mode** (or **Help → About → Copyrights and licenses**).
    * Note the root password displayed on screen.
 2. **Connect via USB**:
    * Connect your tablet to your computer using a USB-C cable (default IP: `10.11.99.1`).
    * Verify access: `ssh root@10.11.99.1`
 3. **Configure** (choose one):
-   * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`.
+   * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`. The wizard will also offer to configure Cloud as a backup.
    * **Manual**: In `config/config.yml`:
      ```yaml
      remarkable:
+       preferred_connection: "ssh"  # USB first, Cloud backup
        use_ssh: true
        ssh_host: "10.11.99.1"
        ssh_port: 22
        ssh_password: "your-root-password"
+       device_token: "YOUR-CLOUD-TOKEN"  # Optional backup
      ```
 
 > **Tip**: For passwordless auth, copy your SSH key to the tablet:
@@ -132,13 +137,15 @@ SSH connects directly to your tablet over USB. No cloud account or subscription 
    * Log in and click **Connect a new device** → **Desktop**.
    * Copy the 8-letter pairing code.
 2. **Pair Automatically via Setup Wizard**:
-   * Run `living-ink setup` and select option `[2] reMarkable Cloud`.
+   * Run `living-ink setup` and select option `[2] reMarkable Cloud`. The wizard will also offer to configure USB SSH as a backup.
    * Paste your 8-letter code when prompted.
 3. **Configure Manually** (alternative):
    * In `config/config.yml`:
      ```yaml
      remarkable:
-       use_ssh: false
+       preferred_connection: "cloud"  # Cloud first, USB SSH backup
+       use_ssh: true                 # Optional USB SSH backup
+       ssh_host: "10.11.99.1"
        device_token: "YOUR-DEVICE-TOKEN"
      ```
 

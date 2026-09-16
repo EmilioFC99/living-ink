@@ -3,9 +3,12 @@ reMarkable Cloud API client helpers.
 """
 
 import json as json_module
+import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Configuration - check env var first, then fall back to file
 REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
@@ -15,50 +18,191 @@ REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
 
 
+class FallbackClient:
+    """A resilient client wrapping primary and backup reMarkable transports.
+
+    Attempts operations using the preferred client first, and automatically falls back
+    to the secondary client if the primary connection fails or is disconnected.
+    """
+
+    def __init__(
+        self,
+        primary_client: Any,
+        backup_client: Optional[Any] = None,
+        primary_name: str = "USB SSH",
+        backup_name: str = "reMarkable Cloud",
+    ):
+        self.primary = primary_client
+        self.backup = backup_client
+        self.primary_name = primary_name
+        self.backup_name = backup_name
+        self.active = primary_client
+
+    def get_meta_items(self, limit: Optional[int] = None) -> List[Any]:
+        """Fetch notebook metadata, falling back to backup client if primary fails."""
+        try:
+            return self.active.get_meta_items(limit=limit)
+        except Exception as e:
+            if self.backup and self.active is not self.backup:
+                logger.warning(
+                    f"{self.primary_name} get_meta_items failed ({e}). Falling back to {self.backup_name}..."
+                )
+                print(f"ℹ️ {self.primary_name} failed ({e}). Falling back to {self.backup_name}...")
+                self.active = self.backup
+                return self.active.get_meta_items(limit=limit)
+            raise
+
+    def download(self, doc: Any) -> bytes:
+        """Download document content zip, falling back to backup client if needed."""
+        try:
+            return self.active.download(doc)
+        except Exception as e:
+            if self.backup and self.active is not self.backup:
+                logger.warning(
+                    f"{self.primary_name} download failed ({e}). Falling back to {self.backup_name}..."
+                )
+                print(
+                    f"ℹ️ {self.primary_name} download failed. Falling back to {self.backup_name}..."
+                )
+                self.active = self.backup
+                # Find matching doc in backup if needed
+                doc_id = getattr(doc, "id", getattr(doc, "ID", ""))
+                backup_doc = None
+                if hasattr(self.backup, "get_doc"):
+                    backup_doc = self.backup.get_doc(doc_id)
+                return self.active.download(backup_doc or doc)
+            raise
+
+    def get_doc(self, doc_id: str) -> Optional[Any]:
+        """Get document by ID from active client."""
+        if hasattr(self.active, "get_doc"):
+            return self.active.get_doc(doc_id)
+        return None
+
+    def get_file_type(self, doc: Any) -> Optional[str]:
+        """Get file type from active client."""
+        if hasattr(self.active, "get_file_type"):
+            return self.active.get_file_type(doc)
+        return None
+
+    def download_raw_file(self, doc: Any, extension: str) -> Optional[bytes]:
+        """Download raw file from active client."""
+        if hasattr(self.active, "download_raw_file"):
+            return self.active.download_raw_file(doc, extension)
+        return None
+
+
 def get_rmapi():
     """
-    Get or initialize the reMarkable API client.
+    Get or initialize the reMarkable API client with automatic fallback.
 
-    Uses SSH transport if REMARKABLE_USE_SSH=1, otherwise cloud API.
-    Returns either RemarkableClient or SSHClient (both have compatible interfaces).
+    Uses preferred connection (SSH or Cloud) if available, and falls back to the
+    secondary method if the primary fails or is disconnected.
+    Returns either RemarkableClient, SSHClient, or FallbackClient.
     """
-    # Check if SSH mode is enabled (dynamic check to pick up config.yml values)
-    use_ssh = (
+    # 1. Determine preferred connection mode
+    pref_env = os.environ.get("REMARKABLE_PREFERRED_CONNECTION", "").strip().lower()
+    use_ssh_env = (
         os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
         or _REMARKABLE_USE_SSH
     )
-    if use_ssh:
-        from remarkable_mcp.ssh import create_ssh_client
 
-        return create_ssh_client()
-
-    # Cloud API mode
-    from remarkable_mcp.sync import load_client_from_token
-
-    # If token is provided via environment, use it
-    token = os.environ.get("REMARKABLE_TOKEN") or REMARKABLE_TOKEN
-    if token:
-        # Also save to ~/.rmapi for compatibility
-        rmapi_file = Path.home() / ".rmapi"
-        rmapi_file.write_text(token)
-        return load_client_from_token(token)
-
-    # Load from file
-    rmapi_file = Path.home() / ".rmapi"
-    if not rmapi_file.exists():
-        raise RuntimeError(
-            "No reMarkable token found. Register first:\n"
-            "  uvx remarkable-mcp --register <code>\n\n"
-            "Get a code from: https://my.remarkable.com/device/desktop/connect\n\n"
-            "Or use SSH mode (requires USB connection):\n"
-            "  uvx remarkable-mcp --ssh"
+    if pref_env in ("ssh", "usb"):
+        preferred = "ssh"
+    elif pref_env in ("cloud", "rmapi"):
+        preferred = "cloud"
+    elif use_ssh_env:
+        preferred = "ssh"
+    else:
+        token_candidate = (
+            os.environ.get("REMARKABLE_TOKEN")
+            or REMARKABLE_TOKEN
+            or (Path.home() / ".rmapi").exists()
         )
+        preferred = "cloud" if token_candidate and not use_ssh_env else "ssh"
+
+    # 2. Instantiate potential clients
+    ssh_client = None
+    cloud_client = None
 
     try:
-        token_json = rmapi_file.read_text()
-        return load_client_from_token(token_json)
+        from remarkable_mcp.ssh import create_ssh_client
+
+        ssh_client = create_ssh_client()
     except Exception as e:
-        raise RuntimeError(f"Failed to initialize reMarkable client: {e}")
+        logger.debug(f"Could not create SSH client: {e}")
+
+    token = os.environ.get("REMARKABLE_TOKEN") or REMARKABLE_TOKEN
+    rmapi_file = Path.home() / ".rmapi"
+    if not token and rmapi_file.exists():
+        try:
+            token = rmapi_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            token = None
+
+    if token:
+        try:
+            from remarkable_mcp.sync import load_client_from_token
+
+            # Also persist to ~/.rmapi for compatibility
+            rmapi_file.write_text(token, encoding="utf-8")
+            cloud_client = load_client_from_token(token)
+        except Exception as e:
+            logger.debug(f"Could not load Cloud client: {e}")
+
+    # 3. Connection selection with fallback
+    if preferred == "ssh":
+        ssh_available = ssh_client and ssh_client.check_connection()
+        if ssh_available:
+            if cloud_client:
+                return FallbackClient(
+                    primary_client=ssh_client,
+                    backup_client=cloud_client,
+                    primary_name="USB SSH",
+                    backup_name="reMarkable Cloud",
+                )
+            return ssh_client
+
+        # SSH unavailable (e.g. tablet unplugged) — try Cloud backup
+        if cloud_client:
+            logger.info(
+                "USB SSH connection unavailable (tablet not connected). Using reMarkable Cloud..."
+            )
+            print("ℹ️ USB SSH not connected. Falling back to reMarkable Cloud...")
+            return FallbackClient(
+                primary_client=cloud_client,
+                backup_client=ssh_client,
+                primary_name="reMarkable Cloud",
+                backup_name="USB SSH",
+            )
+
+        raise RuntimeError(
+            "Could not connect to reMarkable tablet via USB SSH, and reMarkable Cloud is not configured.\n"
+            "Please check that your tablet is plugged in via USB and SSH is enabled,\n"
+            "or run 'living-ink setup' to configure reMarkable Cloud."
+        )
+
+    else:  # preferred == "cloud"
+        if cloud_client:
+            if ssh_client:
+                return FallbackClient(
+                    primary_client=cloud_client,
+                    backup_client=ssh_client,
+                    primary_name="reMarkable Cloud",
+                    backup_name="USB SSH",
+                )
+            return cloud_client
+
+        # Cloud not configured, try SSH
+        if ssh_client and ssh_client.check_connection():
+            logger.info("reMarkable Cloud token not configured. Using USB SSH...")
+            print("ℹ️ reMarkable Cloud not configured. Falling back to USB SSH...")
+            return ssh_client
+
+        raise RuntimeError(
+            "No reMarkable token found and USB SSH connection failed.\n"
+            "Run 'living-ink setup' to configure your reMarkable connection."
+        )
 
 
 def ensure_config_dir():
