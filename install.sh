@@ -87,48 +87,17 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# 3. Clone or update repository
+# 3. Install Living Ink CLI via uv tool
 # ------------------------------------------------------------------------------
-INSTALL_DIR="$HOME/.living-ink"
 REPO_URL="https://github.com/EmilioFC99/living-ink.git"
+echo -e "${CYAN}→ Installing Living Ink CLI via uv tool...${RESET}"
+uv tool install --force "git+${REPO_URL}"
+uv tool update-shell || true
 
-if [ -d "$INSTALL_DIR/.git" ]; then
-    echo -e "${CYAN}→ Updating existing installation in ${INSTALL_DIR}...${RESET}"
-    git -C "$INSTALL_DIR" pull --ff-only || true
-else
-    echo -e "${CYAN}→ Downloading Living Ink to ${INSTALL_DIR}...${RESET}"
-    git clone "$REPO_URL" "$INSTALL_DIR"
-fi
+# Ensure ~/.local/bin is in PATH for this session
+export PATH="$HOME/.local/bin:$PATH"
 
-# ------------------------------------------------------------------------------
-# 4. Install dependencies
-# ------------------------------------------------------------------------------
-echo -e "${CYAN}→ Installing Python dependencies...${RESET}"
-cd "$INSTALL_DIR"
-uv sync --all-extras
-
-# ------------------------------------------------------------------------------
-# 5. Install global 'living-ink' CLI command
-# ------------------------------------------------------------------------------
-BIN_DIR="$HOME/.local/bin"
-mkdir -p "$BIN_DIR"
-WRAPPER="$BIN_DIR/living-ink"
-
-cat <<'EOF' > "$WRAPPER"
-#!/usr/bin/env bash
-export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-INSTALL_DIR="$HOME/.living-ink"
-VENV_BIN="$INSTALL_DIR/.venv/bin/living-ink"
-if [ -x "$VENV_BIN" ]; then
-    exec "$VENV_BIN" "$@"
-else
-    exec uv run --directory "$INSTALL_DIR" living-ink "$@"
-fi
-EOF
-
-chmod +x "$WRAPPER"
-
-# Check if ~/.local/bin is in PATH
+# Check if ~/.local/bin is in PATH configuration
 SHELL_NAME="$(basename "${SHELL:-bash}")"
 RC_FILE=""
 if [ "$SHELL_NAME" = "zsh" ]; then
@@ -146,16 +115,16 @@ if [ -n "$RC_FILE" ] && [ -f "$RC_FILE" ]; then
     fi
 fi
 
-echo -e "${GREEN}✓ Global 'living-ink' command installed to ${WRAPPER}.${RESET}"
+echo -e "${GREEN}✓ Global 'living-ink' command installed successfully.${RESET}"
 echo ""
 
 # ------------------------------------------------------------------------------
-# 6. Launch Setup Wizard
+# 4. Launch Setup Wizard
 # ------------------------------------------------------------------------------
 if [ -t 0 ]; then
     echo -e "${BOLD}${GREEN}Starting the interactive setup wizard...${RESET}"
     echo ""
-    uv run --directory "$INSTALL_DIR" living-ink setup
+    living-ink setup
 else
     echo -e "${GREEN}Installation complete!${RESET}"
     echo -e "Run the setup wizard with: ${BOLD}living-ink setup${RESET}"

@@ -27,10 +27,19 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
 
 ## ⚡ Quick Install (Recommended)
 
-Paste this single command into your Terminal to install everything and launch the setup wizard:
+### Option A: One-Line Installer
+Paste this command into your Terminal to install everything and launch the setup wizard:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/EmilioFC99/living-ink/main/install.sh | bash
+```
+
+### Option B: Using `uv tool`
+If you already have [uv](https://docs.astral.sh/uv/) installed:
+
+```bash
+uv tool install "git+https://github.com/EmilioFC99/living-ink.git"
+living-ink setup
 ```
 
 Once installed, you can use the global `living-ink` command from anywhere:
@@ -43,9 +52,9 @@ living-ink status    # Check tablet, AI, and vault status
 
 ---
 
-## 🛠️ Manual Installation
+## 🛠️ Manual Installation (Development)
 
-If you prefer to install manually:
+If you are developing or prefer a local clone:
 
 1.  **Clone and Install Dependencies**:
     ```bash
@@ -67,9 +76,12 @@ If you prefer to install manually:
       api_key: "AIzaSy..."             # From https://aistudio.google.com/apikey
       # model: "gemini-2.0-flash"      # Optional: sensible default picked per provider
 
-    # 2. reMarkable Cloud
+    # 2. reMarkable Connection
     remarkable:
-      device_token: "YOUR-DEVICE-TOKEN-HERE"
+      preferred_connection: "ssh"      # "ssh" (USB, free) or "cloud" (subscription)
+      use_ssh: true
+      ssh_host: "10.11.99.1"
+      # device_token: "YOUR-DEVICE-TOKEN-HERE"
 
     # 3. Google Cloud Vision (Optional fallback — not needed if using Gemini or OpenAI)
     # google_vision:
@@ -92,7 +104,7 @@ If you prefer to install manually:
 
 3.  **Run the Pipeline**:
     ```bash
-    uv run python scripts/process_notebook.py
+    uv run living-ink sync
     ```
 
 ## 🏗️ How It Works

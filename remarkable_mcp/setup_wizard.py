@@ -320,11 +320,11 @@ def install_launch_agent(
     repo_dir: Optional[Path] = None,
     interval_seconds: int = 3600,
 ) -> Tuple[bool, str]:
-    """Install and load a macOS LaunchAgent to sync notes automatically.
+    """Install macOS LaunchAgent plist for periodic background note sync.
 
     Args:
-        repo_dir: Path to the living-ink repository root.
-        interval_seconds: Sync frequency in seconds (default: 3600 / 1 hour).
+        repo_dir: Root repository directory path.
+        interval_seconds: Sync interval in seconds (default: 3600 / 1 hour).
 
     Returns:
         Tuple of (success_bool, message_str).
@@ -332,19 +332,26 @@ def install_launch_agent(
     if platform.system() != "Darwin":
         return False, "LaunchAgent background sync is only supported on macOS."
 
-    if repo_dir is None:
-        repo_dir = Path(__file__).parent.parent.resolve()
+    from remarkable_mcp.config import get_logs_dir
 
-    uv_path = find_uv_path()
-    data_env = os.environ.get("LIVING_INK_DATA_DIR")
-    if data_env:
-        logs_dir = Path(data_env) / "logs"
-    else:
-        logs_dir = repo_dir / "data" / "logs"
+    logs_dir = get_logs_dir(repo_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
     out_log = logs_dir / "launchagent.log"
     err_log = logs_dir / "launchagent.error.log"
-    script_path = repo_dir / "scripts" / "process_notebook.py"
+
+    cli_path = shutil.which("living-ink") or str(Path.home() / ".local" / "bin" / "living-ink")
+    if Path(cli_path).exists():
+        args_xml = f"""        <string>{cli_path}</string>
+        <string>sync</string>"""
+    else:
+        uv_path = find_uv_path()
+        if repo_dir is None:
+            repo_dir = Path(__file__).parent.parent.resolve()
+        script_path = repo_dir / "scripts" / "process_notebook.py"
+        args_xml = f"""        <string>{uv_path}</string>
+        <string>run</string>
+        <string>python</string>
+        <string>{script_path}</string>"""
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -354,13 +361,8 @@ def install_launch_agent(
     <string>{LAUNCH_AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{uv_path}</string>
-        <string>run</string>
-        <string>python</string>
-        <string>{script_path}</string>
+{args_xml}
     </array>
-    <key>WorkingDirectory</key>
-    <string>{repo_dir}</string>
     <key>StartInterval</key>
     <integer>{interval_seconds}</integer>
     <key>StandardOutPath</key>
@@ -438,6 +440,11 @@ def install_cli_command(repo_dir: Path, bin_dir: Optional[Path] = None) -> Tuple
         bin_dir = Path.home() / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     wrapper = bin_dir / "living-ink"
+
+    # Don't overwrite if living-ink is already managed by uv tool
+    if wrapper.is_symlink() and bin_dir == Path.home() / ".local" / "bin":
+        return True, f"Global command 'living-ink' is active at {wrapper} (managed by uv tool)"
+
     script = f"""#!/usr/bin/env bash
 VENV_BIN="{repo_dir.resolve()}/.venv/bin/living-ink"
 if [ -x "$VENV_BIN" ]; then
@@ -615,15 +622,15 @@ def run_wizard(
     Returns:
         True if configuration was successfully created, False if aborted.
     """
-    if repo_dir is None:
-        repo_dir = Path(__file__).parent.parent.resolve()
+    from remarkable_mcp.config import get_config_path
 
-    env_config_dir = os.environ.get("LIVING_INK_CONFIG_DIR")
-    if env_config_dir:
-        config_dir = Path(env_config_dir)
-    else:
-        config_dir = repo_dir / "config"
-    config_file = config_dir / "config.yml"
+    if repo_dir is None:
+        src_repo = Path(__file__).parent.parent.resolve()
+        if (src_repo / "pyproject.toml").exists():
+            repo_dir = src_repo
+
+    config_file = get_config_path(repo_dir)
+    config_dir = config_file.parent
 
     print_func()
     print_func(bold(cyan("============================================================")))

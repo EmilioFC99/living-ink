@@ -19,14 +19,19 @@ living-ink/
 ├── remarkable_mcp/              # Core Python package
 │   ├── __init__.py              # Package init, version
 │   ├── api.py                   # reMarkable Cloud/SSH API client factory
+│   ├── cli.py                   # Main CLI entry point (`living-ink`)
+│   ├── config.py                # XDG path resolution & configuration helpers
+│   ├── pipeline.py              # Main sync pipeline orchestrator
 │   ├── sync.py                  # Cloud sync protocol (v3/v4) implementation
 │   ├── ssh.py                   # Direct USB SSH transport to tablet
 │   ├── extract.py               # .rm binary → SVG → PNG rendering
-│   ├── clean.py                 # LLM-based OCR text cleanup (⚠️ OpenAI-hardcoded)
+│   ├── clean.py                 # Multimodal AI vision OCR & text cleanup
+│   ├── providers.py             # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
+│   ├── setup_wizard.py          # Interactive onboarding setup wizard
 │   ├── destinations.py          # Pluggable publish targets (Apple Notes, Obsidian)
 │   └── openai_cleanup_prompt.txt # System prompt for text repair
 ├── scripts/
-│   ├── process_notebook.py      # Main pipeline orchestrator (entry point)
+│   ├── process_notebook.py      # Backwards-compatible proxy to remarkable_mcp.pipeline
 │   ├── cli.py                   # CLI wrapper entry point
 │   ├── setup.py                 # Setup wizard runner
 │   ├── test_docker.sh           # Automated Docker smoke test suite
@@ -68,9 +73,9 @@ Publish: Destination.publish()
 ### Key Design Patterns
 
 - **Destination ABC**: `remarkable_mcp/destinations.py` defines `Destination` base class. New targets subclass it and implement `publish()`.
-- **Config Loading**: YAML-first (`config/config.yml`), with env var overrides, and legacy `config.py`/`.env` fallback. Config values are pushed into `os.environ` at startup.
+- **Config Loading**: YAML-first via `remarkable_mcp.config` (checks env, repo, XDG `~/.config/living-ink/config.yml`), with env var overrides.
 - **State Tracking**: Per-destination JSON files (`processed_notebooks_{DestName}.json`) track notebook hash/version to avoid reprocessing.
-- **Folder Mirroring**: Traverses parent UUID chain from reMarkable metadata, but currently **flattens to top-level only** (e.g., `Work/Projects/Q1` → just `Work`).
+- **Folder Mirroring**: Full folder hierarchy mirroring supported in Obsidian; top-level flattening applied in Apple Notes.
 
 ## Key Configuration
 

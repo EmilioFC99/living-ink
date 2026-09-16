@@ -11,6 +11,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 # Find project root or current working directory
@@ -26,17 +27,11 @@ def get_root() -> Path:
     return pkg_dir
 
 
-def get_config_path(root: Path) -> Path:
+def get_config_path(root: Optional[Path] = None) -> Path:
     """Find the config.yml file, checking LIVING_INK_CONFIG_DIR first."""
-    env_dir = os.environ.get("LIVING_INK_CONFIG_DIR")
-    if env_dir:
-        return Path(env_dir) / "config.yml"
-    cfg = root / "config" / "config.yml"
-    if cfg.exists():
-        return cfg
-    if (root / "config.yml").exists():
-        return root / "config.yml"
-    return cfg
+    from remarkable_mcp.config import get_config_path as _get_config_path
+
+    return _get_config_path(root)
 
 
 def cmd_setup(args, root: Path):
@@ -64,7 +59,10 @@ def cmd_sync(args, root: Path):
     if cfg_path.exists():
         os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
 
-    from scripts.process_notebook import main as sync_main
+    try:
+        from scripts.process_notebook import main as sync_main
+    except ImportError:
+        from remarkable_mcp.pipeline import main as sync_main
 
     # Forward any options to process_notebook
     sys.argv = [sys.argv[0]]
