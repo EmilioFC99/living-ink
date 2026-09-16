@@ -443,7 +443,9 @@ VENV_BIN="{repo_dir.resolve()}/.venv/bin/living-ink"
 if [ -x "$VENV_BIN" ]; then
     exec "$VENV_BIN" "$@"
 else
-    exec uv run --directory "{repo_dir.resolve()}" living-ink "$@"
+    echo "Error: Living Ink virtualenv not found at {repo_dir.resolve()}/.venv" >&2
+    echo "Please run: cd {repo_dir.resolve()} && uv sync" >&2
+    exit 1
 fi
 """
     try:
@@ -600,6 +602,7 @@ def run_wizard(
     input_func: Callable[[str], str] = input,
     print_func: Callable[..., None] = print,
     repo_dir: Optional[Path] = None,
+    bin_dir: Optional[Path] = None,
 ) -> bool:
     """Run the interactive setup walkthrough.
 
@@ -607,6 +610,7 @@ def run_wizard(
         input_func: Function for getting user input (default: built-in input).
         print_func: Function for printing output (default: built-in print).
         repo_dir: Optional root repository directory path.
+        bin_dir: Optional custom bin directory for CLI wrapper installation.
 
     Returns:
         True if configuration was successfully created, False if aborted.
@@ -931,7 +935,7 @@ def run_wizard(
     print_func(green(f"✓ Configuration saved to {bold(str(config_file))}"))
 
     # Install/update global CLI launcher in ~/.local/bin
-    ok_cli, msg_cli = install_cli_command(repo_dir=repo_dir)
+    ok_cli, msg_cli = install_cli_command(repo_dir=repo_dir, bin_dir=bin_dir)
     if ok_cli:
         print_func(green(f"  ✓ {msg_cli}"))
 

@@ -383,6 +383,7 @@ class TestRunWizard:
             input_func=lambda prompt="": next(inputs),
             print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
             repo_dir=tmp_path,
+            bin_dir=tmp_path / "bin",
         )
 
         assert result is True
@@ -442,6 +443,7 @@ class TestRunWizard:
             input_func=lambda prompt="": next(inputs),
             print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
             repo_dir=tmp_path,
+            bin_dir=tmp_path / "bin",
         )
 
         assert result is True
@@ -507,6 +509,7 @@ class TestRunWizard:
             input_func=lambda prompt="": next(inputs),
             print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
             repo_dir=tmp_path,
+            bin_dir=tmp_path / "bin",
         )
 
         assert result is True
