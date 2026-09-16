@@ -97,10 +97,35 @@ if YAML_CONFIG_PATH.exists():
                 os.environ["OPENAI_API_KEY"] = str(yaml_config["openai"]["api_key"]).strip()
 
             # 2. reMarkable
-            if "remarkable" in yaml_config and "device_token" in yaml_config["remarkable"]:
-                os.environ["REMARKABLE_TOKEN"] = str(
-                    yaml_config["remarkable"]["device_token"]
-                ).strip()
+            if "remarkable" in yaml_config:
+                rm_cfg = yaml_config["remarkable"]
+
+                if "device_token" in rm_cfg and rm_cfg["device_token"]:
+                    os.environ["REMARKABLE_TOKEN"] = str(rm_cfg["device_token"]).strip()
+
+                # SSH connection settings
+                ssh_enabled = (
+                    rm_cfg.get("use_ssh") if "use_ssh" in rm_cfg else yaml_config.get("use_ssh")
+                )
+                if ssh_enabled is not None:
+                    if isinstance(ssh_enabled, bool):
+                        os.environ["REMARKABLE_USE_SSH"] = "true" if ssh_enabled else "false"
+                    elif str(ssh_enabled).strip().lower() in ("1", "true", "yes"):
+                        os.environ["REMARKABLE_USE_SSH"] = "true"
+                    else:
+                        os.environ["REMARKABLE_USE_SSH"] = "false"
+
+                if "ssh_host" in rm_cfg and rm_cfg["ssh_host"]:
+                    os.environ["REMARKABLE_SSH_HOST"] = str(rm_cfg["ssh_host"]).strip()
+
+                if "ssh_password" in rm_cfg and rm_cfg["ssh_password"]:
+                    os.environ["REMARKABLE_SSH_PASSWORD"] = str(rm_cfg["ssh_password"]).strip()
+
+                if "ssh_port" in rm_cfg and rm_cfg["ssh_port"]:
+                    os.environ["REMARKABLE_SSH_PORT"] = str(rm_cfg["ssh_port"]).strip()
+
+                if "ssh_user" in rm_cfg and rm_cfg["ssh_user"]:
+                    os.environ["REMARKABLE_SSH_USER"] = str(rm_cfg["ssh_user"]).strip()
 
             # 3. Google Vision (Handle JSON content directly or file path)
             if "google_vision" in yaml_config:
@@ -553,7 +578,13 @@ def main():
         help="Apple Notes folder name",
     )
     parser.add_argument("--state-file", help="Ignored (legacy compatibility)")
+    parser.add_argument(
+        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
+    )
     args = parser.parse_args()
+
+    if args.ssh:
+        os.environ["REMARKABLE_USE_SSH"] = "true"
 
     # --- Cleanup all cached files for all notebooks at the start of each run ---
     import shutil

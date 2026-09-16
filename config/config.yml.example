@@ -25,10 +25,20 @@ ai:
 # openai:
 #   api_key: "sk-proj-YOUR-OPENAI-KEY-HERE"
 
-# 2. reMarkable Configuration (Required for downloading notes)
-# Get your token by running the registration command or checking ~/.rmapi
+# 2. reMarkable Tablet Connection
 remarkable:
-  device_token: "YOUR-DEVICE-TOKEN-HERE"
+  # Option A: Direct USB SSH (Recommended — free, fast, works offline)
+  # Connect tablet via USB-C. Enable developer mode on tablet:
+  # Settings → General → Software → Developer mode
+  use_ssh: true
+  ssh_host: "10.11.99.1"               # Default USB IP for reMarkable
+  ssh_port: 22
+  ssh_password: ""                     # Root password from Developer mode screen
+  # ssh_user: "root"                   # Default: root
+
+  # Option B: reMarkable Cloud (Requires Connect subscription)
+  # Get your token by running the registration command or checking ~/.rmapi
+  # device_token: "YOUR-DEVICE-TOKEN-HERE"
 
 # 3. Google Cloud Vision Configuration (OPTIONAL)
 # Not needed if you use an AI provider with vision support (e.g., Gemini, OpenAI GPT-4o).

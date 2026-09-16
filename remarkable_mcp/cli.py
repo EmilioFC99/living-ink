@@ -52,6 +52,10 @@ def cmd_sync(args, root: Path):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
+    # Handle --ssh flag override
+    if hasattr(args, "ssh") and args.ssh:
+        os.environ["REMARKABLE_USE_SSH"] = "true"
+
     from scripts.process_notebook import main as sync_main
 
     # Forward any options to process_notebook
@@ -62,6 +66,8 @@ def cmd_sync(args, root: Path):
         sys.argv.extend(["--limit", str(args.limit)])
     if hasattr(args, "folder") and args.folder:
         sys.argv.extend(["--folder", args.folder])
+    if hasattr(args, "ssh") and args.ssh:
+        sys.argv.extend(["--ssh"])
 
     sync_main()
 
@@ -106,12 +112,27 @@ def cmd_status(args, root: Path):
         return
 
     # 2. reMarkable Tablet
-    token = cfg.get("remarkable", {}).get("device_token", "")
-    ok, msg = verify_remarkable_token(token)
-    if ok:
-        print(f"reMarkable:    {green('Connected')} ({msg})")
+    rm_cfg = cfg.get("remarkable", {})
+    use_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
+
+    if use_ssh:
+        from remarkable_mcp.setup_wizard import verify_remarkable_ssh
+
+        ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
+        ssh_port = rm_cfg.get("ssh_port", 22)
+        ssh_password = rm_cfg.get("ssh_password", "") or None
+        ok, msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port, password=ssh_password)
+        if ok:
+            print(f"reMarkable:    {green('Connected')} ({msg})")
+        else:
+            print(f"reMarkable:    {red('Disconnected')} ({msg})")
     else:
-        print(f"reMarkable:    {red('Disconnected')} ({msg})")
+        token = rm_cfg.get("device_token", "")
+        ok, msg = verify_remarkable_token(token)
+        if ok:
+            print(f"reMarkable:    {green('Connected')} ({msg})")
+        else:
+            print(f"reMarkable:    {red('Disconnected')} ({msg})")
 
     # 3. AI Provider
     ai_cfg = cfg.get("ai", {})
@@ -182,6 +203,9 @@ def main():
     sync_parser.add_argument("--notebook", help="Sync a specific notebook by name")
     sync_parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
     sync_parser.add_argument("--folder", help="Apple Notes folder override")
+    sync_parser.add_argument(
+        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
+    )
 
     # setup command
     subparsers.add_parser("setup", help="Launch the interactive setup wizard")

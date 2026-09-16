@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 # Configuration - check env var first, then fall back to file
 REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
-REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+_REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
@@ -22,8 +22,12 @@ def get_rmapi():
     Uses SSH transport if REMARKABLE_USE_SSH=1, otherwise cloud API.
     Returns either RemarkableClient or SSHClient (both have compatible interfaces).
     """
-    # Check if SSH mode is enabled
-    if REMARKABLE_USE_SSH:
+    # Check if SSH mode is enabled (dynamic check to pick up config.yml values)
+    use_ssh = (
+        os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
+        or _REMARKABLE_USE_SSH
+    )
+    if use_ssh:
         from remarkable_mcp.ssh import create_ssh_client
 
         return create_ssh_client()
@@ -32,11 +36,12 @@ def get_rmapi():
     from remarkable_mcp.sync import load_client_from_token
 
     # If token is provided via environment, use it
-    if REMARKABLE_TOKEN:
+    token = os.environ.get("REMARKABLE_TOKEN") or REMARKABLE_TOKEN
+    if token:
         # Also save to ~/.rmapi for compatibility
         rmapi_file = Path.home() / ".rmapi"
-        rmapi_file.write_text(REMARKABLE_TOKEN)
-        return load_client_from_token(REMARKABLE_TOKEN)
+        rmapi_file.write_text(token)
+        return load_client_from_token(token)
 
     # Load from file
     rmapi_file = Path.home() / ".rmapi"

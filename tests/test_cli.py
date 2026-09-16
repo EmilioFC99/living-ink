@@ -63,3 +63,42 @@ def test_cmd_status_no_config(tmp_path, capsys):
     cmd_status(args, root=tmp_path)
     captured = capsys.readouterr()
     assert "Not found" in captured.out
+
+
+@patch("remarkable_mcp.cli.cmd_sync")
+def test_main_sync_command_with_ssh(mock_sync):
+    """'living-ink sync --ssh' passes ssh flag to cmd_sync."""
+    with patch("sys.argv", ["living-ink", "sync", "--ssh"]):
+        main()
+        mock_sync.assert_called_once()
+        args = mock_sync.call_args[0][0]
+        assert args.ssh is True
+
+
+def test_cmd_sync_sets_ssh_env(tmp_path, monkeypatch):
+    """cmd_sync sets REMARKABLE_USE_SSH when --ssh is passed."""
+    import os
+
+    from remarkable_mcp.cli import cmd_sync
+
+    monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
+    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None)
+    with patch("scripts.process_notebook.main"):
+        cmd_sync(args, root=tmp_path)
+        assert os.environ.get("REMARKABLE_USE_SSH") == "true"
+
+
+@patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
+@patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
+    """cmd_status verifies SSH when remarkable.use_ssh is true."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yml").write_text(
+        "remarkable:\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
+    )
+    args = MagicMock()
+    cmd_status(args, root=tmp_path)
+    captured = capsys.readouterr()
+    assert "Connected" in captured.out
+    mock_verify_ssh.assert_called_once()

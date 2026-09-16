@@ -215,6 +215,36 @@ def pair_remarkable_device(one_time_code: str) -> Tuple[bool, str, str]:
         return False, "", f"Pairing failed: {e}"
 
 
+def verify_remarkable_ssh(
+    host: str = "10.11.99.1",
+    user: str = "root",
+    port: int = 22,
+    password: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Test SSH connection to reMarkable tablet over USB.
+
+    Args:
+        host: SSH host address (default: 10.11.99.1 for USB).
+        user: SSH user (default: root).
+        port: SSH port (default: 22).
+        password: SSH password (optional, uses key-based auth if None).
+
+    Returns:
+        Tuple of (success_bool, message_str).
+    """
+    try:
+        from remarkable_mcp.ssh import SSHClient
+
+        client = SSHClient(host=host, user=user, port=port, password=password)
+        if client.check_connection():
+            items = client.get_meta_items()
+            docs = [it for it in items if getattr(it, "Type", "") == "DocumentType"]
+            return True, f"Connected via USB SSH ({len(docs)} notebooks found)"
+        return False, "Could not establish SSH connection. Is the tablet connected via USB?"
+    except Exception as e:
+        return False, f"SSH connection failed: {e}"
+
+
 # ---------------------------------------------------------------------------
 # AI Provider Verification Helpers
 # ---------------------------------------------------------------------------
@@ -402,9 +432,13 @@ def generate_config_yaml(
     ai_provider: str,
     ai_api_key: str,
     ai_model: str,
-    remarkable_token: str,
-    obsidian_enabled: bool,
-    obsidian_vault_path: str,
+    remarkable_token: str = "",
+    use_ssh: bool = False,
+    ssh_host: str = "10.11.99.1",
+    ssh_port: int = 22,
+    ssh_password: str = "",
+    obsidian_enabled: bool = False,
+    obsidian_vault_path: str = "",
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
     apple_notes_enabled: bool = False,
@@ -412,6 +446,23 @@ def generate_config_yaml(
     max_notebooks_per_run: int = 5,
 ) -> str:
     """Generate clean, commented config.yml content.
+
+    Args:
+        ai_provider: AI provider preset name.
+        ai_api_key: API key for the AI provider.
+        ai_model: Model name for the AI provider.
+        remarkable_token: reMarkable Cloud device token (empty if using SSH).
+        use_ssh: Whether to use USB SSH instead of Cloud.
+        ssh_host: SSH host address.
+        ssh_port: SSH port number.
+        ssh_password: SSH root password (empty if using key-based auth).
+        obsidian_enabled: Whether Obsidian destination is enabled.
+        obsidian_vault_path: Absolute path to Obsidian vault.
+        obsidian_root_folder: Root folder inside the vault.
+        obsidian_mirror_folders: Whether to mirror reMarkable folder hierarchy.
+        apple_notes_enabled: Whether Apple Notes destination is enabled.
+        apple_notes_folder: Folder name in Apple Notes.
+        max_notebooks_per_run: Maximum notebooks to process per sync run.
 
     Returns:
         YAML string ready to be written to config/config.yml.
@@ -428,8 +479,12 @@ ai:
   api_key: "{ai_api_key}"
   model: "{ai_model}"
 
-# 2. reMarkable Tablet Token
+# 2. reMarkable Tablet Connection
 remarkable:
+  use_ssh: {"true" if use_ssh else "false"}
+  ssh_host: "{ssh_host}"
+  ssh_port: {ssh_port}
+  ssh_password: "{ssh_password}"
   device_token: "{remarkable_token}"
 
 # 3. Google Cloud Vision (OPTIONAL — Not needed when using Gemini or OpenAI)
@@ -493,57 +548,102 @@ def run_wizard(
     print_func()
 
     # -----------------------------------------------------------------------
-    # Step 1: reMarkable Tablet Pairing
+    # Step 1: reMarkable Tablet Connection
     # -----------------------------------------------------------------------
     print_func(bold("[Step 1 of 4] reMarkable Tablet Connection"))
     print_func(dim("-" * 60))
+    print_func("Choose how to connect to your reMarkable tablet:")
+    print_func(f"  {bold('[1]')} USB SSH {green('(Recommended — Free, fast, no subscription)')}")
+    print_func(f"  {bold('[2]')} reMarkable Cloud (Requires Connect subscription)")
 
     remarkable_token = ""
-    existing_token = get_existing_remarkable_token()
+    use_ssh = False
+    ssh_host = "10.11.99.1"
+    ssh_port = 22
+    ssh_password = ""
 
-    if existing_token:
-        print_func(green("Found existing reMarkable pairing token on this computer."))
-        choice = input_func(bold("Use existing reMarkable pairing? [Y/n]: ")).strip().lower()
-        if choice in ("", "y", "yes"):
-            print_func(dim("  Verifying token with reMarkable Cloud..."))
-            ok, msg = verify_remarkable_token(existing_token)
-            if ok:
-                print_func(green(f"  ✓ {msg}"))
-                remarkable_token = existing_token
-            else:
-                print_func(yellow(f"  ⚠️ Existing token could not connect: {msg}"))
+    conn_choice = input_func(bold("Select connection [1-2] (default: 1): ")).strip()
+    if conn_choice in ("", "1"):
+        # --- SSH Mode ---
+        use_ssh = True
+        print_func()
+        print_func("To use USB SSH:")
+        print_func("  1. Connect your reMarkable to this computer via USB-C cable.")
+        print_func("  2. On the tablet: " + bold("Settings → General → Software → Developer mode"))
+        print_func("  3. Note the root password shown on screen.")
+        print_func()
 
-    while not remarkable_token:
-        print_func()
-        print_func("To pair your reMarkable tablet:")
-        print_func(cyan("  1. Visit: ") + bold("https://my.remarkable.com/device/desktop/connect"))
-        print_func("  2. Sign in and copy the 8-letter code.")
-        print_func()
-        code_or_token = input_func(
-            bold("Enter your 8-letter code (or paste an existing token): ")
+        ssh_pass_input = input_func(
+            bold("Enter the root password from the tablet (or press Enter for SSH key auth): ")
         ).strip()
+        ssh_password = ssh_pass_input
 
-        if not code_or_token:
-            print_func(red("A code or token is required. Please try again."))
-            continue
+        host_input = input_func(bold("SSH host [10.11.99.1]: ")).strip()
+        if host_input:
+            ssh_host = host_input
 
-        if len(code_or_token) == 8:
-            print_func(dim("  Pairing device with reMarkable Cloud..."))
-            ok, token, msg = pair_remarkable_device(code_or_token)
-            if ok:
-                print_func(green(f"  ✓ {msg}"))
-                remarkable_token = token
-            else:
-                print_func(red(f"  ✗ {msg}"))
+        print_func(dim("  Verifying SSH connection..."))
+        ok, msg = verify_remarkable_ssh(
+            host=ssh_host,
+            password=ssh_password if ssh_password else None,
+        )
+        if ok:
+            print_func(green(f"  ✓ {msg}"))
         else:
-            # Assume raw token pasted
-            print_func(dim("  Verifying token..."))
-            ok, msg = verify_remarkable_token(code_or_token)
-            if ok:
-                print_func(green(f"  ✓ {msg}"))
-                remarkable_token = code_or_token
+            print_func(yellow(f"  ⚠️ {msg}"))
+            retry = input_func(bold("Continue anyway (you can fix later)? [Y/n]: ")).strip().lower()
+            if retry not in ("", "y", "yes"):
+                print_func(red("Setup aborted."))
+                return False
+    else:
+        # --- Cloud Mode ---
+        existing_token = get_existing_remarkable_token()
+
+        if existing_token:
+            print_func(green("Found existing reMarkable pairing token on this computer."))
+            choice = input_func(bold("Use existing reMarkable pairing? [Y/n]: ")).strip().lower()
+            if choice in ("", "y", "yes"):
+                print_func(dim("  Verifying token with reMarkable Cloud..."))
+                ok, msg = verify_remarkable_token(existing_token)
+                if ok:
+                    print_func(green(f"  ✓ {msg}"))
+                    remarkable_token = existing_token
+                else:
+                    print_func(yellow(f"  ⚠️ Existing token could not connect: {msg}"))
+
+        while not remarkable_token:
+            print_func()
+            print_func("To pair your reMarkable tablet:")
+            print_func(
+                cyan("  1. Visit: ") + bold("https://my.remarkable.com/device/desktop/connect")
+            )
+            print_func("  2. Sign in and copy the 8-letter code.")
+            print_func()
+            code_or_token = input_func(
+                bold("Enter your 8-letter code (or paste an existing token): ")
+            ).strip()
+
+            if not code_or_token:
+                print_func(red("A code or token is required. Please try again."))
+                continue
+
+            if len(code_or_token) == 8:
+                print_func(dim("  Pairing device with reMarkable Cloud..."))
+                ok, token, msg = pair_remarkable_device(code_or_token)
+                if ok:
+                    print_func(green(f"  ✓ {msg}"))
+                    remarkable_token = token
+                else:
+                    print_func(red(f"  ✗ {msg}"))
             else:
-                print_func(red(f"  ✗ {msg}"))
+                # Assume raw token pasted
+                print_func(dim("  Verifying token..."))
+                ok, msg = verify_remarkable_token(code_or_token)
+                if ok:
+                    print_func(green(f"  ✓ {msg}"))
+                    remarkable_token = code_or_token
+                else:
+                    print_func(red(f"  ✗ {msg}"))
 
     # -----------------------------------------------------------------------
     # Step 2: AI Handwriting OCR Provider
@@ -739,6 +839,10 @@ def run_wizard(
         ai_api_key=ai_key,
         ai_model=ai_model,
         remarkable_token=remarkable_token,
+        use_ssh=use_ssh,
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
+        ssh_password=ssh_password,
         obsidian_enabled=obsidian_enabled,
         obsidian_vault_path=obsidian_vault_path,
         obsidian_root_folder=obsidian_root_folder,

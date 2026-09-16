@@ -21,6 +21,7 @@ from remarkable_mcp.setup_wizard import (
     run_wizard,
     uninstall_launch_agent,
     verify_ai_provider,
+    verify_remarkable_ssh,
     verify_remarkable_token,
 )
 
@@ -141,6 +142,32 @@ class TestRemarkablePairing:
         assert ok is True
         assert token == "new-device-token"
 
+    @patch("remarkable_mcp.ssh.SSHClient")
+    def test_verify_remarkable_ssh_success(self, mock_ssh_cls):
+        """Successful SSH connection verification returns True."""
+        mock_client = MagicMock()
+        mock_client.check_connection.return_value = True
+        mock_doc = MagicMock()
+        mock_doc.Type = "DocumentType"
+        mock_client.get_meta_items.return_value = [mock_doc]
+        mock_ssh_cls.return_value = mock_client
+
+        ok, msg = verify_remarkable_ssh()
+        assert ok is True
+        assert "Connected via USB SSH" in msg
+        assert "1 notebooks found" in msg
+
+    @patch("remarkable_mcp.ssh.SSHClient")
+    def test_verify_remarkable_ssh_failure(self, mock_ssh_cls):
+        """Failed SSH connection returns False and helpful message."""
+        mock_client = MagicMock()
+        mock_client.check_connection.return_value = False
+        mock_ssh_cls.return_value = mock_client
+
+        ok, msg = verify_remarkable_ssh()
+        assert ok is False
+        assert "Could not establish SSH connection" in msg
+
 
 # =========================================================================
 # AI Provider Verification
@@ -206,11 +233,33 @@ class TestConfigGeneration:
         assert parsed["ai"]["provider"] == "gemini"
         assert parsed["ai"]["api_key"] == "my-key"
         assert parsed["remarkable"]["device_token"] == "tok123"
+        assert parsed["remarkable"]["use_ssh"] is False
         assert parsed["obsidian"]["enabled"] is True
         assert parsed["obsidian"]["vault_path"] == "/Users/test/Vault"
         assert parsed["obsidian"]["root_folder"] == "Living Ink"
         assert parsed["obsidian"]["mirror_folders"] is True
         assert parsed["apple_notes"]["enabled"] is False
+
+    def test_generate_config_yaml_with_ssh(self):
+        """Generated YAML with use_ssh=True parses with SSH fields."""
+        yaml_str = generate_config_yaml(
+            ai_provider="ollama",
+            ai_api_key="",
+            ai_model="llama3.2",
+            remarkable_token="",
+            use_ssh=True,
+            ssh_host="10.11.99.1",
+            ssh_port=22,
+            ssh_password="my-password",
+            obsidian_enabled=True,
+            obsidian_vault_path="/Users/test/Vault",
+        )
+        parsed = yaml.safe_load(yaml_str)
+        assert parsed["ai"]["provider"] == "ollama"
+        assert parsed["remarkable"]["use_ssh"] is True
+        assert parsed["remarkable"]["ssh_host"] == "10.11.99.1"
+        assert parsed["remarkable"]["ssh_password"] == "my-password"
+        assert parsed["remarkable"]["device_token"] == ""
 
 
 # =========================================================================
@@ -270,7 +319,7 @@ class TestRunWizard:
         "remarkable_mcp.setup_wizard.get_existing_remarkable_token", return_value="existing-token"
     )
     @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
-    def test_run_wizard_standard_flow(
+    def test_run_wizard_cloud_flow(
         self,
         mock_detect_vaults,
         mock_get_token,
@@ -278,13 +327,13 @@ class TestRunWizard:
         mock_verify_rm,
         tmp_path,
     ):
-        """Walkthrough runs through all steps and creates config/config.yml."""
+        """Walkthrough with Cloud connection creates config/config.yml."""
         mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
         (tmp_path / "MyVault").mkdir()
         (tmp_path / "MyVault" / "Living Ink").mkdir()
 
         # Simulated user responses:
-        # Step 1: Use existing token -> "y"
+        # Step 1: Option 2 (Cloud) -> Use existing token -> "y"
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
         #         Choose folder -> "1" (Living Ink), Mirror -> "y"
@@ -293,6 +342,7 @@ class TestRunWizard:
         # First sync -> "n"
         inputs = iter(
             [
+                "2",  # Cloud connection
                 "y",  # Use existing token
                 "1",  # Gemini
                 "AIzaTestKey",  # API Key
@@ -319,6 +369,66 @@ class TestRunWizard:
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
         assert cfg["ai"]["provider"] == "gemini"
         assert cfg["ai"]["api_key"] == "AIzaTestKey"
+        assert cfg["remarkable"]["use_ssh"] is False
         assert cfg["remarkable"]["device_token"] == "existing-token"
+        assert cfg["obsidian"]["enabled"] is True
+        assert cfg["obsidian"]["root_folder"] == "Living Ink"
+
+    @patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
+    @patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
+    def test_run_wizard_ssh_flow(
+        self,
+        mock_detect_vaults,
+        mock_verify_ai,
+        mock_verify_ssh,
+        tmp_path,
+    ):
+        """Walkthrough with USB SSH (default) creates config/config.yml."""
+        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
+        (tmp_path / "MyVault").mkdir()
+        (tmp_path / "MyVault" / "Living Ink").mkdir()
+
+        # Simulated user responses:
+        # Step 1: Default (1 - SSH) -> password "secret" -> host default ""
+        # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
+        # Step 3: Enable Obsidian -> "y", Select vault -> "1",
+        #         Choose folder -> "1" (Living Ink), Mirror -> "y"
+        # Apple Notes -> "n"
+        # macOS background sync -> "n"
+        # First sync -> "n"
+        inputs = iter(
+            [
+                "1",  # SSH connection (option 1)
+                "secret",  # Root password
+                "",  # Host default (10.11.99.1)
+                "1",  # Gemini
+                "AIzaTestKey",  # API Key
+                "y",  # Enable Obsidian
+                "1",  # Vault 1
+                "1",  # Existing folder 1
+                "y",  # Mirror folders
+                "n",  # Apple notes
+                "n",  # Background sync
+                "n",  # First sync
+            ]
+        )
+
+        outputs = []
+        result = run_wizard(
+            input_func=lambda prompt="": next(inputs),
+            print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
+            repo_dir=tmp_path,
+        )
+
+        assert result is True
+        saved_config = tmp_path / "config" / "config.yml"
+        assert saved_config.exists()
+        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
+        assert cfg["ai"]["provider"] == "gemini"
+        assert cfg["ai"]["api_key"] == "AIzaTestKey"
+        assert cfg["remarkable"]["use_ssh"] is True
+        assert cfg["remarkable"]["ssh_password"] == "secret"
+        assert cfg["remarkable"]["ssh_host"] == "10.11.99.1"
         assert cfg["obsidian"]["enabled"] is True
         assert cfg["obsidian"]["root_folder"] == "Living Ink"
