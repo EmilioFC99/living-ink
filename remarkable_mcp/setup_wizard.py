@@ -440,7 +440,7 @@ def install_cli_command(repo_dir: Path, bin_dir: Optional[Path] = None) -> Tuple
     wrapper = bin_dir / "living-ink"
     script = f"""#!/usr/bin/env bash
 export PATH="$HOME/.local/bin:$PATH"
-exec uv run --directory "{repo_dir.resolve()}" living-ink "$@"
+exec uv run --directory "{repo_dir.resolve()}" python -m remarkable_mcp.cli "$@"
 """
     try:
         wrapper.write_text(script, encoding="utf-8")

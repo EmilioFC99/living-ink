@@ -118,7 +118,7 @@ cat <<'EOF' > "$WRAPPER"
 #!/usr/bin/env bash
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 INSTALL_DIR="$HOME/.living-ink"
-exec uv run --directory "$INSTALL_DIR" living-ink "$@"
+exec uv run --directory "$INSTALL_DIR" python -m remarkable_mcp.cli "$@"
 EOF
 
 chmod +x "$WRAPPER"

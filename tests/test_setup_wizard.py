@@ -323,7 +323,7 @@ class TestInstallCliCommand:
         assert wrapper.exists()
         content = wrapper.read_text(encoding="utf-8")
         assert f'--directory "{repo_dir.resolve()}"' in content
-        assert 'living-ink "$@"' in content
+        assert 'python -m remarkable_mcp.cli "$@"' in content
 
 
 # =========================================================================
