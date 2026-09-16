@@ -60,6 +60,10 @@ def cmd_sync(args, root: Path):
         os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
         os.environ["REMARKABLE_USE_SSH"] = "false"
 
+    cfg_path = get_config_path(root)
+    if cfg_path.exists():
+        os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
+
     from scripts.process_notebook import main as sync_main
 
     # Forward any options to process_notebook

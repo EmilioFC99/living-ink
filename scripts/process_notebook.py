@@ -42,7 +42,16 @@ class WarningFilter(logging.Filter):
 for logger_name in ["rmscene", "rmc", "rmscene.text"]:
     logging.getLogger(logger_name).addFilter(WarningFilter())
 
-ROOT = Path(".").resolve()
+
+def _find_root() -> Path:
+    """Find project root, falling back to repository root if cwd has no config."""
+    cwd = Path.cwd().resolve()
+    if (cwd / "config" / "config.yml").exists() or (cwd / "config.yml").exists():
+        return cwd
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _find_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under DATA_DIR
 data_dir_env = os.environ.get("LIVING_INK_DATA_DIR")
