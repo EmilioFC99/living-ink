@@ -5,7 +5,7 @@ processing logic. All publication targets inherit from the ``Destination``
 base class.
 
 Example:
-    >>> from remarkable_mcp.destinations import ObsidianDestination
+    >>> from living_ink.destinations import ObsidianDestination
     >>> dest = ObsidianDestination(vault_path="/path/to/vault", root_folder="Living Ink")
     >>> dest.publish("Meeting Notes", "# Content", [], sub_folder="Work/Projects")
 """
@@ -41,6 +41,8 @@ class Destination(abc.ABC):
         text_content: str,
         image_paths: List[Path],
         sub_folder: Optional[str] = None,
+        document_path: Optional[Path] = None,
+        tags: Optional[List[str]] = None,
     ) -> bool:
         """Publish a notebook to the destination.
 
@@ -49,6 +51,8 @@ class Destination(abc.ABC):
             text_content: The cleaned-up text content.
             image_paths: List of file paths to rendered page images.
             sub_folder: Optional relative sub-folder path (e.g., "Work/Projects").
+            document_path: Optional path to underlying raw document (PDF or EPUB).
+            tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
             True if publication succeeded, False otherwise.
@@ -82,11 +86,58 @@ class AppleNotesDestination(Destination):
         """
         text = text.lstrip()
         html_lines = []
+        in_callout = False
+        callout_lines = []
+
+        def flush_callout():
+            nonlocal in_callout, callout_lines
+            if in_callout:
+                if callout_lines:
+                    joined = "<br>".join(callout_lines)
+                    html_lines.append(f"<blockquote>{joined}</blockquote>")
+                    callout_lines = []
+                in_callout = False
+
         for line in text.splitlines():
-            if not line:
+            stripped = line.strip()
+            if not stripped:
+                flush_callout()
                 html_lines.append("<div><br></div>")
+            elif stripped == "---":
+                flush_callout()
+                html_lines.append("<hr>")
+            elif stripped.startswith("### "):
+                flush_callout()
+                header_text = html.escape(stripped[4:].strip())
+                html_lines.append(f"<h3>{header_text}</h3>")
+            elif stripped.startswith("## "):
+                flush_callout()
+                header_text = html.escape(stripped[3:].strip())
+                html_lines.append(f"<h2>{header_text}</h2>")
+            elif (
+                (stripped.startswith("<span") and stripped.endswith("</span>"))
+                or (stripped.startswith("<small") and stripped.endswith("</small>"))
+                or (stripped.startswith("<div") and stripped.endswith("</div>"))
+            ):
+                flush_callout()
+                html_lines.append(f"<div>{stripped}</div>")
+            elif stripped.startswith("> [!"):
+                flush_callout()
+                m = re.match(r"^>\s*\[!\w+\]\s*(.*)$", stripped)
+                title = m.group(1).strip() if m and m.group(1).strip() else "Note"
+                html_lines.append(f"<div><b>{html.escape(title)}</b></div>")
+                in_callout = True
+            elif in_callout and (stripped.startswith(">") or stripped == ">"):
+                content = stripped[1:].strip()
+                if content:
+                    callout_lines.append(html.escape(content))
+                else:
+                    callout_lines.append("<br>")
             else:
+                flush_callout()
                 html_lines.append(f"<div>{html.escape(line)}</div>")
+
+        flush_callout()
         return "".join(html_lines)
 
     def _create_opaque_image(self, img_path: Path) -> Path:
@@ -131,6 +182,8 @@ class AppleNotesDestination(Destination):
         text_content: str,
         image_paths: List[Path],
         sub_folder: Optional[str] = None,
+        document_path: Optional[Path] = None,
+        tags: Optional[List[str]] = None,
     ) -> bool:
         """Publish a note to Apple Notes via osascript.
 
@@ -141,6 +194,8 @@ class AppleNotesDestination(Destination):
             sub_folder: Sub-folder name. Apple Notes supports one level of
                 nesting beneath ``folder_name``; if a nested path is provided,
                 the top-level segment is used.
+            document_path: Optional path to underlying raw document (PDF or EPUB).
+            tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
             True if AppleScript executed successfully, False otherwise.
@@ -156,11 +211,25 @@ class AppleNotesDestination(Destination):
                 effective_sub_folder = top_part
 
         # 1. Prepare Content
+        doc_header = ""
+        if document_path and document_path.exists():
+            doc_header = f"<div><b>Source Document:</b> {html.escape(document_path.name)}</div><div><br></div>"
         text_html = self._convert_to_html(text_content)
-        final_body = "<div><br></div>" + text_html
+        tag_footer = ""
+        if tags:
+            tag_badges = " ".join(f"#{t.lstrip('#').replace(' ', '-')}" for t in tags if t)
+            if tag_badges:
+                tag_footer = f'<div><br></div><div><span style="color: #666;">{html.escape(tag_badges)}</span></div>'
+        final_body = "<div><br></div>" + doc_header + text_html + tag_footer
 
         # 2. Prepare Attachments
         attachment_cmds = ""
+        if document_path and document_path.exists():
+            safe_doc = json.dumps(str(document_path.resolve()), ensure_ascii=False)
+            attachment_cmds += (
+                f"make new attachment at end of attachments of newNote with "
+                f"data (POSIX file {safe_doc})\n    "
+            )
         for img_p in image_paths:
             if img_p.exists():
                 final_path = self._create_opaque_image(img_p)
@@ -269,7 +338,7 @@ class ObsidianDestination(Destination):
     def __init__(
         self,
         vault_path: str,
-        attachments_folder: str = "attachments",
+        attachments_folder: str = "_attachments",
         root_folder: Optional[str] = None,
         mirror_folders: bool = True,
     ) -> None:
@@ -279,7 +348,7 @@ class ObsidianDestination(Destination):
             vault_path: Absolute or home-relative path to the Obsidian Vault.
             attachments_folder: Subfolder name for page attachments.
                 Set to empty string ("") to store attachments in the same
-                directory as the note. Defaults to "attachments".
+                directory as the note. Defaults to "_attachments".
             root_folder: Optional folder inside the vault where all notes
                 will be stored (e.g., "Living Ink" or "reMarkable"). If omitted
                 or empty, notes are placed in the vault root. Defaults to None.
@@ -315,12 +384,28 @@ class ObsidianDestination(Destination):
         sanitized = re.sub(r"-+", "-", sanitized).strip(" -")
         return sanitized or "Untitled"
 
+    def _sanitize_tag(self, tag: str) -> str:
+        """Sanitize a tag for Obsidian YAML frontmatter.
+
+        Args:
+            tag: Raw tag string.
+
+        Returns:
+            Clean tag string suitable for Obsidian.
+        """
+        clean = tag.strip().lstrip("#").strip()
+        clean = re.sub(r"\s+", "-", clean)
+        clean = re.sub(r"[^\w\-/]", "", clean)
+        return clean
+
     def publish(
         self,
         notebook_name: str,
         text_content: str,
         image_paths: List[Path],
         sub_folder: Optional[str] = None,
+        document_path: Optional[Path] = None,
+        tags: Optional[List[str]] = None,
     ) -> bool:
         """Publish a note to Obsidian as Markdown with image attachments.
 
@@ -331,6 +416,8 @@ class ObsidianDestination(Destination):
             image_paths: List of paths to rendered page images.
             sub_folder: Relative folder path mirroring the reMarkable hierarchy
                 (e.g., "Work/Projects/Q1").
+            document_path: Optional path to underlying raw document (PDF or EPUB).
+            tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
             True if the Markdown file and attachments were written successfully,
@@ -345,19 +432,24 @@ class ObsidianDestination(Destination):
                 clean_title = notebook_name.strip()
                 source_path = f"{sub_folder}/{clean_title}" if sub_folder else clean_title
 
-            # 2. Determine Target Directory
-            target_dir = self.vault_path
+            # 2. Determine Target Directory (Notes) and Root Directory
+            root_dir = self.vault_path
             if self.root_folder:
                 # Sanitize each segment of the root_folder path if nested
                 for part in self.root_folder.replace("\\", "/").split("/"):
                     if part.strip():
-                        target_dir = target_dir / self._sanitize_filename(part.strip())
+                        root_dir = root_dir / self._sanitize_filename(part.strip())
 
+            subfolder_parts = []
             if self.mirror_folders and sub_folder:
                 # Replicate full folder hierarchy
                 for part in sub_folder.replace("\\", "/").split("/"):
                     if part.strip():
-                        target_dir = target_dir / self._sanitize_filename(part.strip())
+                        subfolder_parts.append(self._sanitize_filename(part.strip()))
+
+            target_dir = root_dir
+            for part in subfolder_parts:
+                target_dir = target_dir / part
 
             target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -373,21 +465,56 @@ class ObsidianDestination(Destination):
                 else:
                     safe_name = self._sanitize_filename(clean_title)
 
-            # 4. Handle Attachments
+            # 4. Handle Attachments (centralized _attachments root, mirroring subfolders + dedicated note folder)
             if self.attachments_folder:
-                attach_dir = target_dir / self._sanitize_filename(self.attachments_folder)
+                attach_dir = root_dir / self._sanitize_filename(self.attachments_folder)
+                for part in subfolder_parts:
+                    attach_dir = attach_dir / part
+                attach_dir = attach_dir / safe_name
             else:
                 attach_dir = target_dir
 
             attach_dir.mkdir(parents=True, exist_ok=True)
 
-            image_refs = []
+            # Path relative to vault root for clean, reliable WikiLinks
+            rel_attach_path = attach_dir.relative_to(self.vault_path).as_posix()
+            link_prefix = f"{rel_attach_path}/" if rel_attach_path != "." else ""
+
+            doc_filename = None
+            doc_link_target = None
+            if document_path and document_path.exists():
+                ext = document_path.suffix.lower()
+                doc_filename = f"{safe_name}{ext}"
+                dest_doc_path = attach_dir / doc_filename
+                shutil.copy2(document_path, dest_doc_path)
+                doc_link_target = f"{link_prefix}{doc_filename}"
+
+            image_links = []
             for img_p in image_paths:
                 if img_p.exists():
-                    new_filename = f"{safe_name}_{img_p.name}"
+                    page_match = re.search(r"page-(\d+)", img_p.name, re.IGNORECASE)
+                    if page_match:
+                        p_num = int(page_match.group(1))
+                        from living_ink.extract import format_page_label
+
+                        label = format_page_label(p_num, document_path)
+                        page_filename = f"page-{p_num}{img_p.suffix.lower()}"
+                    else:
+                        label = img_p.stem.replace("_", " ").title()
+                        page_filename = img_p.name
+
+                    # In a dedicated attachments subfolder, use clean page filename;
+                    # if alongside note, prefix with safe_name to prevent collisions.
+                    if self.attachments_folder:
+                        new_filename = page_filename
+                    else:
+                        new_filename = f"{safe_name}_{page_filename}"
+
                     dest_path = attach_dir / new_filename
                     shutil.copy2(img_p, dest_path)
-                    image_refs.append(f"![[{new_filename}]]")
+
+                    img_link_target = f"{link_prefix}{new_filename}"
+                    image_links.append(f"- [[{img_link_target}|{label}]]")
 
             # 5. Build Markdown Content
             md_lines = []
@@ -397,22 +524,42 @@ class ObsidianDestination(Destination):
             md_lines.append("---")
             md_lines.append(f"created: {today_str}")
             md_lines.append(f"source: Remarkable/{source_path}")
+
+            combined_tags = ["remarkable"]
+            if document_path and document_path.exists():
+                doc_type = document_path.suffix.lstrip(".").lower()
+                md_lines.append(f"type: {doc_type}")
+                if doc_link_target:
+                    md_lines.append(f'document: "[[{doc_link_target}]]"')
+                combined_tags.append(doc_type)
+            else:
+                combined_tags.append("handwritten")
+
+            if tags:
+                for t in tags:
+                    clean_t = self._sanitize_tag(t)
+                    if clean_t and clean_t.lower() not in [ct.lower() for ct in combined_tags]:
+                        combined_tags.append(clean_t)
+
             md_lines.append("tags:")
-            md_lines.append("  - remarkable")
-            md_lines.append("  - handwritten")
+            for t in combined_tags:
+                md_lines.append(f"  - {t}")
             md_lines.append("---")
             md_lines.append("")
 
             # --- Text Content ---
-            md_lines.append(text_content)
-            md_lines.append("")
+            if text_content.strip():
+                md_lines.append(text_content.strip())
+                md_lines.append("")
 
             # --- Attachments ---
-            if image_refs:
+            if image_links:
+                md_lines.append("---")
+                md_lines.append("")
                 md_lines.append("## Original Pages")
-                for ref in image_refs:
-                    md_lines.append(ref)
-                    md_lines.append("")
+                for link in image_links:
+                    md_lines.append(link)
+                md_lines.append("")
 
             final_md = "\n".join(md_lines)
 

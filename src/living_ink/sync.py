@@ -41,6 +41,7 @@ class Document:
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
 
     @property
     def is_folder(self) -> bool:
@@ -177,7 +178,7 @@ class RemarkableClient:
         if not response.text or not response.text.strip():
             raise RuntimeError(
                 "Empty response from reMarkable API. Your token may have expired.\n"
-                "Try re-registering: uvx remarkable-mcp --register <code>"
+                "Try re-registering with: living-ink setup"
             )
 
         try:
@@ -377,8 +378,7 @@ def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> Remarkab
     """
     if not token_file.exists():
         raise RuntimeError(
-            f"Token file not found: {token_file}\n"
-            "Register first with: uvx remarkable-mcp --register <code>"
+            f"Token file not found: {token_file}\nRegister first with: living-ink setup"
         )
 
     token_json = token_file.read_text()

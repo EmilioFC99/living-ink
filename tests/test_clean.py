@@ -1,4 +1,4 @@
-"""Tests for remarkable_mcp.clean module.
+"""Tests for living_ink.clean module.
 
 Covers the configure/repair integration, ENABLE_REPAIR toggle,
 prompt file loading, lazy provider initialization, and backward
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from remarkable_mcp import clean
-from remarkable_mcp.providers import NoneProvider, UniversalChatProvider
+from living_ink import clean
+from living_ink.providers import NoneProvider, UniversalChatProvider
 
 # =========================================================================
 # Fixtures

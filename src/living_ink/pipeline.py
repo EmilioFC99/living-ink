@@ -7,21 +7,23 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import sys
 import time
+import zipfile
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import yaml
 from PIL import Image, ImageFilter, ImageOps
 
-# Ensure remarkable_mcp is importable
+# Ensure living_ink is importable
 sys.path.append(str(Path(__file__).parent.parent))
 
-from remarkable_mcp.clean import configure as configure_ai_provider
-from remarkable_mcp.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
-from remarkable_mcp.config import get_config_path, get_data_dir, get_logs_dir
-from remarkable_mcp.destinations import AppleNotesDestination, Destination, ObsidianDestination
+from living_ink.clean import configure as configure_ai_provider
+from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
+from living_ink.config import get_config_path, get_data_dir, get_logs_dir
+from living_ink.destinations import AppleNotesDestination, Destination, ObsidianDestination
 
 
 # --- LOGGING SUPPRESSION ---
@@ -30,40 +32,59 @@ class WarningFilter(logging.Filter):
     def filter(self, record):
         try:
             msg = record.getMessage()
-            if "Unknown formatting code" in msg:
-                return False
-            if "Some data has not been read" in msg:
+            if any(
+                p in msg
+                for p in (
+                    "Unknown formatting code",
+                    "Some data has not been read",
+                    "Unknown block type",
+                )
+            ):
                 return False
         except Exception:
             pass
         return True
 
 
-# Apply filter to rmscene logger and rmc logger
-for logger_name in ["rmscene", "rmc", "rmscene.text"]:
-    logging.getLogger(logger_name).addFilter(WarningFilter())
+# Apply filter and elevate log level for rmscene / rmc
+_suppress_filter = WarningFilter()
+for logger_name in [
+    "rmscene",
+    "rmscene.tagged_block_reader",
+    "rmscene.scene_stream",
+    "rmscene.scene_tree",
+    "rmscene.text",
+    "rmc",
+]:
+    _l = logging.getLogger(logger_name)
+    _l.addFilter(_suppress_filter)
+    _l.setLevel(logging.ERROR)
 
 
-def _find_root() -> Path:
-    """Find project root, falling back to repository root if cwd has no config."""
+def _find_root() -> Optional[Path]:
+    """Find project root if running from a repository checkout."""
     cwd = Path.cwd().resolve()
-    if (cwd / "config" / "config.yml").exists() or (cwd / "config.yml").exists():
+    if (cwd / "pyproject.toml").exists():
         return cwd
-    return Path(__file__).resolve().parent.parent
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return None
 
 
 ROOT = _find_root()
 
-# All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under DATA_DIR
-DATA_DIR = get_data_dir(ROOT)
+# All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
+DATA_DIR = get_data_dir()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 WHITE_DIR = DATA_DIR / "remarkable_pngs_white"
 VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
 OCR_DIR = DATA_DIR / "output"  # OCR text files
 PDF_DIR = DATA_DIR / "remarkable_pdfs"
+DOCS_DIR = DATA_DIR / "remarkable_documents"
 PROCESSED_LOG = DATA_DIR / "processed_notebooks.json"
-LOGS_DIR = get_logs_dir(ROOT)
+LOGS_DIR = get_logs_dir()
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOGS_DIR / "pipeline.log"
 
@@ -71,9 +92,10 @@ WHITE_DIR.mkdir(parents=True, exist_ok=True)
 VISION_DIR.mkdir(parents=True, exist_ok=True)
 OCR_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR.mkdir(parents=True, exist_ok=True)
+DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- CONFIGURATION LOADING (YAML) ---
-YAML_CONFIG_PATH = get_config_path(ROOT)
+YAML_CONFIG_PATH = get_config_path()
 
 if YAML_CONFIG_PATH.exists():
     try:
@@ -171,6 +193,16 @@ if YAML_CONFIG_PATH.exists():
                     os.environ["SYNC_MAX_NOTEBOOKS"] = str(
                         yaml_config["sync"]["max_notebooks_per_run"]
                     )
+                if "sync_pdfs" in yaml_config["sync"]:
+                    val = yaml_config["sync"]["sync_pdfs"]
+                    os.environ["SYNC_PDFS"] = (
+                        "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
+                    )
+                if "sync_epubs" in yaml_config["sync"]:
+                    val = yaml_config["sync"]["sync_epubs"]
+                    os.environ["SYNC_EPUBS"] = (
+                        "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
+                    )
 
             # 5. Apple Notes Settings
             if "apple_notes" in yaml_config:
@@ -247,7 +279,7 @@ def get_destinations_from_config(config_dict) -> List[Destination]:
         if vault_path:
             root_folder = obs_config.get("root_folder")
             mirror_folders = obs_config.get("mirror_folders", True)
-            attachments_folder = obs_config.get("attachments_folder", "attachments")
+            attachments_folder = obs_config.get("attachments_folder", "_attachments")
             dests.append(
                 ObsidianDestination(
                     vault_path=vault_path,
@@ -385,6 +417,26 @@ def vision_ocr_image(png_path: Path, api_key: str, retries: int = 3):
     return None
 
 
+def google_vision_available() -> bool:
+    """Check if Google Cloud Vision credentials are configured and valid.
+
+    Returns:
+        bool: True if Google Cloud Vision service account credentials exist.
+    """
+    creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if creds_env and Path(creds_env).exists():
+        try:
+            content = Path(creds_env).read_text(encoding="utf-8")
+            if "your-project-id" not in content and "BEGIN PRIVATE KEY" in content:
+                return True
+        except Exception:
+            pass
+    secrets_dir = ROOT / "secrets"
+    if secrets_dir.exists() and list(secrets_dir.glob("*.json")):
+        return True
+    return False
+
+
 # --- Google Vision OCR using service account (preferred) ---
 def vision_ocr_image_service_account(png_path: Path):
     try:
@@ -393,17 +445,21 @@ def vision_ocr_image_service_account(png_path: Path):
         print("google-cloud-vision not installed. Please run: uv add google-cloud-vision")
         return None
 
-    client = vision.ImageAnnotatorClient()
-    with open(png_path, "rb") as f:
-        content = f.read()
-    image = vision.Image(content=content)
-    response = client.document_text_detection(image=image)
-    if response.error.message:
-        print(f"Vision API error: {response.error.message}")
+    try:
+        client = vision.ImageAnnotatorClient()
+        with open(png_path, "rb") as f:
+            content = f.read()
+        image = vision.Image(content=content)
+        response = client.document_text_detection(image=image)
+        if response.error.message:
+            print(f"Vision API error: {response.error.message}")
+            return None
+        if response.full_text_annotation and response.full_text_annotation.text:
+            return response.full_text_annotation.text.strip()
+        return ""
+    except Exception as e:
+        print(f"Google Cloud Vision error: {e}")
         return None
-    if response.full_text_annotation and response.full_text_annotation.text:
-        return response.full_text_annotation.text.strip()
-    return ""
 
 
 def make_pdf_from_images(image_paths, out_pdf: Path):
@@ -466,8 +522,8 @@ def validate_environment():
     warnings = []
 
     # 1. Check AI Provider (replaces hardcoded OpenAI check)
-    from remarkable_mcp.clean import _get_provider
-    from remarkable_mcp.providers import NoneProvider
+    from living_ink.clean import _get_provider
+    from living_ink.providers import NoneProvider
 
     provider = _get_provider()
     if isinstance(provider, NoneProvider):
@@ -545,9 +601,9 @@ def validate_environment():
                 prompt_text = "Would you like to run the interactive setup wizard now? [Y/n]: "
                 choice = input(prompt_text).strip().lower()
                 if choice in ("", "y", "yes"):
-                    from remarkable_mcp.setup_wizard import run_wizard
+                    from living_ink.setup_wizard import run_wizard
 
-                    run_wizard(repo_dir=ROOT)
+                    run_wizard()
                     sys.exit(0)
             except (KeyboardInterrupt, EOFError):
                 pass
@@ -556,6 +612,227 @@ def validate_environment():
         sys.exit(1)
 
     log("Configuration valid.")
+
+
+def get_val(item: Any, key: str) -> Any:
+    """Safely get a property or dictionary key from a document item."""
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, getattr(item, key.lower(), None))
+
+
+def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
+    """Construct the folder path for an item using the ID lookup map."""
+    path = []
+    current = item
+    while get_val(current, "Parent"):
+        parent_id = get_val(current, "Parent")
+        if parent_id == "trash":
+            path.insert(0, "[TRASH]")
+            break
+        parent = id_map.get(parent_id)
+        if parent:
+            parent_name = get_val(parent, "VissibleName") or get_val(parent, "VisibleName")
+            path.insert(0, parent_name)
+            current = parent
+        else:
+            break
+    return " / ".join(path)
+
+
+def normalize_path_str(path_str: str) -> str:
+    """Normalize a path string by stripping whitespace around slashes and lowercasing."""
+    parts = [p.strip().lower() for p in path_str.replace("\\", "/").split("/") if p.strip()]
+    return "/".join(parts)
+
+
+def matches_notebook_target(item: Any, target_str: str, id_map: Dict[str, Any]) -> bool:
+    """Check if a document matches a target string by ID, name, or folder path.
+
+    Args:
+        item: Document item.
+        target_str: Search target (name, folder path, or document UUID).
+        id_map: Map of ID -> Document for resolving parent folders.
+
+    Returns:
+        True if the item matches the target.
+    """
+    t = target_str.strip()
+    if not t:
+        return False
+
+    # 1. Exact ID match (case-insensitive)
+    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "").strip()
+    if doc_id.lower() == t.lower():
+        return True
+
+    # 2. Name match (case-insensitive, exact or substring)
+    name = str(
+        get_val(item, "VissibleName")
+        or get_val(item, "VisibleName")
+        or getattr(item, "name", "")
+        or ""
+    ).strip()
+    if name.lower() == t.lower() or t.lower() in name.lower():
+        return True
+
+    # 3. Path match: e.g. "Work/Notes" or "Work / Notes"
+    folder_path = get_notebook_path(item, id_map)
+    if folder_path:
+        full_spaced = f"{folder_path} / {name}"
+        full_slash = f"{folder_path}/{name}"
+        t_norm = normalize_path_str(t)
+        norm_spaced = normalize_path_str(full_spaced)
+        norm_slash = normalize_path_str(full_slash)
+        if t_norm == norm_spaced or t_norm == norm_slash or t_norm in norm_spaced:
+            return True
+
+    return False
+
+
+def get_document_type(item: Any, client: Optional[Any] = None) -> str:
+    """Determine whether an item is a 'notebook', 'pdf', or 'epub'.
+
+    Args:
+        item: The document/metadata item or dict.
+        client: Optional API client to query for file type.
+
+    Returns:
+        One of 'notebook', 'pdf', or 'epub'.
+    """
+    if client is not None and hasattr(client, "get_file_type"):
+        try:
+            ft = client.get_file_type(item)
+            if ft in ("pdf", "epub"):
+                return ft
+        except Exception:
+            pass
+
+    files = get_val(item, "files") or []
+    for f in files:
+        fid = str(f.get("id") if isinstance(f, dict) else getattr(f, "id", "")).lower()
+        if fid.endswith(".pdf"):
+            return "pdf"
+        if fid.endswith(".epub"):
+            return "epub"
+
+    name = str(
+        get_val(item, "VissibleName")
+        or get_val(item, "VisibleName")
+        or getattr(item, "name", "")
+        or ""
+    ).lower()
+    if name.endswith(".pdf"):
+        return "pdf"
+    if name.endswith(".epub"):
+        return "epub"
+
+    return "notebook"
+
+
+def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any] = None) -> str:
+    """Format a notebook item description for display in selection prompts."""
+    name = str(
+        get_val(item, "VissibleName")
+        or get_val(item, "VisibleName")
+        or getattr(item, "name", "")
+        or "Untitled"
+    )
+    folder = get_notebook_path(item, id_map)
+    title = f"{folder} / {name}" if folder else name
+    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "")
+    short_id = doc_id[:8] if len(doc_id) > 8 else doc_id
+
+    doc_type = get_document_type(item, client)
+    type_badge = f" [{doc_type.upper()}]" if doc_type in ("pdf", "epub") else ""
+
+    mod_val = get_val(item, "ModifiedClient") or getattr(item, "last_modified", None)
+    mod_str = ""
+    if mod_val:
+        if isinstance(mod_val, datetime.datetime):
+            mod_str = f" (modified: {mod_val.strftime('%Y-%m-%d %H:%M')})"
+        elif isinstance(mod_val, (int, float)):
+            try:
+                ts = float(mod_val)
+                if ts > 1e11:
+                    ts = ts / 1000
+                mod_str = (
+                    f" (modified: {datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')})"
+                )
+            except Exception:
+                pass
+
+    id_label = f" [ID: {short_id}]" if short_id else ""
+    return f"{title}{type_badge}{id_label}{mod_str}"
+
+
+def select_notebook_interactive(
+    matches: List[Any],
+    query: str,
+    id_map: Dict[str, Any],
+    input_func=input,
+    print_func=print,
+    is_interactive: Optional[bool] = None,
+) -> List[Any]:
+    """Prompt the user to choose from multiple matching notebooks.
+
+    Args:
+        matches: List of matching notebook items.
+        query: The user-supplied --notebook query.
+        id_map: Map of ID -> Document for path resolution.
+        input_func: Function for reading user input.
+        print_func: Function for printing messages.
+        is_interactive: Whether terminal is interactive (defaults to sys.stdin.isatty()).
+
+    Returns:
+        List of selected notebook items to process. Empty list if cancelled.
+    """
+    if len(matches) <= 1:
+        return matches
+
+    if is_interactive is None:
+        is_interactive = sys.stdin.isatty()
+
+    if not is_interactive:
+        print_func(
+            f"ℹ️ Multiple notebooks ({len(matches)}) match '{query}' in non-interactive mode. Processing all."
+        )
+        return matches
+
+    print_func("")
+    print_func(f"Found {len(matches)} notebooks matching '{query}':")
+    for idx, it in enumerate(matches, 1):
+        desc = format_notebook_item(it, id_map)
+        print_func(f"  [{idx}] {desc}")
+    print_func(f"  [a] Process all {len(matches)} matching notebooks")
+    print_func("  [q] Cancel / Quit")
+    print_func("")
+
+    while True:
+        try:
+            raw = (
+                input_func(f"Select a notebook [1-{len(matches)}, a, q] (default: a): ")
+                .strip()
+                .lower()
+            )
+        except (KeyboardInterrupt, EOFError):
+            print_func("\nCancelled by user.")
+            return []
+
+        if raw in ("", "a", "all"):
+            return matches
+        if raw in ("q", "quit", "exit"):
+            print_func("Cancelled by user.")
+            return []
+        if raw.isdigit():
+            num = int(raw)
+            if 1 <= num <= len(matches):
+                selected = [matches[num - 1]]
+                sel_title = format_notebook_item(selected[0], id_map)
+                print_func(f"Selected: {sel_title}")
+                return selected
+
+        print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
 
 
 def main():
@@ -569,7 +846,10 @@ def main():
 
     # --- Argument parsing ---
     parser = argparse.ArgumentParser()
-    parser.add_argument("--notebook", help="Notebook safe name prefix (e.g., Notebook_8)")
+    parser.add_argument(
+        "--notebook",
+        help="Process a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process per run")
     parser.add_argument(
         "--folder",
@@ -582,6 +862,17 @@ def main():
     )
     parser.add_argument(
         "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
+    )
+    parser.add_argument(
+        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
+    )
+    parser.add_argument(
+        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
+    )
+    parser.add_argument(
+        "--all-types",
+        action="store_true",
+        help="Sync all document types (notebooks, PDFs, and EPUBs)",
     )
     args = parser.parse_args()
 
@@ -608,48 +899,28 @@ def main():
         folder.mkdir(exist_ok=True)
 
     # --- Step 0: List all notebooks ---
-    from remarkable_mcp.api import get_rmapi
+    from living_ink.api import get_rmapi
 
     client = get_rmapi()
     collection = client.get_meta_items()
 
-    # Only consider notebooks (not PDFs/EPUBs)
-    def get_val(item, key):
-        # Support both dict and object attribute access
-        if isinstance(item, dict):
-            return item.get(key)
-        return getattr(item, key, None)
-
     # Build ID map for path resolution
     id_map = {get_val(item, "ID"): item for item in collection}
 
-    def get_notebook_path(item, id_map):
-        path = []
-        current = item
-        while get_val(current, "Parent"):
-            parent_id = get_val(current, "Parent")
-            if parent_id == "trash":
-                path.insert(0, "[TRASH]")
-                break
-            parent = id_map.get(parent_id)
-            if parent:
-                parent_name = get_val(parent, "VissibleName") or get_val(parent, "VisibleName")
-                path.insert(0, parent_name)
-                current = parent
-            else:
-                break
-        return " / ".join(path)
+    # Determine sync flags for document types
+    sync_pdfs = (
+        getattr(args, "sync_pdfs", False)
+        or getattr(args, "all_types", False)
+        or os.environ.get("SYNC_PDFS", "false").strip().lower() in ("1", "true", "yes")
+    )
+    sync_epubs = (
+        getattr(args, "sync_epubs", False)
+        or getattr(args, "all_types", False)
+        or os.environ.get("SYNC_EPUBS", "false").strip().lower() in ("1", "true", "yes")
+    )
+    is_targeted = bool(getattr(args, "notebook", None))
 
-    def is_native_notebook(item):
-        """Check if document is a native notebook (not PDF/EPUB)."""
-        files = get_val(item, "files") or []
-        for f in files:
-            fid = f.get("id", "").lower()
-            if fid.endswith(".pdf") or fid.endswith(".epub"):
-                return False
-        return True
-
-    # Filter out notebooks that are in the trash
+    # Filter out documents that are in the trash
     candidates = [
         item
         for item in collection
@@ -659,15 +930,27 @@ def main():
     ]
 
     notebooks = []
-    skipped_count = 0
+    skipped_pdfs = 0
+    skipped_epubs = 0
     for item in candidates:
-        if is_native_notebook(item):
+        dtype = get_document_type(item, client)
+        if dtype == "notebook":
             notebooks.append(item)
-        else:
-            skipped_count += 1
+        elif dtype == "pdf":
+            if sync_pdfs or is_targeted:
+                notebooks.append(item)
+            else:
+                skipped_pdfs += 1
+        elif dtype == "epub":
+            if sync_epubs or is_targeted:
+                notebooks.append(item)
+            else:
+                skipped_epubs += 1
 
-    if skipped_count > 0:
-        log(f"Skipped {skipped_count} non-native documents (PDFs/EPUBs).")
+    if skipped_pdfs > 0:
+        log(f"Skipped {skipped_pdfs} PDF documents (enable with --sync-pdfs or in config.yml).")
+    if skipped_epubs > 0:
+        log(f"Skipped {skipped_epubs} EPUB documents (enable with --sync-epubs or in config.yml).")
 
     # --- Logic Update: Check each destination independently ---
 
@@ -702,61 +985,59 @@ def main():
                     needs_update[doc_id] = []
                 needs_update[doc_id].append(dest)
 
-    # Convert the needs_update map back into a list of notebooks to process
-    notebooks_to_process_candidates = []
-    for item in notebooks:
-        doc_id = get_val(item, "ID")
-        if doc_id in needs_update:
-            notebooks_to_process_candidates.append(item)
-
-    if not notebooks_to_process_candidates:
-        log("No new or updated notebooks found for any active destination. Exiting.")
-        sys.exit(0)
-
-    # Limit number of notebooks to process per run
-    limit = args.limit if args.limit > 0 else max_notebooks_per_run
-    if limit > 0:
-        notebooks_to_process_candidates = notebooks_to_process_candidates[:limit]
-
-    # If --notebook is specified, filter for that one
+    # If --notebook is specified, handle targeting (by name, path, or ID) with interactive disambiguation
     if args.notebook:
-        target_name = args.notebook
-        log(f"Processing notebook: {target_name}")
-        notebooks_to_process = []
-        for item in notebooks_to_process_candidates:
-            name = get_val(item, "VissibleName") or get_val(item, "VisibleName")
-            if name == target_name:
-                notebooks_to_process.append(item)
+        target_name = args.notebook.strip()
+        log(f"Filtering for notebook: {target_name}")
 
-        # Optimization: If the user forced --notebook, but we think it's up to date,
-        # we should probably force it anyway (Assume user knows best).
-        # But for now, let's respect the state logic unless we want a --force flag.
-        if not notebooks_to_process:
-            # Check if it exists at all
-            exists = False
-            for item in notebooks:
-                n = get_val(item, "VissibleName") or get_val(item, "VisibleName")
-                if n == target_name:
-                    exists = True
-                    # It exists but is considered processed. Let's force it for the 'single notebook' use case.
-                    log(
-                        f"Notebook {target_name} is marked as up-to-date, but forcing due to --notebook flag."
-                    )
-                    notebooks_to_process.append(item)
-                    # Force all destinations for this single forced run
-                    doc_id = get_val(item, "ID")
-                    needs_update[doc_id] = ACTIVE_DESTINATIONS
-                    break
+        matched_items = [
+            item for item in notebooks if matches_notebook_target(item, target_name, id_map)
+        ]
 
-            if not exists:
-                log(f"Notebook {target_name} not found in library. Exiting.")
-                sys.exit(1)
+        if not matched_items:
+            log(f"Notebook '{target_name}' not found in library. Exiting.")
+            sys.exit(1)
+
+        # Disambiguate if multiple matches found
+        selected_items = select_notebook_interactive(
+            matches=matched_items,
+            query=target_name,
+            id_map=id_map,
+        )
+
+        if not selected_items:
+            log("Sync cancelled by user. Exiting.")
+            sys.exit(0)
+
+        notebooks_to_process = selected_items
+        # Force update for all selected notebooks
+        for it in selected_items:
+            doc_id = get_val(it, "ID")
+            needs_update[doc_id] = ACTIVE_DESTINATIONS
+
     else:
+        # Standard sync: process notebooks that need updating across active destinations
+        notebooks_to_process_candidates = []
+        for item in notebooks:
+            doc_id = get_val(item, "ID")
+            if doc_id in needs_update:
+                notebooks_to_process_candidates.append(item)
+
+        if not notebooks_to_process_candidates:
+            log("No new or updated notebooks found for any active destination. Exiting.")
+            sys.exit(0)
+
+        # Limit number of notebooks to process per run
+        limit = args.limit if args.limit > 0 else max_notebooks_per_run
+        if limit > 0:
+            notebooks_to_process_candidates = notebooks_to_process_candidates[:limit]
+
         notebooks_to_process = notebooks_to_process_candidates
 
     for nb_item in notebooks_to_process:
         notebook = get_val(nb_item, "VissibleName") or get_val(nb_item, "VisibleName")
         notebook_id = get_val(nb_item, "ID")
+        doc_type = get_document_type(nb_item, client)
 
         # Get the value to store after processing (Hash or Version)
         item_hash = get_val(nb_item, "hash")
@@ -777,9 +1058,12 @@ def main():
         else:
             display_title = notebook
 
-        log(f"Processing notebook: {display_title} (ID: {notebook_id})")
-        # Step 1: Pull and render notebook pages if not present
-        # Use + '.' to ensure strict prefix matching (e.g. "Notebook_1." won't match "Notebook_10.")
+        type_badge = f" ({doc_type.upper()})" if doc_type != "notebook" else ""
+        log(f"Processing {doc_type}: {display_title}{type_badge} (ID: {notebook_id})")
+
+        notebook_tags: List[str] = []
+
+        # Step 1: Pull and render pages / extract document
         prefix_pattern = safe_notebook + "."
         imgs = sorted(
             [
@@ -788,46 +1072,119 @@ def main():
                 if p.name.startswith(prefix_pattern) and p.suffix.lower() == ".png"
             ]
         )
+        doc_file_path = None
+        extracted_doc_text = ""
+
+        if doc_type in ("pdf", "epub"):
+            doc_file_path = DOCS_DIR / f"{safe_notebook}.{doc_type}"
+
         if not imgs:
             log(
-                f"No white-background PNGs found for {notebook}. Attempting to pull from reMarkable cloud..."
+                f"No white-background PNGs found for {notebook}. Attempting to pull from reMarkable..."
             )
-            # Find the document by name
-            doc = None
-            for item in collection:
-                name1 = get_val(item, "VissibleName")
-                name2 = get_val(item, "VisibleName")
-                if (name1 and name1.strip() == notebook) or (name2 and name2.strip() == notebook):
-                    doc = item
-                    break
+            doc = nb_item
             if not doc:
-                log(f'Notebook "{notebook}" not found in your reMarkable cloud library. Exiting.')
+                log(f'Document "{notebook}" not found in your reMarkable library. Skipping.')
                 continue
-            # Download the document zip (cloud: use client.download)
-            from remarkable_mcp.extract import (
+
+            from living_ink.extract import (
+                extract_raw_document_from_zip,
+                extract_tags_from_zip,
+                extract_text_from_epub,
+                extract_text_from_pdf,
                 get_document_page_count,
+                get_pdf_annotated_page_map,
+                render_composite_pdf_page,
                 render_page_from_document_zip,
+                render_pdf_page_preview,
             )
 
             tmp_zip = DATA_DIR / f"{safe_notebook}.zip"
             raw_bytes = client.download(doc)
             if not raw_bytes:
-                log(f"Failed to download notebook zip for {notebook} from cloud.")
+                log(f"Failed to download document zip for {notebook}.")
                 continue
             with open(tmp_zip, "wb") as f:
                 f.write(raw_bytes)
-            # Get page count
-            page_count = get_document_page_count(tmp_zip)
-            log(f"Rendering {page_count} pages for {notebook}...")
-            for page in range(1, page_count + 1):
-                png_bytes = render_page_from_document_zip(tmp_zip, page)
-                if png_bytes is None:
-                    log(f"Failed to render page {page} of {notebook}.")
+
+            zip_tags = extract_tags_from_zip(tmp_zip)
+            if zip_tags:
+                notebook_tags.extend(zip_tags)
+
+            if doc_type == "pdf":
+                # 1. Extract raw PDF
+                extract_raw_document_from_zip(tmp_zip, doc_file_path)
+                if not doc_file_path.exists() and hasattr(client, "download_raw_file"):
+                    raw_pdf_bytes = client.download_raw_file(doc, "pdf")
+                    if raw_pdf_bytes:
+                        doc_file_path.write_bytes(raw_pdf_bytes)
+
+                # 2. Check for annotated pages
+                annotated_pages = get_pdf_annotated_page_map(tmp_zip)
+                if annotated_pages and doc_file_path.exists():
+                    log(f"Rendering {len(annotated_pages)} annotated pages for PDF '{notebook}'...")
+                    with zipfile.ZipFile(tmp_zip, "r") as zf:
+                        for p_info in annotated_pages:
+                            rm_name = p_info["rm_file_name"]
+                            rm_data = zf.read(rm_name) if rm_name in zf.namelist() else b""
+                            page_num = p_info["page_num"]
+                            comp_bytes = render_composite_pdf_page(
+                                doc_file_path, p_info["pdf_page_index"], rm_data
+                            )
+                            if comp_bytes:
+                                out_img = WHITE_DIR / f"{safe_notebook}.page-{page_num}.png"
+                                out_img.write_bytes(comp_bytes)
+                                log(f"Saved annotated page: {out_img}")
+                elif doc_file_path.exists():
+                    log(
+                        f"PDF '{notebook}' has no handwritten annotations. Extracting text & cover preview..."
+                    )
+                    cover_bytes = render_pdf_page_preview(doc_file_path, 0)
+                    if cover_bytes:
+                        out_img = WHITE_DIR / f"{safe_notebook}.page-1.png"
+                        out_img.write_bytes(cover_bytes)
+                        log(f"Saved cover preview: {out_img}")
+                    extracted_doc_text = extract_text_from_pdf(doc_file_path)
+
+            elif doc_type == "epub":
+                # 1. Extract raw EPUB
+                extract_raw_document_from_zip(tmp_zip, doc_file_path)
+                if not doc_file_path.exists() and hasattr(client, "download_raw_file"):
+                    raw_epub_bytes = client.download_raw_file(doc, "epub")
+                    if raw_epub_bytes:
+                        doc_file_path.write_bytes(raw_epub_bytes)
+
+                if doc_file_path.exists():
+                    extracted_doc_text = extract_text_from_epub(doc_file_path)
+
+                # If there are any .rm files, render them as page images
+                page_count = get_document_page_count(tmp_zip)
+                if page_count > 0:
+                    log(f"Rendering {page_count} annotation pages for EPUB '{notebook}'...")
+                    for page in range(1, page_count + 1):
+                        png_bytes = render_page_from_document_zip(tmp_zip, page)
+                        if png_bytes:
+                            out_img = WHITE_DIR / f"{safe_notebook}.page-{page}.png"
+                            out_img.write_bytes(png_bytes)
+                            log(f"Saved: {out_img}")
+
+            else:  # Standard notebook
+                page_count = get_document_page_count(tmp_zip)
+                if page_count == 0:
+                    log(f"Notebook '{notebook}' has 0 pages (empty notebook). Skipping.")
+                    tmp_zip.unlink(missing_ok=True)
                     continue
-                # Save as PNG with white background
-                with open(WHITE_DIR / f"{safe_notebook}.page-{page}.png", "wb") as out_f:
-                    out_f.write(png_bytes)
-                log(f"Saved: {WHITE_DIR / f'{safe_notebook}.page-{page}.png'}")
+
+                log(f"Rendering {page_count} pages for {notebook}...")
+                for page in range(1, page_count + 1):
+                    png_bytes = render_page_from_document_zip(tmp_zip, page)
+                    if png_bytes is None:
+                        log(f"Failed to render page {page} of {notebook}.")
+                        continue
+                    out_img = WHITE_DIR / f"{safe_notebook}.page-{page}.png"
+                    out_img.write_bytes(png_bytes)
+                    log(f"Saved: {out_img}")
+
             # Remove temp zip
             tmp_zip.unlink(missing_ok=True)
             # Re-scan for white PNGs
@@ -838,10 +1195,20 @@ def main():
                     if p.name.startswith(prefix_pattern) and p.suffix.lower() == ".png"
                 ]
             )
-            if not imgs:
-                log(f"Failed to generate white-background PNGs for {notebook} from cloud. Exiting.")
+            if not imgs and not extracted_doc_text:
+                log(f"No pages or text could be extracted for '{notebook}'. Skipping.")
                 continue
         log(f"Found {len(imgs)} white-background PNGs for {notebook}: {[p.name for p in imgs]}")
+
+        if not notebook_tags:
+            from living_ink.api import get_document_tags
+
+            fallback_tags = get_document_tags(client, nb_item)
+            if fallback_tags:
+                notebook_tags.extend(fallback_tags)
+
+        if notebook_tags:
+            log(f"Tags found for '{notebook}': {notebook_tags}")
 
         # Preprocess images
         pre_dir = VISION_DIR / safe_notebook
@@ -861,48 +1228,90 @@ def main():
 
         raw_texts = []
         cleaned_texts = []
-        for p in pre_paths:
-            if use_vision_ocr:
-                # Single-step: AI reads the image and returns clean text
-                log(f"  AI Vision OCR: {p.name}...")
-                cleaned_text = ocr_and_repair(str(p))
-                if cleaned_text:
-                    raw_texts.append(cleaned_text)  # No separate raw text in vision mode
+        if pre_paths:
+            for p in pre_paths:
+                if use_vision_ocr:
+                    # Single-step: AI reads the image and returns clean text
+                    log(f"  AI Vision OCR: {p.name}...")
+                    cleaned_text = ocr_and_repair(str(p))
+                    if cleaned_text:
+                        raw_texts.append(cleaned_text)  # No separate raw text in vision mode
+                        cleaned_texts.append(cleaned_text)
+                        continue
+                    # Vision returned None/empty — fall through to Google Vision if configured
+                    log(f"  AI Vision returned empty for {p.name}")
+                    if google_vision_available():
+                        log("  Falling back to Google Cloud Vision...")
+                    else:
+                        log(
+                            f"  Google Cloud Vision not configured; skipping OCR fallback for {p.name}."
+                        )
+                        raw_texts.append("")
+                        cleaned_texts.append("")
+                        continue
+
+                # Two-step: Google Cloud Vision OCR → AI text cleanup
+                if google_vision_available():
+                    log(f"  Google Vision OCR: {p.name}...")
+                    txt = vision_ocr_image_service_account(p)
+                    if txt is None:
+                        log(f"  Vision failed for {p}")
+
+                    raw_text = txt or ""
+                    raw_texts.append(raw_text)
+
+                    log(f"  Cleaning text with AI for {p.name}...")
+                    cleaned_text = repair_text_with_openai(raw_text)
                     cleaned_texts.append(cleaned_text)
-                    continue
-                # Vision returned None/empty — fall through to Google Vision
-                log(f"  AI Vision returned empty for {p.name}, trying Google Vision...")
+                else:
+                    log(f"  Google Cloud Vision not configured for {p.name}.")
+                    raw_texts.append("")
+                    cleaned_texts.append("")
 
-            # Two-step: Google Cloud Vision OCR → AI text cleanup
-            log(f"  Google Vision OCR: {p.name}...")
-            txt = vision_ocr_image_service_account(p)
-            if txt is None:
-                log(f"  Vision failed for {p}")
+        if not any(t.strip() for t in cleaned_texts) and extracted_doc_text:
+            raw_texts = [extracted_doc_text]
+            cleaned_texts = [extracted_doc_text]
 
-            raw_text = txt or ""
-            raw_texts.append(raw_text)
+        from living_ink.extract import format_page_section_header
 
-            log(f"  Cleaning text with AI for {p.name}...")
-            cleaned_text = repair_text_with_openai(raw_text)
-            cleaned_texts.append(cleaned_text)
+        def _get_page_pnum(idx: int) -> int:
+            if idx < len(imgs):
+                page_m = re.search(r"page-(\d+)", imgs[idx].name, re.IGNORECASE)
+                if page_m:
+                    return int(page_m.group(1))
+            return idx + 1
 
         # Save RAW text
         raw_out_txt = OCR_DIR / f"{safe_notebook}_raw.txt"
         meta = {"notebook": notebook, "images": [p.name for p in imgs]}
         with open(raw_out_txt, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta) + "\n\n")
-            for i, t in enumerate(raw_texts, 1):
-                f.write(f"--- Page {i} ---\n")
-                f.write((t or "").strip() + "\n\n")
+            if raw_texts == [extracted_doc_text] and extracted_doc_text:
+                f.write(extracted_doc_text + "\n")
+            else:
+                for i, t in enumerate(raw_texts):
+                    header = format_page_section_header(
+                        _get_page_pnum(i), doc_file_path, include_divider=True
+                    )
+                    f.write(f"{header}\n\n{(t or '').strip()}\n\n")
         log(f"Raw OCR text saved to {raw_out_txt}")
 
-        # Save CLEANED text (this is what goes to Apple Notes)
+        # Save CLEANED text (this is what goes to Apple Notes / Obsidian)
         clean_out_txt = OCR_DIR / f"{safe_notebook}_clean.txt"
         with open(clean_out_txt, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta) + "\n\n")
-            for i, t in enumerate(cleaned_texts, 1):
-                f.write(f"--- Page {i} ---\n")
-                f.write((t or "").strip() + "\n\n")
+            if cleaned_texts == [extracted_doc_text] and extracted_doc_text:
+                f.write(extracted_doc_text + "\n")
+            else:
+                for i, t in enumerate(cleaned_texts):
+                    header = format_page_section_header(
+                        _get_page_pnum(i), doc_file_path, include_divider=True
+                    )
+                    body = (t or "").strip()
+                    if body:
+                        f.write(f"{header}\n\n{body}\n\n")
+                    else:
+                        f.write(f"{header}\n\n")
         log(f"Cleaned OCR text saved to {clean_out_txt}")
 
         # Build PDF from the white PNGs - DISABLED for performance
@@ -916,17 +1325,14 @@ def main():
             # Prepare text content (extract from saved file)
             full_text = clean_out_txt.read_text(errors="ignore") if clean_out_txt.exists() else ""
 
-            # Skip the first JSON line/metadata and find first page marker
+            # Skip the first JSON line/metadata and find first page marker or divider
             lines = full_text.split("\n")
             text_start = 0
             for i, line in enumerate(lines):
-                if line.startswith("---"):
+                if line.startswith("---") or line.startswith("###"):
                     text_start = i
                     break
-            clean_text = "\n".join(lines[text_start:])
-
-            # Format text
-            clean_text = clean_text.replace("--- Page", "\n\n--- Page").lstrip()
+            clean_text = "\n".join(lines[text_start:]).strip()
 
             # Determine folder paths for nesting
             # folder_path is like "Work / Project A / Sprint 1"
@@ -963,6 +1369,10 @@ def main():
                         text_content=clean_text,
                         image_paths=imgs,
                         sub_folder=target_subfolder,
+                        document_path=doc_file_path
+                        if (doc_file_path and doc_file_path.exists())
+                        else None,
+                        tags=notebook_tags,
                     )
                     if dest_success:
                         # Update state for THIS destination immediately

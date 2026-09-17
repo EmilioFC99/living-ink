@@ -1,4 +1,4 @@
-"""Tests for remarkable_mcp.providers module.
+"""Tests for living_ink.providers module.
 
 Covers the provider factory, all presets, custom endpoints,
 backward compatibility, error handling, and the HTTP call mechanics
@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from remarkable_mcp.providers import (
+from living_ink.providers import (
     PROVIDER_PRESETS,
     NoneProvider,
     TextRepairProvider,
@@ -261,7 +261,7 @@ class TestUniversalChatProviderChat:
         """
         return json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_sends_correct_payload(self, mock_urlopen):
         """Verify the HTTP request payload structure."""
         mock_resp = MagicMock()
@@ -294,7 +294,7 @@ class TestUniversalChatProviderChat:
         assert payload["messages"][1]["role"] == "user"
         assert payload["messages"][1]["content"] == "hello"
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_auth_header_bearer(self, mock_urlopen):
         """Bearer auth header is set correctly."""
         mock_resp = MagicMock()
@@ -314,7 +314,7 @@ class TestUniversalChatProviderChat:
         request = mock_urlopen.call_args[0][0]
         assert request.get_header("Authorization") == "Bearer my-secret"
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_no_auth_header_when_none(self, mock_urlopen):
         """No auth header is added when auth_header is None."""
         mock_resp = MagicMock()
@@ -333,7 +333,7 @@ class TestUniversalChatProviderChat:
         request = mock_urlopen.call_args[0][0]
         assert request.get_header("Authorization") is None
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_http_error_returns_empty(self, mock_urlopen):
         """HTTPError is caught and returns empty string."""
         mock_urlopen.side_effect = urllib.error.HTTPError(
@@ -351,7 +351,7 @@ class TestUniversalChatProviderChat:
         result = p._chat("test")
         assert result == ""
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_url_error_returns_empty(self, mock_urlopen):
         """URLError (connection failure) returns empty string."""
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
@@ -360,7 +360,7 @@ class TestUniversalChatProviderChat:
         result = p._chat("test")
         assert result == ""
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_unexpected_error_returns_empty(self, mock_urlopen):
         """Any unexpected exception returns empty string."""
         mock_urlopen.side_effect = RuntimeError("Something broke")
@@ -368,6 +368,32 @@ class TestUniversalChatProviderChat:
         p = UniversalChatProvider(base_url="https://api.test.com/v1")
         result = p._chat("test")
         assert result == ""
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_chat_handles_empty_choices(self, mock_urlopen):
+        """_chat returns empty string if choices array is empty."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": []}).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_chat_handles_missing_content(self, mock_urlopen):
+        """_chat returns empty string if message has no content key."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"role": "assistant"}}]}
+        ).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
 
 
 # =========================================================================
@@ -389,7 +415,7 @@ class TestUniversalChatProviderVision:
         p = UniversalChatProvider(base_url="https://api.test.com/v1")
         assert p.supports_vision is True
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_sends_multimodal_payload(self, mock_urlopen, tmp_path):
         """ocr_image sends correct multimodal payload with base64 data URI."""
         img_path = tmp_path / "page.png"
@@ -438,7 +464,7 @@ class TestUniversalChatProviderVision:
             ("page.unknown", "image/png"),
         ],
     )
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_mime_types(self, mock_urlopen, tmp_path, filename, expected_mime):
         """ocr_image detects correct MIME type from extension."""
         img_path = tmp_path / filename
@@ -458,7 +484,7 @@ class TestUniversalChatProviderVision:
         url = payload["messages"][1]["content"][1]["image_url"]["url"]
         assert url.startswith(f"data:{expected_mime};base64,")
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_raw_auth_header(self, mock_urlopen, tmp_path):
         """ocr_image supports auth header without prefix."""
         img_path = tmp_path / "page.png"
@@ -481,7 +507,7 @@ class TestUniversalChatProviderVision:
         request = mock_urlopen.call_args[0][0]
         assert request.get_header("X-api-key") == "raw-token"
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_http_error_returns_empty(self, mock_urlopen, tmp_path):
         """ocr_image returns empty string on HTTPError."""
         img_path = tmp_path / "page.png"
@@ -499,7 +525,7 @@ class TestUniversalChatProviderVision:
         result = p.ocr_image(str(img_path), "prompt")
         assert result == ""
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_url_error_returns_empty(self, mock_urlopen, tmp_path):
         """ocr_image returns empty string on URLError."""
         img_path = tmp_path / "page.png"
@@ -511,7 +537,7 @@ class TestUniversalChatProviderVision:
         result = p.ocr_image(str(img_path), "prompt")
         assert result == ""
 
-    @patch("remarkable_mcp.providers.urllib.request.urlopen")
+    @patch("living_ink.providers.urllib.request.urlopen")
     def test_ocr_image_unexpected_error_returns_empty(self, mock_urlopen, tmp_path):
         """ocr_image returns empty string on general Exception."""
         img_path = tmp_path / "page.png"
@@ -522,6 +548,46 @@ class TestUniversalChatProviderVision:
         p = UniversalChatProvider(base_url="https://api.test.com/v1")
         result = p.ocr_image(str(img_path), "prompt")
         assert result == ""
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_ocr_image_handles_empty_choices(self, mock_urlopen, tmp_path):
+        """ocr_image returns empty string if choices array is empty."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": []}).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p.ocr_image(str(img_path), "prompt") == ""
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_ocr_image_handles_content_filter(self, mock_urlopen, tmp_path):
+        """ocr_image returns empty string without error when blocked by content filter."""
+        img_path = tmp_path / "page.png"
+        img_path.write_bytes(b"data")
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "content_filter: RECITATION",
+                        "index": 0,
+                        "message": {"role": "assistant"},
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p.ocr_image(str(img_path), "prompt") == ""
 
 
 # =========================================================================

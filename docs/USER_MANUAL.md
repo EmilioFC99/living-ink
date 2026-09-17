@@ -45,7 +45,7 @@ Living Ink replicates your **complete nested reMarkable folder structure** insid
 - **Obsidian:** `Vault/Living Ink/Work/Projects/2026/Q1 Planning.md`
 - **Attachments:** `Vault/Living Ink/Work/Projects/2026/attachments/Q1 Planning_page-1.png`
 
-You can customize this in `config/config.yml`:
+You can customize this in `~/.config/living-ink/config.yml`:
 - `root_folder`: Place all notes in a designated subfolder (e.g., `"Living Ink"`) or directly in the vault root (`""`).
 - `mirror_folders`: Set to `true` to replicate nested folders, or `false` to store all notes flat in the root folder.
 - `attachments_folder`: Subfolder name for page images (defaults to `"attachments"`).
@@ -79,25 +79,93 @@ uv run python scripts/process_notebook.py
 ```
 
 ### Process a Specific Notebook
-To force-sync a single notebook by its reMarkable name:
+You can force-sync a single notebook by its name, folder path, or document UUID:
 ```bash
-uv run python scripts/process_notebook.py --notebook "My Notebook Name"
+# By notebook name
+living-ink sync --notebook "My Notebook Name"
+
+# By folder path (supports "/" or " / ")
+living-ink sync --notebook "Work/Sprint Notes"
+living-ink sync --notebook "Personal / Daily Journal"
+
+# By document UUID
+living-ink sync --notebook "95964d83-9140-4ed6-82b9-d71c661ad86c"
+```
+
+#### Disambiguation Selection List
+If more than one notebook matches your query (for example, if you have `"Sprint Notes"` under both `"Work"` and `"Archive"`, or duplicate notebooks in the same folder), Living Ink displays an interactive selection prompt:
+
+```text
+Found 2 notebooks matching 'Sprint Notes':
+  [1] Work / Sprint Notes (ID: 95964d83..., modified: 2026-03-15 14:30)
+  [2] Archive / Sprint Notes (ID: c25c3353..., modified: 2026-02-10 09:15)
+  [a] Process all 2 matching notebooks
+  [q] Cancel / Quit
+
+Select a notebook [1-2, a, q] (default: a):
+```
+- Enter `1` or `2` to target only that specific notebook.
+- Press `Enter` or type `a` to process all matching notebooks.
+- Type `q` to abort.
+- In non-interactive environments (CI or cron), all matches are processed without blocking.
+
+### Syncing EPUB and PDF Documents
+Living Ink can sync your **PDF and EPUB documents** along with your handwritten notes, highlights, and margin comments:
+
+- **Smart Annotation Detection**: For large documents (such as 500-page textbooks), Living Ink only renders and transcribes the pages where you actually made handwritten notes or highlights, keeping sync fast.
+- **Composite Page Rendering**: Vector pen strokes and color highlighters are composited directly onto the original PDF page background.
+- **AI Annotation & Highlight Extraction**: Vision AI transcribes your handwritten notes, margin comments, and quotes highlighted or boxed passages.
+- **Source File Archiving**: The original `.pdf` or `.epub` file is copied to your Obsidian `attachments/` directory (or attached in Apple Notes) and linked directly in the note frontmatter and note header:
+  ```markdown
+  ---
+  created: 2026-09-16
+  source: Remarkable/Fundamentals of Data Engineering
+  type: pdf
+  document: "[[Fundamentals of Data Engineering.pdf]]"
+  tags:
+    - remarkable
+    - pdf
+  ---
+
+  **Source Document:** [[Fundamentals of Data Engineering.pdf]]
+  ```
+
+#### Enabling Document Sync
+By default, automated background sync only syncs standard notebooks (`.quicksheets` and `.notebook`). You can enable PDF or EPUB syncing via CLI flags or configuration:
+
+```bash
+# Sync notebooks and PDFs
+living-ink sync --sync-pdfs
+
+# Sync notebooks and EPUBs
+living-ink sync --sync-epubs
+
+# Sync all types (notebooks, PDFs, and EPUBs)
+living-ink sync --all-types
+
+# Force-sync a specific PDF or EPUB at any time (even if sync_pdfs is false)
+living-ink sync --notebook "Fundamentals of Data Engineering"
 ```
 
 ### Command-Line Options
 ```text
 options:
   -h, --help            Show help message and exit
-  --notebook NOTEBOOK   Process only the specified notebook name
+  --notebook NOTEBOOK   Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID
   --limit LIMIT         Max notebooks to process per run (overrides config)
   --folder FOLDER       Apple Notes folder override
+  --sync-pdfs           Include PDF documents in sync
+  --sync-epubs          Include EPUB documents in sync
+  --all-types           Sync all document types (notebooks, PDFs, EPUBs)
+  --ssh                 Force sync via USB SSH instead of Cloud
+  --cloud               Force sync via reMarkable Cloud instead of SSH
 ```
 
 ---
 
 ## Configuration Reference
 
-Edit `config/config.yml` (or `config.yml` in project root):
+Configuration is stored in `~/.config/living-ink/config.yml`:
 
 ```yaml
 # 1. AI Provider & Vision OCR
@@ -117,6 +185,8 @@ google_vision:
 # 4. Sync Settings
 sync:
   max_notebooks_per_run: 5
+  sync_pdfs: false                 # Set to true to automatically sync annotated PDFs
+  sync_epubs: false                # Set to true to automatically sync annotated EPUBs
 
 # 5. Obsidian Destination
 obsidian:

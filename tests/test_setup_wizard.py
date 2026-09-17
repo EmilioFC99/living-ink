@@ -1,4 +1,4 @@
-"""Tests for remarkable_mcp.setup_wizard module.
+"""Tests for living_ink.setup_wizard module.
 
 Covers Obsidian vault auto-detection, folder listing, reMarkable pairing,
 AI provider verification, LaunchAgent creation, YAML generation,
@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
-from remarkable_mcp import setup_wizard
-from remarkable_mcp.setup_wizard import (
+from living_ink import setup_wizard
+from living_ink.setup_wizard import (
     detect_obsidian_vaults,
     generate_config_yaml,
     get_existing_remarkable_token,
@@ -36,7 +36,7 @@ class TestObsidianDetection:
 
     def test_detect_obsidian_vaults_missing_config(self):
         """Returns empty list if obsidian.json does not exist."""
-        with patch("remarkable_mcp.setup_wizard.get_obsidian_config_path", return_value=None):
+        with patch("living_ink.setup_wizard.get_obsidian_config_path", return_value=None):
             vaults = detect_obsidian_vaults()
             assert vaults == []
 
@@ -58,9 +58,7 @@ class TestObsidianDetection:
         }
         config_file.write_text(json.dumps(config_data), encoding="utf-8")
 
-        with patch(
-            "remarkable_mcp.setup_wizard.get_obsidian_config_path", return_value=config_file
-        ):
+        with patch("living_ink.setup_wizard.get_obsidian_config_path", return_value=config_file):
             vaults = detect_obsidian_vaults()
             assert len(vaults) == 2
             names = [v["name"] for v in vaults]
@@ -116,7 +114,7 @@ class TestRemarkablePairing:
         assert ok is False
         assert "empty" in msg.lower()
 
-    @patch("remarkable_mcp.sync.load_client_from_token")
+    @patch("living_ink.sync.load_client_from_token")
     def test_verify_remarkable_token_success(self, mock_load):
         """Valid token connects and reports notebook count."""
         mock_client = MagicMock()
@@ -135,7 +133,7 @@ class TestRemarkablePairing:
         assert ok is False
         assert "8 letters" in msg
 
-    @patch("remarkable_mcp.api.register_and_get_token")
+    @patch("living_ink.api.register_and_get_token")
     def test_pair_remarkable_device_success(self, mock_register):
         """Exchanges 8-letter code for device token."""
         mock_register.return_value = "new-device-token"
@@ -143,7 +141,7 @@ class TestRemarkablePairing:
         assert ok is True
         assert token == "new-device-token"
 
-    @patch("remarkable_mcp.ssh.SSHClient")
+    @patch("living_ink.ssh.SSHClient")
     def test_verify_remarkable_ssh_success(self, mock_ssh_cls):
         """Successful SSH connection verification returns True."""
         mock_client = MagicMock()
@@ -158,7 +156,7 @@ class TestRemarkablePairing:
         assert "Connected via USB SSH" in msg
         assert "1 notebooks found" in msg
 
-    @patch("remarkable_mcp.ssh.SSHClient")
+    @patch("living_ink.ssh.SSHClient")
     def test_verify_remarkable_ssh_failure(self, mock_ssh_cls):
         """Failed SSH connection returns False and helpful message."""
         mock_client = MagicMock()
@@ -184,7 +182,7 @@ class TestAiVerification:
         assert ok is True
         assert "disabled" in msg.lower()
 
-    @patch("remarkable_mcp.providers.get_provider")
+    @patch("living_ink.providers.get_provider")
     def test_verify_provider_success(self, mock_get_provider):
         """Provider returning valid response passes verification."""
         mock_p = MagicMock()
@@ -196,7 +194,7 @@ class TestAiVerification:
         assert ok is True
         assert "Verified" in msg
 
-    @patch("remarkable_mcp.providers.get_provider")
+    @patch("living_ink.providers.get_provider")
     def test_verify_provider_failure(self, mock_get_provider):
         """Provider returning empty string fails verification."""
         mock_p = MagicMock()
@@ -334,12 +332,10 @@ class TestInstallCliCommand:
 class TestRunWizard:
     """Tests for the interactive walkthrough workflow."""
 
-    @patch("remarkable_mcp.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
-    @patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch(
-        "remarkable_mcp.setup_wizard.get_existing_remarkable_token", return_value="existing-token"
-    )
-    @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
+    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="existing-token")
+    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
     def test_run_wizard_cloud_flow(
         self,
         mock_detect_vaults,
@@ -398,9 +394,9 @@ class TestRunWizard:
         assert cfg["obsidian"]["enabled"] is True
         assert cfg["obsidian"]["root_folder"] == "Living Ink"
 
-    @patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
-    @patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
+    @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
+    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
     def test_run_wizard_ssh_flow(
         self,
         mock_detect_vaults,
@@ -459,13 +455,11 @@ class TestRunWizard:
         assert cfg["obsidian"]["enabled"] is True
         assert cfg["obsidian"]["root_folder"] == "Living Ink"
 
-    @patch("remarkable_mcp.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
-    @patch(
-        "remarkable_mcp.setup_wizard.get_existing_remarkable_token", return_value="existing-token"
-    )
-    @patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
-    @patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("remarkable_mcp.setup_wizard.detect_obsidian_vaults")
+    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="existing-token")
+    @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
+    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
     def test_run_wizard_ssh_with_cloud_backup_flow(
         self,
         mock_detect_vaults,

@@ -91,6 +91,12 @@ class FallbackClient:
             return self.active.download_raw_file(doc, extension)
         return None
 
+    def get_tags(self, doc: Any) -> List[str]:
+        """Get tags from active client."""
+        if hasattr(self.active, "get_tags"):
+            return self.active.get_tags(doc)
+        return []
+
 
 def get_rmapi():
     """
@@ -126,7 +132,7 @@ def get_rmapi():
     cloud_client = None
 
     try:
-        from remarkable_mcp.ssh import create_ssh_client
+        from living_ink.ssh import create_ssh_client
 
         ssh_client = create_ssh_client()
     except Exception as e:
@@ -142,7 +148,7 @@ def get_rmapi():
 
     if token:
         try:
-            from remarkable_mcp.sync import load_client_from_token
+            from living_ink.sync import load_client_from_token
 
             # Also persist to ~/.rmapi for compatibility
             rmapi_file.write_text(token, encoding="utf-8")
@@ -217,7 +223,7 @@ def register_and_get_token(one_time_code: str) -> str:
 
     Get a code from: https://my.remarkable.com/device/desktop/connect
     """
-    from remarkable_mcp.sync import register_device
+    from living_ink.sync import register_device
 
     try:
         token_data = register_device(one_time_code)
@@ -305,3 +311,25 @@ def get_file_type(client, doc) -> str:
         return "epub"
 
     return "notebook"
+
+
+def get_document_tags(client: Any, doc: Any) -> List[str]:
+    """Get tags for a document from client or doc attributes.
+
+    Args:
+        client: The reMarkable API client.
+        doc: The document to check.
+
+    Returns:
+        List of tag strings.
+    """
+    if hasattr(client, "get_tags"):
+        try:
+            tags = client.get_tags(doc)
+            if tags:
+                return list(tags)
+        except Exception:
+            pass
+    if hasattr(doc, "tags") and doc.tags:
+        return list(doc.tags)
+    return []

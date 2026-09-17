@@ -5,10 +5,10 @@ Provides a guided, user-friendly terminal walkthrough to:
 2. Select and verify AI handwriting OCR provider (Gemini, OpenAI, Ollama, etc.).
 3. Auto-detect Obsidian vaults, choose existing or new destination folders.
 4. Optionally configure Apple Notes and automated background sync (LaunchAgent).
-5. Validate all credentials live and save config/config.yml.
+5. Validate all credentials live and save ~/.config/living-ink/config.yml.
 
 Example:
-    >>> from remarkable_mcp.setup_wizard import run_wizard
+    >>> from living_ink.setup_wizard import run_wizard
     >>> run_wizard()
 """
 
@@ -183,7 +183,7 @@ def verify_remarkable_token(token: str) -> Tuple[bool, str]:
         return False, "Token is empty or unconfigured."
 
     try:
-        from remarkable_mcp.sync import load_client_from_token
+        from living_ink.sync import load_client_from_token
 
         client = load_client_from_token(token)
         items = client.get_meta_items()
@@ -207,7 +207,7 @@ def pair_remarkable_device(one_time_code: str) -> Tuple[bool, str, str]:
         return False, "", "Pairing code must be exactly 8 letters."
 
     try:
-        from remarkable_mcp.api import register_and_get_token
+        from living_ink.api import register_and_get_token
 
         token = register_and_get_token(code)
         return True, token, "Successfully paired with reMarkable Cloud!"
@@ -231,7 +231,7 @@ def verify_remarkable_ssh(
         Tuple of (success_bool, message_str).
     """
     try:
-        from remarkable_mcp.ssh import SSHClient
+        from living_ink.ssh import SSHClient
 
         client = SSHClient(host=host, user=user, port=port)
         if client.check_connection():
@@ -301,7 +301,7 @@ def verify_ai_provider(
     if provider_clean == "none":
         return True, "AI cleanup disabled (raw OCR text will be used)."
 
-    from remarkable_mcp.providers import get_provider
+    from living_ink.providers import get_provider
 
     config = {
         "ai": {
@@ -362,7 +362,7 @@ def install_launch_agent(
     if platform.system() != "Darwin":
         return False, "LaunchAgent background sync is only supported on macOS."
 
-    from remarkable_mcp.config import get_logs_dir
+    from living_ink.config import get_logs_dir
 
     logs_dir = get_logs_dir(repo_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -542,7 +542,7 @@ def generate_config_yaml(
         max_notebooks_per_run: Maximum notebooks to process per sync run.
 
     Returns:
-        YAML string ready to be written to config/config.yml.
+        YAML string ready to be written to config.yml.
     """
     # Quote path if it contains spaces or special characters
     clean_vault = obsidian_vault_path.strip()
@@ -578,7 +578,7 @@ obsidian:
   vault_path: "{clean_vault}"
   root_folder: "{obsidian_root_folder}"
   mirror_folders: {"true" if obsidian_mirror_folders else "false"}
-  attachments_folder: "attachments"
+  attachments_folder: "_attachments"
 
 # 6. Apple Notes Destination
 apple_notes:
@@ -659,12 +659,7 @@ def run_wizard(
     Returns:
         True if configuration was successfully created, False if aborted.
     """
-    from remarkable_mcp.config import get_config_path
-
-    if repo_dir is None:
-        src_repo = Path(__file__).parent.parent.resolve()
-        if (src_repo / "pyproject.toml").exists():
-            repo_dir = src_repo
+    from living_ink.config import get_config_path
 
     config_file = get_config_path(repo_dir)
     config_dir = config_file.parent
@@ -1041,7 +1036,7 @@ def run_wizard(
             elif proc_script and proc_script.exists():
                 subprocess.run([sys.executable, str(proc_script)], check=False)
             else:
-                from remarkable_mcp.pipeline import main as pipeline_main
+                from living_ink.pipeline import main as pipeline_main
 
                 pipeline_main()
         except Exception as e:

@@ -1,4 +1,4 @@
-"""Tests for remarkable_mcp.api module.
+"""Tests for living_ink.api module.
 
 Covers get_rmapi client factory under SSH and Cloud modes with automatic fallback,
 and FallbackClient failover behavior.
@@ -6,7 +6,7 @@ and FallbackClient failover behavior.
 
 from unittest.mock import MagicMock, patch
 
-from remarkable_mcp.api import FallbackClient, get_rmapi
+from living_ink.api import FallbackClient, get_rmapi
 
 
 def test_get_rmapi_ssh_preferred_connected(monkeypatch, tmp_path):
@@ -16,7 +16,7 @@ def test_get_rmapi_ssh_preferred_connected(monkeypatch, tmp_path):
     monkeypatch.delenv("REMARKABLE_TOKEN", raising=False)
 
     with patch("pathlib.Path.home", return_value=tmp_path):
-        with patch("remarkable_mcp.ssh.create_ssh_client") as mock_create_ssh:
+        with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
             mock_ssh = MagicMock()
             mock_ssh.check_connection.return_value = True
             mock_create_ssh.return_value = mock_ssh
@@ -31,8 +31,8 @@ def test_get_rmapi_ssh_preferred_with_cloud_backup(monkeypatch):
     monkeypatch.setenv("REMARKABLE_USE_SSH", "true")
     monkeypatch.setenv("REMARKABLE_TOKEN", "cloud-token")
 
-    with patch("remarkable_mcp.ssh.create_ssh_client") as mock_create_ssh:
-        with patch("remarkable_mcp.sync.load_client_from_token") as mock_load_cloud:
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        with patch("living_ink.sync.load_client_from_token") as mock_load_cloud:
             mock_ssh = MagicMock()
             mock_ssh.check_connection.return_value = True
             mock_create_ssh.return_value = mock_ssh
@@ -52,8 +52,8 @@ def test_get_rmapi_ssh_unplugged_falls_back_to_cloud(monkeypatch):
     monkeypatch.setenv("REMARKABLE_USE_SSH", "true")
     monkeypatch.setenv("REMARKABLE_TOKEN", "cloud-token")
 
-    with patch("remarkable_mcp.ssh.create_ssh_client") as mock_create_ssh:
-        with patch("remarkable_mcp.sync.load_client_from_token") as mock_load_cloud:
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        with patch("living_ink.sync.load_client_from_token") as mock_load_cloud:
             mock_ssh = MagicMock()
             mock_ssh.check_connection.return_value = False
             mock_create_ssh.return_value = mock_ssh
@@ -71,8 +71,8 @@ def test_get_rmapi_cloud_preferred_with_ssh_backup(monkeypatch):
     monkeypatch.setenv("REMARKABLE_PREFERRED_CONNECTION", "cloud")
     monkeypatch.setenv("REMARKABLE_TOKEN", "cloud-token")
 
-    with patch("remarkable_mcp.ssh.create_ssh_client") as mock_create_ssh:
-        with patch("remarkable_mcp.sync.load_client_from_token") as mock_load_cloud:
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        with patch("living_ink.sync.load_client_from_token") as mock_load_cloud:
             mock_ssh = MagicMock()
             mock_create_ssh.return_value = mock_ssh
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Process notebooks: CLI entry point forwarding to remarkable_mcp.pipeline."""
+"""Process notebooks: CLI entry point forwarding to living_ink.pipeline."""
 
 import sys
 from pathlib import Path
 
-import remarkable_mcp.pipeline as _pipeline
-from remarkable_mcp.pipeline import *  # noqa: F401, F403
-from remarkable_mcp.pipeline import main
+import living_ink.pipeline as _pipeline
+from living_ink.pipeline import *  # noqa: F401, F403
+from living_ink.pipeline import main
 
 
 def get_state_file_path(dest_name: str) -> Path:

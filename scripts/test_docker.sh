@@ -47,9 +47,12 @@ TMP_DATA=$(mktemp -d /tmp/living-ink-data.XXXXXX)
 
 trap 'rm -rf "$TMP_VAULT" "$TMP_CONFIG" "$TMP_DATA"' EXIT
 
-if [ -f "config/config.yml" ]; then
-    echo -e "\n${CYAN}4. Testing live sync with host config against temporary vault...${RESET}"
-    sed 's|vault_path: .*|vault_path: /vault|' config/config.yml > "$TMP_CONFIG/config.yml"
+HOST_CONFIG="$HOME/.config/living-ink/config.yml"
+[ -f "config/config.yml" ] && HOST_CONFIG="config/config.yml"
+
+if [ -f "$HOST_CONFIG" ]; then
+    echo -e "\n${CYAN}4. Testing live sync with host config ($HOST_CONFIG) against temporary vault...${RESET}"
+    sed 's|vault_path: .*|vault_path: /vault|' "$HOST_CONFIG" > "$TMP_CONFIG/config.yml"
 
     docker run --rm \
         -v "$TMP_CONFIG":/app/config:ro \
@@ -65,7 +68,7 @@ if [ -f "config/config.yml" ]; then
         exit 1
     fi
 else
-    echo -e "\n${CYAN}4. Skipping live sync test (config/config.yml not found on host).${RESET}"
+    echo -e "\n${CYAN}4. Skipping live sync test (no config found at $HOST_CONFIG).${RESET}"
 fi
 
 echo -e "\n${BOLD}${GREEN}============================================================${RESET}"

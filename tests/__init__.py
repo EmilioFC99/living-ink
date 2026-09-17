@@ -1,1 +1,1 @@
-"""Tests for the Living Ink (remarkable_mcp) package."""
+"""Tests for the Living Ink (living_ink) package."""

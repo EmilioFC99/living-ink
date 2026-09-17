@@ -1,11 +1,11 @@
-"""Tests for remarkable_mcp.cli module.
+"""Tests for living_ink.cli module.
 
 Covers the CLI argument parsing and subcommands (status, setup, sync).
 """
 
 from unittest.mock import MagicMock, patch
 
-from remarkable_mcp.cli import cmd_status, get_config_path, get_root, main
+from living_ink.cli import cmd_status, get_config_path, get_root, main
 
 
 def test_get_root(tmp_path):
@@ -31,7 +31,7 @@ def test_get_config_path(tmp_path, monkeypatch):
     assert p == custom_dir / "config.yml"
 
 
-@patch("remarkable_mcp.cli.cmd_status")
+@patch("living_ink.cli.cmd_status")
 def test_main_status_command(mock_status):
     """'living-ink status' invokes cmd_status."""
     with patch("sys.argv", ["living-ink", "status"]):
@@ -39,7 +39,7 @@ def test_main_status_command(mock_status):
         mock_status.assert_called_once()
 
 
-@patch("remarkable_mcp.cli.cmd_setup")
+@patch("living_ink.cli.cmd_setup")
 def test_main_setup_command(mock_setup):
     """'living-ink setup' invokes cmd_setup."""
     with patch("sys.argv", ["living-ink", "setup"]):
@@ -47,7 +47,7 @@ def test_main_setup_command(mock_setup):
         mock_setup.assert_called_once()
 
 
-@patch("remarkable_mcp.cli.cmd_sync")
+@patch("living_ink.cli.cmd_sync")
 def test_main_sync_command(mock_sync):
     """'living-ink sync' invokes cmd_sync."""
     with patch("sys.argv", ["living-ink", "sync", "--notebook", "TestBook"]):
@@ -65,7 +65,7 @@ def test_cmd_status_no_config(tmp_path, capsys):
     assert "Not found" in captured.out
 
 
-@patch("remarkable_mcp.cli.cmd_sync")
+@patch("living_ink.cli.cmd_sync")
 def test_main_sync_command_with_ssh(mock_sync):
     """'living-ink sync --ssh' passes ssh flag to cmd_sync."""
     with patch("sys.argv", ["living-ink", "sync", "--ssh"]):
@@ -79,7 +79,7 @@ def test_cmd_sync_sets_ssh_env(tmp_path, monkeypatch):
     """cmd_sync sets REMARKABLE_USE_SSH when --ssh is passed."""
     import os
 
-    from remarkable_mcp.cli import cmd_sync
+    from living_ink.cli import cmd_sync
 
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
     args = MagicMock(ssh=True, notebook=None, limit=0, folder=None)
@@ -88,8 +88,8 @@ def test_cmd_sync_sets_ssh_env(tmp_path, monkeypatch):
         assert os.environ.get("REMARKABLE_USE_SSH") == "true"
 
 
-@patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
-@patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+@patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
+@patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
 def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
     """cmd_status verifies SSH when remarkable.use_ssh is true."""
     cfg_dir = tmp_path / "config"
@@ -105,7 +105,7 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
     mock_verify_ssh.assert_called_once()
 
 
-@patch("remarkable_mcp.cli.cmd_sync")
+@patch("living_ink.cli.cmd_sync")
 def test_main_sync_command_with_cloud(mock_sync):
     """'living-ink sync --cloud' passes cloud flag to cmd_sync."""
     with patch("sys.argv", ["living-ink", "sync", "--cloud"]):
@@ -119,7 +119,7 @@ def test_cmd_sync_sets_cloud_env(tmp_path, monkeypatch):
     """cmd_sync sets REMARKABLE_PREFERRED_CONNECTION=cloud when --cloud is passed."""
     import os
 
-    from remarkable_mcp.cli import cmd_sync
+    from living_ink.cli import cmd_sync
 
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
     args = MagicMock(ssh=False, cloud=True, notebook=None, limit=0, folder=None)
@@ -128,9 +128,9 @@ def test_cmd_sync_sets_cloud_env(tmp_path, monkeypatch):
         assert os.environ.get("REMARKABLE_PREFERRED_CONNECTION") == "cloud"
 
 
-@patch("remarkable_mcp.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
-@patch("remarkable_mcp.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
-@patch("remarkable_mcp.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+@patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
+@patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
+@patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
 def test_cmd_status_ssh_unplugged_cloud_backup(
     mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, capsys
 ):
@@ -145,3 +145,14 @@ def test_cmd_status_ssh_unplugged_cloud_backup(
     captured = capsys.readouterr()
     assert "Connected" in captured.out
     assert "Cloud backup active" in captured.out
+
+
+def test_main_version_flag(capsys):
+    """'living-ink --version' outputs version."""
+    with patch("sys.argv", ["living-ink", "--version"]):
+        try:
+            main()
+        except SystemExit:
+            pass
+    captured = capsys.readouterr()
+    assert "living-ink 0.2.0" in captured.out

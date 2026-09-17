@@ -16,7 +16,7 @@ The application uses an AI model to clean up OCR misinterpretations, correct typ
    * Click **Create API key** (or **Get API key**).
    * Copy the generated key (starts with `AIzaSy...`).
 2. **Configure**:
-   * In `config/config.yml`:
+   * In `~/.config/living-ink/config.yml`:
      ```yaml
      ai:
        provider: "gemini"
@@ -31,7 +31,7 @@ The application uses an AI model to clean up OCR misinterpretations, correct typ
    * Navigate to **Dashboard** -> **API keys**.
    * Click **+ Create new secret key** and copy it immediately.
 2. **Configure**:
-   * In `config/config.yml`:
+   * In `~/.config/living-ink/config.yml`:
      ```yaml
      ai:
        provider: "openai"
@@ -71,7 +71,7 @@ If you configure an AI provider with vision capabilities (**Google Gemini** or *
 - Performs handwriting transcription and text cleanup in a single step.
 - No Google Cloud Console, no billing accounts, no service account JSON files.
 
-Simply leave `google_vision.credentials_path` empty in `config/config.yml`.
+Simply leave `google_vision.credentials_path` empty in `~/.config/living-ink/config.yml`.
 
 ### Option B: Google Cloud Vision API (Optional Fallback)
 If you prefer traditional Google Cloud Vision OCR, or use an AI provider without vision (or `provider: "none"`):
@@ -88,7 +88,7 @@ If you prefer traditional Google Cloud Vision OCR, or use an AI provider without
 4. **Download Key**:
    * Under the service account's **Keys** tab, click **Add Key** -> **Create new key** (JSON).
 5. **Configuration**:
-   * In `config/config.yml`:
+   * In `~/.config/living-ink/config.yml`:
      ```yaml
      google_vision:
        credentials_path: "/Users/yourname/path/to/my-credentials.json"
@@ -124,7 +124,7 @@ Living Ink uses standard, secure **passwordless SSH key authentication** (`ssh -
    * Once copied, your computer is permanently authorized!
 4. **Configure** (choose one):
    * **Setup Wizard** (easiest): Run `living-ink setup` and select option `[1] USB SSH`.
-   * **Manual**: In `config/config.yml`:
+   * **Manual**: In `~/.config/living-ink/config.yml`:
      ```yaml
      remarkable:
        preferred_connection: "ssh"  # USB first, Cloud backup
@@ -143,7 +143,7 @@ Living Ink uses standard, secure **passwordless SSH key authentication** (`ssh -
    * Run `living-ink setup` and select option `[2] reMarkable Cloud`. The wizard will also offer to configure USB SSH as a backup.
    * Paste your 8-letter code when prompted.
 3. **Configure Manually** (alternative):
-   * In `config/config.yml`:
+   * In `~/.config/living-ink/config.yml`:
      ```yaml
      remarkable:
        preferred_connection: "cloud"  # Cloud first, USB SSH backup

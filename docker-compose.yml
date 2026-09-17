@@ -7,9 +7,9 @@ services:
     container_name: living-ink
     volumes:
       # Persistent configuration (stores config.yml)
-      - ./config:/app/config
+      - ${LIVING_INK_CONFIG_DIR:-~/.config/living-ink}:/app/config:ro
       # Persistent cache & sync state (stores processed_notebooks_*.json)
-      - ./data:/app/data
+      - ${LIVING_INK_DATA_DIR:-~/.local/share/living-ink}:/app/data
       # Obsidian vault destination on host
       - ${OBSIDIAN_VAULT_PATH:-./vault}:/vault
     environment:
@@ -31,8 +31,8 @@ services:
     profiles:
       - daemon
     volumes:
-      - ./config:/app/config
-      - ./data:/app/data
+      - ${LIVING_INK_CONFIG_DIR:-~/.config/living-ink}:/app/config:ro
+      - ${LIVING_INK_DATA_DIR:-~/.local/share/living-ink}:/app/data
       - ${OBSIDIAN_VAULT_PATH:-./vault}:/vault
     environment:
       - PYTHONUNBUFFERED=1

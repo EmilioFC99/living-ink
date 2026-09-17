@@ -68,39 +68,7 @@ If you are developing or prefer a local clone:
     uv run living-ink setup
     ```
 
-    *(Or manually copy `config/config.yml.example` to `config/config.yml` and edit it).*
-    ```yaml
-    # 1. AI Provider (e.g. Google Gemini, OpenAI, Ollama, etc.)
-    ai:
-      provider: "gemini"               # "gemini", "openai", "ollama", "groq", "none", etc.
-      api_key: "AIzaSy..."             # From https://aistudio.google.com/apikey
-      # model: "gemini-2.0-flash"      # Optional: sensible default picked per provider
-
-    # 2. reMarkable Connection
-    remarkable:
-      preferred_connection: "ssh"      # "ssh" (USB, free) or "cloud" (subscription)
-      use_ssh: true
-      ssh_host: "10.11.99.1"
-      # device_token: "YOUR-DEVICE-TOKEN-HERE"
-
-    # 3. Google Cloud Vision (Optional fallback — not needed if using Gemini or OpenAI)
-    # google_vision:
-    #   credentials_path: "/path/to/credentials.json"
-
-    # 4. Destination: Apple Notes
-    apple_notes:
-      enabled: true
-      folder_name: "Living Ink"
-
-    # 5. Destination: Obsidian
-    obsidian:
-      enabled: true
-      vault_path: "/Users/yourname/Documents/Obsidian Vault"
-      root_folder: "Living Ink"        # Optional: prefix folder (leave empty for vault root)
-      mirror_folders: true             # Replicate reMarkable folder tree
-      attachments_folder: "attachments"
-    ```
-    *(See `config/config.yml.example` for all options and presets)*
+    The guided wizard tests your tablet connection (USB SSH or Cloud), verifies your AI API key live, detects your Obsidian vault, and saves your configuration to `~/.config/living-ink/config.yml`.
 
 3.  **Run the Pipeline**:
     ```bash

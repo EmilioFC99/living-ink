@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(ROOT))
 
-from remarkable_mcp.setup_wizard import run_wizard  # noqa: E402
+from living_ink.setup_wizard import run_wizard  # noqa: E402
 
 if __name__ == "__main__":
     try:

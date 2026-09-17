@@ -14,29 +14,33 @@ from pathlib import Path
 from typing import Optional
 
 
-# Find project root or current working directory
 def get_root() -> Optional[Path]:
     """Find the Living Ink root directory if running from a repo checkout."""
-    pkg_dir = Path(__file__).parent.parent.resolve()
-    if (pkg_dir / "pyproject.toml").exists():
-        return pkg_dir
-    # Check current working directory
+    # Check current working directory first (e.g. testing or invoked in project root)
     cwd = Path.cwd()
-    if (cwd / "config" / "config.yml").exists() or (cwd / "config.yml").exists():
+    if (
+        (cwd / "pyproject.toml").exists()
+        or (cwd / "config" / "config.yml").exists()
+        or (cwd / "config.yml").exists()
+    ):
         return cwd
+    # Check parent hierarchy of this file
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
     return None
 
 
 def get_config_path(root: Optional[Path] = None) -> Path:
     """Find the config.yml file, checking LIVING_INK_CONFIG_DIR first."""
-    from remarkable_mcp.config import get_config_path as _get_config_path
+    from living_ink.config import get_config_path as _get_config_path
 
     return _get_config_path(root)
 
 
 def cmd_setup(args, root: Optional[Path] = None):
     """Run the interactive setup wizard."""
-    from remarkable_mcp.setup_wizard import run_wizard
+    from living_ink.setup_wizard import run_wizard
 
     run_wizard(repo_dir=root)
 
@@ -62,7 +66,7 @@ def cmd_sync(args, root: Optional[Path] = None):
     try:
         from scripts.process_notebook import main as sync_main
     except ImportError:
-        from remarkable_mcp.pipeline import main as sync_main
+        from living_ink.pipeline import main as sync_main
 
     # Forward any options to process_notebook
     sys.argv = [sys.argv[0]]
@@ -76,13 +80,19 @@ def cmd_sync(args, root: Optional[Path] = None):
         sys.argv.extend(["--ssh"])
     if hasattr(args, "cloud") and args.cloud:
         sys.argv.extend(["--cloud"])
+    if hasattr(args, "sync_pdfs") and args.sync_pdfs:
+        sys.argv.extend(["--sync-pdfs"])
+    if hasattr(args, "sync_epubs") and args.sync_epubs:
+        sys.argv.extend(["--sync-epubs"])
+    if hasattr(args, "all_types") and args.all_types:
+        sys.argv.extend(["--all-types"])
 
     sync_main()
 
 
 def cmd_status(args, root: Optional[Path] = None):
     """Display system and connection status."""
-    from remarkable_mcp.setup_wizard import (
+    from living_ink.setup_wizard import (
         LAUNCH_AGENT_PLIST,
         bold,
         cyan,
@@ -128,7 +138,7 @@ def cmd_status(args, root: Optional[Path] = None):
     if not preferred:
         preferred = "ssh" if has_ssh else "cloud"
 
-    from remarkable_mcp.setup_wizard import verify_remarkable_ssh
+    from living_ink.setup_wizard import verify_remarkable_ssh
 
     ssh_ok, ssh_msg = False, ""
     if has_ssh or preferred == "ssh":
@@ -227,17 +237,26 @@ def cmd_status(args, root: Optional[Path] = None):
 
 def main():
     """Main CLI entry point."""
-    root = get_root()
+    from living_ink import __version__
 
     parser = argparse.ArgumentParser(
         prog="living-ink",
         description="Sync handwritten reMarkable notebooks to Obsidian and Apple Notes.",
     )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # sync command
     sync_parser = subparsers.add_parser("sync", help="Run the sync pipeline")
-    sync_parser.add_argument("--notebook", help="Sync a specific notebook by name")
+    sync_parser.add_argument(
+        "--notebook",
+        help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
+    )
     sync_parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
     sync_parser.add_argument("--folder", help="Apple Notes folder override")
     sync_parser.add_argument(
@@ -246,6 +265,17 @@ def main():
     sync_parser.add_argument(
         "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
     )
+    sync_parser.add_argument(
+        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
+    )
+    sync_parser.add_argument(
+        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
+    )
+    sync_parser.add_argument(
+        "--all-types",
+        action="store_true",
+        help="Sync all document types (notebooks, PDFs, and EPUBs)",
+    )
 
     # setup command
     subparsers.add_parser("setup", help="Launch the interactive setup wizard")
@@ -253,22 +283,31 @@ def main():
     # status command
     subparsers.add_parser("status", help="Show system, tablet, and vault status")
 
+    parser.add_argument(
+        "-c",
+        "--config",
+        help="Path to custom config.yml file",
+    )
+
     args = parser.parse_args()
+
+    if args.config:
+        os.environ["LIVING_INK_CONFIG"] = str(Path(args.config).resolve())
 
     if args.command is None:
         # Default behavior: if config exists, sync; otherwise setup
-        config_file = get_config_path(root)
+        config_file = get_config_path()
 
         if config_file.exists():
-            cmd_sync(args, root)
+            cmd_sync(args)
         else:
-            cmd_setup(args, root)
+            cmd_setup(args)
     elif args.command == "sync":
-        cmd_sync(args, root)
+        cmd_sync(args)
     elif args.command == "setup":
-        cmd_setup(args, root)
+        cmd_setup(args)
     elif args.command == "status":
-        cmd_status(args, root)
+        cmd_status(args)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """OCR text cleanup and vision OCR module.
 
 Delegates AI-powered text repair to the provider configured in
-``config.yml``. See ``remarkable_mcp.providers`` for available providers.
+``config.yml``. See ``living_ink.providers`` for available providers.
 
 Vision OCR:
     When the configured provider supports vision (e.g., Gemini, GPT-4o),
@@ -16,7 +16,7 @@ Backward compatibility:
       is absent.
 
 Example:
-    >>> from remarkable_mcp.clean import configure, repair_text_with_openai, ocr_and_repair
+    >>> from living_ink.clean import configure, repair_text_with_openai, ocr_and_repair
     >>> configure({"ai": {"provider": "gemini", "api_key": "..."}})
     >>> cleaned = repair_text_with_openai("messy OCR text")
     >>> text = ocr_and_repair("/path/to/page.png")
@@ -24,10 +24,11 @@ Example:
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
-from remarkable_mcp.providers import NoneProvider, TextRepairProvider, get_provider
+from living_ink.providers import NoneProvider, TextRepairProvider, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,111 @@ def repair_text_with_openai(text: str) -> str:
     provider = _get_provider()
     instructions = _read_prompt_instructions()
 
-    return provider.repair_text(text, instructions)
+    cleaned = provider.repair_text(text, instructions)
+    return normalize_callout_annotations(cleaned)
+
+
+def normalize_callout_annotations(text: str) -> str:
+    """Normalize common AI annotation headers into standard Obsidian callouts.
+
+    Ensures that highlighted passages, boxed passages, and margin notes
+    consistently use Obsidian callout syntax:
+        > [!quote] Highlight
+        > [!example] Boxed Passage
+        > [!note] Margin Note
+
+    Args:
+        text: Raw or cleaned transcription text.
+
+    Returns:
+        Text with annotations normalized to Obsidian callouts.
+    """
+    if not text or not text.strip():
+        return text
+
+    s = text.strip()
+    if s.startswith("```markdown"):
+        s = s[11:].lstrip("\r\n")
+        if s.endswith("```"):
+            s = s[:-3].rstrip()
+    elif s.startswith("```"):
+        s = s[3:].lstrip("\r\n")
+        if s.endswith("```"):
+            s = s[:-3].rstrip()
+
+    has_legacy = bool(
+        re.search(
+            r"(?i)^(?:\[\s*(?:boxed|highlight|margin).*?\]:?|\*{0,2}(?:boxed|highlight|margin).*?:?\*{0,2}:?)\s*$",
+            s,
+            flags=re.MULTILINE,
+        )
+    )
+    if not has_legacy:
+        return s
+
+    s = re.sub(
+        r"(?i)^(?:\[\s*boxed(?:\s+passage|\s+text)?.*?\]:?|\*{0,2}boxed(?:\s+passage|\s+text)?.*?:?\*{0,2}:?)\s*$",
+        "__CALLOUT_BOXED__",
+        s,
+        flags=re.MULTILINE,
+    )
+    s = re.sub(
+        r"(?i)^(?:\[\s*highlight(?:ed)?(?:\s+passage|\s+text)?.*?\]:?|\*{0,2}highlight(?:ed)?(?:\s+passage|\s+text)?.*?:?\*{0,2}:?)\s*$",
+        "__CALLOUT_QUOTE__",
+        s,
+        flags=re.MULTILINE,
+    )
+    s = re.sub(
+        r"(?i)^(?:\[\s*margin(?:\s+annotation|\s+note)?.*?\]:?|\*{0,2}margin(?:\s+annotations?|\s+notes?).*?:?\*{0,2}:?)\s*$",
+        "__CALLOUT_NOTE__",
+        s,
+        flags=re.MULTILINE,
+    )
+
+    lines = s.split("\n")
+    out_lines = []
+    in_callout = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "__CALLOUT_BOXED__":
+            if in_callout:
+                out_lines.append("")
+            out_lines.append("> [!example] Boxed Passage")
+            in_callout = True
+        elif stripped == "__CALLOUT_QUOTE__":
+            if in_callout:
+                out_lines.append("")
+            out_lines.append("> [!quote] Highlight")
+            in_callout = True
+        elif stripped == "__CALLOUT_NOTE__":
+            if in_callout:
+                out_lines.append("")
+            out_lines.append("> [!note] Margin Note")
+            in_callout = True
+        elif in_callout:
+            if stripped.startswith("> [!"):
+                out_lines.append(line)
+            elif (
+                stripped.startswith("---")
+                or stripped.startswith("<span")
+                or stripped.startswith("###")
+            ):
+                in_callout = False
+                out_lines.append(line)
+            elif not stripped:
+                out_lines.append(">")
+            else:
+                if stripped.startswith(">"):
+                    out_lines.append(line)
+                else:
+                    out_lines.append(f"> {line}")
+        else:
+            out_lines.append(line)
+
+    res = "\n".join(out_lines)
+    res = re.sub(r">\s*\n+(?=> \[!|\Z)", "\n\n", res)
+    return res.strip()
 
 
 def _read_ocr_instructions() -> str:
@@ -193,4 +298,4 @@ def ocr_and_repair(image_path: str) -> Optional[str]:
         )
         return None
 
-    return result
+    return normalize_callout_annotations(result)

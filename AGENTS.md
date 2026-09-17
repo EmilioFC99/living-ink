@@ -16,22 +16,23 @@
 
 ```
 living-ink/
-├── remarkable_mcp/              # Core Python package
-│   ├── __init__.py              # Package init, version
-│   ├── api.py                   # reMarkable Cloud/SSH API client factory
-│   ├── cli.py                   # Main CLI entry point (`living-ink`)
-│   ├── config.py                # XDG path resolution & configuration helpers
-│   ├── pipeline.py              # Main sync pipeline orchestrator
-│   ├── sync.py                  # Cloud sync protocol (v3/v4) implementation
-│   ├── ssh.py                   # Direct USB SSH transport to tablet
-│   ├── extract.py               # .rm binary → SVG → PNG rendering
-│   ├── clean.py                 # Multimodal AI vision OCR & text cleanup
-│   ├── providers.py             # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
-│   ├── setup_wizard.py          # Interactive onboarding setup wizard
-│   ├── destinations.py          # Pluggable publish targets (Apple Notes, Obsidian)
-│   └── openai_cleanup_prompt.txt # System prompt for text repair
+├── src/
+│   └── living_ink/              # Core Python package
+│       ├── __init__.py          # Package init, version
+│       ├── __main__.py          # Module entry point (`python -m living_ink`)
+│       ├── api.py               # reMarkable Cloud/SSH API client factory
+│       ├── cli.py               # Main CLI entry point (`living-ink`)
+│       ├── config.py            # XDG path resolution & configuration helpers
+│       ├── pipeline.py          # Main sync pipeline orchestrator
+│       ├── sync.py              # Cloud sync protocol (v3/v4) implementation
+│       ├── ssh.py               # Direct USB SSH transport to tablet
+│       ├── extract.py           # .rm binary → SVG → PNG rendering
+│       ├── clean.py             # Multimodal AI vision OCR & text cleanup
+│       ├── providers.py         # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
+│       ├── setup_wizard.py      # Interactive onboarding setup wizard
+│       └── destinations.py      # Pluggable publish targets (Apple Notes, Obsidian)
 ├── scripts/
-│   ├── process_notebook.py      # Backwards-compatible proxy to remarkable_mcp.pipeline
+│   ├── process_notebook.py      # Backwards-compatible proxy to living_ink.pipeline
 │   ├── cli.py                   # CLI wrapper entry point
 │   ├── setup.py                 # Setup wizard runner
 │   ├── test_docker.sh           # Automated Docker smoke test suite
@@ -41,9 +42,6 @@ living-ink/
 │   ├── SETUP_GUIDE.md           # API key / credential setup
 │   ├── USER_MANUAL.md           # End-user usage guide
 │   └── TEST_PLAN.md             # Test cases and verification matrix
-├── config/
-│   └── config.yml.example       # Configuration template
-├── data/                        # Runtime & personal data (logs, images, PDFs, state cache)
 ├── pyproject.toml               # Python project metadata & deps
 ├── install.sh                   # One-line curl installer
 ├── Dockerfile                   # Multi-stage production container image
@@ -72,8 +70,8 @@ Publish: Destination.publish()
 
 ### Key Design Patterns
 
-- **Destination ABC**: `remarkable_mcp/destinations.py` defines `Destination` base class. New targets subclass it and implement `publish()`.
-- **Config Loading**: YAML-first via `remarkable_mcp.config` (checks env, repo, XDG `~/.config/living-ink/config.yml`), with env var overrides.
+- **Destination ABC**: `src/living_ink/destinations.py` defines `Destination` base class. New targets subclass it and implement `publish()`.
+- **Config Loading**: YAML-first via `living_ink.config` (checks env, repo, XDG `~/.config/living-ink/config.yml`), with env var overrides.
 - **State Tracking**: Per-destination JSON files (`processed_notebooks_{DestName}.json`) track notebook hash/version to avoid reprocessing.
 - **Folder Mirroring**: Full folder hierarchy mirroring supported in Obsidian; top-level flattening applied in Apple Notes.
 
@@ -117,8 +115,8 @@ uv run pytest -v
 ## Recent Architecture Improvements
 
 1. **AI Vision OCR (Single API Key)**: Multimodal AI models (Gemini, GPT-4o) perform handwriting OCR directly from page images via standard OpenAI-compatible `image_url` data URIs, combining OCR + text cleanup in one step and making Google Cloud Vision optional.
-2. **Multi-Provider AI**: `remarkable_mcp/providers.py` provides universal OpenAI-compatible completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
-3. **Full Folder Hierarchy Mirroring**: `remarkable_mcp/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
+2. **Multi-Provider AI**: `living_ink/providers.py` provides universal OpenAI-compatible completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
+3. **Full Folder Hierarchy Mirroring**: `living_ink/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
 4. **Comprehensive Test Suite**: `tests/` contains 201 unit tests covering providers, vision OCR, clean, destination logic, SSH, and CLI.
 5. **Google Docstrings**: All core modules follow Google docstring conventions.
 6. **Preferred Connection with Automatic Fallback**: Users select their preferred method in setup wizard (USB SSH or Cloud). `FallbackClient` automatically tries the preferred method first and seamlessly falls back to the secondary method if the primary is unavailable. CLI flags `--ssh` and `--cloud` allow forcing either method.

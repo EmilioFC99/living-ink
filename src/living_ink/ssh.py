@@ -49,6 +49,7 @@ class Document:
     last_modified: Optional[datetime] = None
     size: int = 0
     files: List[Dict[str, Any]] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
     # SSH-specific: local path to the document folder
     local_path: Optional[str] = None
 
@@ -200,7 +201,7 @@ class SSHClient:
             # This is MUCH faster than individual cat commands
             output = self._ssh_command(
                 f"for f in {XOCHITL_PATH}/*.metadata; do "
-                f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; '
+                f'echo "===FILE===$(basename $f .metadata)"; cat "$f" 2>/dev/null; echo; '
                 f"done",
                 timeout=60,
             )
@@ -209,31 +210,17 @@ class SSHClient:
 
         documents = []
 
-        # Parse the output - split by our delimiter
-        current_id = None
-        current_content = []
-
-        for line in output.split("\n"):
-            if line.startswith("===FILE==="):
-                # Save previous document if we have one
-                if current_id and current_content:
-                    self._parse_and_add_document(
-                        current_id, "\n".join(current_content), documents, limit
-                    )
-                    if limit is not None and len(documents) >= limit:
-                        break
-                # Start new document
-                current_id = line.replace("===FILE===", "").strip()
-                current_content = []
-            else:
-                current_content.append(line)
-
-        # Don't forget the last document
-        if current_id and current_content:
-            if limit is None or len(documents) < limit:
-                self._parse_and_add_document(
-                    current_id, "\n".join(current_content), documents, limit
-                )
+        # Parse the output by ===FILE=== delimiter
+        for part in output.split("===FILE==="):
+            part = part.strip()
+            if not part:
+                continue
+            lines = part.split("\n", 1)
+            doc_id = lines[0].strip()
+            content = lines[1] if len(lines) > 1 else ""
+            self._parse_and_add_document(doc_id, content, documents, limit)
+            if limit is not None and len(documents) >= limit:
+                break
 
         self._documents = documents
         self._documents_by_id = {d.id: d for d in documents}
@@ -268,9 +255,13 @@ class SSHClient:
                 except (ValueError, TypeError):
                     pass
 
+            # Use lastModified if present, otherwise doc_id, so modifications trigger sync
+            last_mod_raw = metadata.get("lastModified")
+            doc_hash = str(last_mod_raw) if last_mod_raw else doc_id
+
             doc = Document(
                 id=doc_id,
-                hash=doc_id,  # Use ID as hash for SSH
+                hash=doc_hash,
                 name=metadata.get("visibleName", doc_id),
                 doc_type=metadata.get("type", "DocumentType"),
                 parent=metadata.get("parent", ""),
@@ -316,6 +307,15 @@ class SSHClient:
             file_list.append(content_file)
         except Exception:
             pass
+
+        # Also include raw PDF or EPUB files if they exist
+        for ext in ("pdf", "epub"):
+            raw_file = f"{XOCHITL_PATH}/{doc.id}.{ext}"
+            try:
+                self._ssh_command(f"test -f '{raw_file}' && echo exists")
+                file_list.append(raw_file)
+            except Exception:
+                pass
 
         # Create zip archive
         zip_buffer = io.BytesIO()
@@ -376,6 +376,30 @@ class SSHClient:
             return data.get("fileType")
         except Exception:
             return None
+
+    def get_tags(self, doc: Document) -> List[str]:
+        """Get tags for a document from its .content file.
+
+        Args:
+            doc: Document instance.
+
+        Returns:
+            List of tag strings.
+        """
+        if getattr(doc, "tags", None):
+            return list(doc.tags)
+
+        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
+        try:
+            content = self._scp_download(content_file, timeout=10)
+            data = json.loads(content.decode("utf-8"))
+            from living_ink.extract import extract_tags_from_dict
+
+            tags = extract_tags_from_dict(data)
+            doc.tags = tags
+            return list(tags)
+        except Exception:
+            return []
 
     def get_all_file_types(self) -> dict[str, Optional[str]]:
         """

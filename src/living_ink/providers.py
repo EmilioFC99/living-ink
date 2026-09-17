@@ -15,7 +15,7 @@ Supported providers (via presets):
     + any custom OpenAI-compatible endpoint via ``provider: "custom"``
 
 Example:
-    >>> from remarkable_mcp.providers import get_provider
+    >>> from living_ink.providers import get_provider
     >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "..."}})
     >>> cleaned = provider.repair_text("messy OCR text", "Clean this text.")
     >>> text = provider.ocr_image("/path/to/page.png", "Transcribe this page.")
@@ -302,7 +302,12 @@ class UniversalChatProvider(TextRepairProvider):
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = resp.read().decode("utf-8")
                 j = json.loads(body)
-                return j["choices"][0]["message"]["content"]
+                choices = j.get("choices", [])
+                if choices:
+                    first_msg = choices[0].get("message", {})
+                    content = first_msg.get("content")
+                    return content.strip() if content else ""
+                return ""
         except urllib.error.HTTPError as e:
             logger.error(
                 "AI API HTTP Error (%s): %s %s",
@@ -442,8 +447,22 @@ class UniversalChatProvider(TextRepairProvider):
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = resp.read().decode("utf-8")
                 j = json.loads(body)
-                result = j["choices"][0]["message"]["content"]
-                return result.strip() if result else ""
+                choices = j.get("choices", [])
+                if not choices:
+                    return ""
+                first_choice = choices[0]
+                message = first_choice.get("message", {})
+                content = message.get("content")
+                if not content:
+                    finish_reason = first_choice.get("finish_reason")
+                    if finish_reason and "filter" in str(finish_reason).lower():
+                        logger.warning(
+                            "Vision OCR completion blocked by filter (%s): %s",
+                            self.name,
+                            finish_reason,
+                        )
+                    return ""
+                return content.strip()
         except urllib.error.HTTPError as e:
             logger.error(
                 "Vision OCR HTTP Error (%s): %s %s",

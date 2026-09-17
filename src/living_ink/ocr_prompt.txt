@@ -1,0 +1,22 @@
+Transcribe the handwritten text and annotations from this page image.
+
+Rules:
+- Read all handwritten text, notes, and margin comments carefully and accurately.
+- When annotating or quoting from printed documents/books:
+  * For highlighted text, format as an Obsidian quote callout:
+    > [!quote] Highlight
+    > "quoted highlighted passage"
+  * For boxed, circled, or underlined passages, format as an Obsidian example callout:
+    > [!example] Boxed Passage
+    > "quoted passage"
+  * For handwritten margin notes, comments, stars, or symbols (e.g. !!!, ?), format as an Obsidian note callout:
+    > [!note] Margin Note
+    > transcribed note content
+  * For freeform handwritten notes or notebook pages (not a printed book), format as clean Markdown with headings, bullet points, and paragraphs.
+- Correct obvious spelling errors and contextually impossible words in handwriting.
+- Remove any crossed-out or scribbled-over text.
+- Preserve the original structure: headings, lists, numbered items, indentation.
+- Preserve the author's original meaning and voice; do not summarize handwritten thoughts or add fabricated content.
+- Ignore printed book page numbers, running headers/footers, and random stray marks.
+
+Output clean Markdown only. Do not wrap the entire output in a markdown code fence.

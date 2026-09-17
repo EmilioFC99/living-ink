@@ -35,7 +35,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Step 3: Copy application source code
-COPY remarkable_mcp/ ./remarkable_mcp/
+COPY src/ ./src/
 COPY scripts/ ./scripts/
 
 # Step 4: Install the living-ink CLI package

@@ -1,4 +1,4 @@
-"""Tests for remarkable_mcp.destinations module.
+"""Tests for living_ink.destinations module.
 
 Covers Destination abstract base class, AppleNotesDestination,
 and ObsidianDestination including full folder mirroring, root folder
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
-from remarkable_mcp.destinations import (
+from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
     ObsidianDestination,
@@ -61,7 +61,7 @@ class TestObsidianDestinationInit:
         """Valid existing directory initializes correctly."""
         dest = ObsidianDestination(vault_path=str(tmp_path))
         assert dest.vault_path == tmp_path.resolve()
-        assert dest.attachments_folder == "attachments"
+        assert dest.attachments_folder == "_attachments"
         assert dest.root_folder == ""
         assert dest.mirror_folders is True
 
@@ -247,13 +247,41 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
 
         # Check WikiLinks
         assert "## Original Pages" in content
-        assert "![[Sketches_page-1.png]]" in content
-        assert "![[Sketches_page-2.png]]" in content
+        assert "- [[Living Ink/_attachments/Personal/Sketches/page-1.png|Page 1]]" in content
+        assert "- [[Living Ink/_attachments/Personal/Sketches/page-2.png|Page 2]]" in content
 
-        # Check copied files
-        attach_dir = vault / "Living Ink" / "Personal" / "attachments"
-        assert (attach_dir / "Sketches_page-1.png").exists()
-        assert (attach_dir / "Sketches_page-2.png").exists()
+        # Check copied files in centralized _attachments with mirrored subfolder and note folder
+        attach_dir = vault / "Living Ink" / "_attachments" / "Personal" / "Sketches"
+        assert (attach_dir / "page-1.png").exists()
+        assert (attach_dir / "page-2.png").exists()
+
+    def test_nested_subfolder_mirrored_in_attachments(self, tmp_path):
+        """Nested subfolders and note folder are mirrored inside the central _attachments folder."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        img = tmp_path / "page-1.png"
+        img.write_bytes(b"PNG")
+
+        dest = ObsidianDestination(vault_path=str(vault), root_folder="Living Ink")
+        success = dest.publish(
+            notebook_name="Roadmap",
+            text_content="Notes",
+            image_paths=[img],
+            sub_folder="Work/Projects/2026",
+        )
+        assert success is True
+        note_file = vault / "Living Ink" / "Work" / "Projects" / "2026" / "Roadmap.md"
+        assert note_file.exists()
+
+        attach_dir = (
+            vault / "Living Ink" / "_attachments" / "Work" / "Projects" / "2026" / "Roadmap"
+        )
+        assert (attach_dir / "page-1.png").exists()
+
+        content = note_file.read_text(encoding="utf-8")
+        assert (
+            "- [[Living Ink/_attachments/Work/Projects/2026/Roadmap/page-1.png|Page 1]]" in content
+        )
 
     def test_missing_attachment_skipped_gracefully(self, tmp_path):
         """Missing image files do not crash the publication."""
@@ -333,7 +361,7 @@ class TestAppleNotesDestination:
         result_img = Image.open(opaque)
         assert result_img.mode == "RGB"
 
-    @patch("remarkable_mcp.destinations.subprocess.run")
+    @patch("living_ink.destinations.subprocess.run")
     def test_publish_executes_applescript_with_top_level_folder(self, mock_run):
         """Extracts top-level subfolder when nested path is provided."""
         mock_run.return_value = MagicMock(return_code=0, returncode=0, stderr="")
@@ -357,13 +385,13 @@ class TestAppleNotesDestination:
         assert '"Projects"' in script
         assert "Projects/Q1" not in script
 
-    @patch("remarkable_mcp.destinations.subprocess.run")
+    @patch("living_ink.destinations.subprocess.run")
     def test_publish_handles_applescript_failure(self, mock_run):
         """Returns False after retries if osascript fails."""
         mock_run.return_value = MagicMock(returncode=1, stderr="AppleScript Error")
 
         dest = AppleNotesDestination()
-        with patch("remarkable_mcp.destinations.time.sleep"):
+        with patch("living_ink.destinations.time.sleep"):
             success = dest.publish("Failed Note", "Content", [])
 
         assert success is False

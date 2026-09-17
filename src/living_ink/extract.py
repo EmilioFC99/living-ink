@@ -2,16 +2,23 @@
 Text extraction helpers for reMarkable documents.
 """
 
+import io
 import json
+import logging
 import os
+import re
 import tempfile
 import time
 import zipfile
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
+from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # reMarkable tablet screen dimensions (in pixels) - used as fallback
 REMARKABLE_WIDTH = 1404
@@ -196,14 +203,15 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
     Returns the full text content of the PDF.
     """
     try:
-        import fitz  # PyMuPDF
+        import pymupdf as fitz  # PyMuPDF
 
         text_parts = []
         with fitz.open(pdf_path) as doc:
             for page_num, page in enumerate(doc, 1):
                 page_text = page.get_text()
                 if page_text.strip():
-                    text_parts.append(f"--- Page {page_num} ---\n{page_text.strip()}")
+                    p_header = format_page_section_header(page_num, pdf_path, include_divider=True)
+                    text_parts.append(f"{p_header}\n\n{page_text.strip()}")
 
         return "\n\n".join(text_parts) if text_parts else ""
     except ImportError:
@@ -238,6 +246,200 @@ def extract_text_from_epub(epub_path: Path) -> str:
         return ""
     except Exception:
         return ""
+
+
+def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Path]:
+    """Extract the raw PDF or EPUB file stored inside a reMarkable document zip.
+
+    Args:
+        zip_path: Path to the downloaded document zip archive.
+        out_path: Destination path for the extracted raw document.
+
+    Returns:
+        Path to the extracted file, or None if no PDF/EPUB found in archive.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in zf.namelist():
+                lower_name = name.lower()
+                if lower_name.endswith((".pdf", ".epub")):
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(out_path, "wb") as f:
+                        f.write(zf.read(name))
+                    return out_path
+    except Exception as e:
+        logger.debug(f"Failed to extract raw document from {zip_path}: {e}")
+    return None
+
+
+def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
+    """Parse a document zip and find all annotated pages with their PDF page index.
+
+    Args:
+        zip_path: Path to the document zip file.
+
+    Returns:
+        List of dicts with keys:
+            - page_id: UUID of the page
+            - pdf_page_index: 0-indexed page in the underlying PDF (or None)
+            - page_num: 1-indexed human-readable page number
+            - rm_file_name: Name of the .rm file inside the zip
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            namelist = zf.namelist()
+            rm_names = {Path(n).name: n for n in namelist if n.endswith(".rm")}
+            if not rm_names:
+                return []
+
+            # Find .content file
+            content_data = {}
+            for n in namelist:
+                if n.endswith(".content"):
+                    try:
+                        content_data = json.loads(zf.read(n).decode("utf-8"))
+                    except Exception:
+                        pass
+                    break
+
+            pages_meta = []
+            if "cPages" in content_data and "pages" in content_data["cPages"]:
+                pages_meta = content_data["cPages"]["pages"]
+            elif "pages" in content_data and isinstance(content_data["pages"], list):
+                pages_meta = content_data["pages"]
+
+            results = []
+            matched_rm_names = set()
+
+            for idx, p in enumerate(pages_meta):
+                p_id = p.get("id") if isinstance(p, dict) else str(p)
+                rm_key = f"{p_id}.rm"
+                if rm_key in rm_names:
+                    matched_rm_names.add(rm_key)
+                    redir_val = None
+                    if isinstance(p, dict) and "redir" in p:
+                        redir_entry = p["redir"]
+                        if isinstance(redir_entry, dict):
+                            redir_val = redir_entry.get("value")
+                        elif isinstance(redir_entry, int):
+                            redir_val = redir_entry
+
+                    pdf_idx = redir_val if redir_val is not None else idx
+                    results.append(
+                        {
+                            "page_id": p_id,
+                            "pdf_page_index": pdf_idx,
+                            "page_num": pdf_idx + 1,
+                            "rm_file_name": rm_names[rm_key],
+                        }
+                    )
+
+            # Add any orphaned .rm files not explicitly in cPages
+            for rm_k, rm_full in rm_names.items():
+                if rm_k not in matched_rm_names:
+                    p_id = rm_k[:-3]
+                    results.append(
+                        {
+                            "page_id": p_id,
+                            "pdf_page_index": len(results),
+                            "page_num": len(results) + 1,
+                            "rm_file_name": rm_full,
+                        }
+                    )
+
+            # Sort by pdf_page_index
+            results.sort(key=lambda x: x["pdf_page_index"])
+            return results
+    except Exception as e:
+        logger.debug(f"Failed to read page map from {zip_path}: {e}")
+        return []
+
+
+def render_composite_pdf_page(
+    pdf_path: Path,
+    page_index: int,
+    rm_bytes: bytes,
+    dpi: int = 150,
+) -> Optional[bytes]:
+    """Render a PDF page with handwritten .rm strokes composited on top.
+
+    Args:
+        pdf_path: Path to the source PDF document.
+        page_index: 0-indexed page number in the PDF.
+        rm_bytes: Raw bytes of the .rm pen stroke file.
+        dpi: Resolution for rendering the PDF page.
+
+    Returns:
+        PNG image bytes of the composite page, or None if rendering failed.
+    """
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            if page_index < 0 or page_index >= len(doc):
+                return None
+            page = doc[page_index]
+            pix = page.get_pixmap(dpi=dpi)
+            pdf_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        if not rm_bytes:
+            out_buf = io.BytesIO()
+            pdf_img.save(out_buf, format="PNG")
+            return out_buf.getvalue()
+
+        # Render the .rm file
+        with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as f:
+            f.write(rm_bytes)
+            tmp_rm = Path(f.name)
+
+        try:
+            rm_png = render_rm_file_to_png(tmp_rm)
+        finally:
+            tmp_rm.unlink(missing_ok=True)
+
+        if rm_png:
+            rm_img = Image.open(io.BytesIO(rm_png))
+            rm_resized = rm_img.resize((pix.width, pix.height), Image.Resampling.LANCZOS)
+            if rm_resized.mode == "RGBA":
+                pdf_img.paste(rm_resized, (0, 0), rm_resized)
+            else:
+                pdf_img.paste(rm_resized, (0, 0))
+
+        out_buf = io.BytesIO()
+        pdf_img.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+    except Exception as e:
+        logger.debug(f"Failed to render composite PDF page {page_index}: {e}")
+        return None
+
+
+def render_pdf_page_preview(
+    pdf_path: Path,
+    page_index: int = 0,
+    dpi: int = 150,
+) -> Optional[bytes]:
+    """Render a single page of a PDF as a preview PNG image.
+
+    Args:
+        pdf_path: Path to the PDF document.
+        page_index: 0-indexed page number to render (default: 0 for cover).
+        dpi: Resolution for rendering.
+
+    Returns:
+        PNG image bytes, or None on failure.
+    """
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            if page_index < 0 or page_index >= len(doc):
+                return None
+            page = doc[page_index]
+            pix = page.get_pixmap(dpi=dpi)
+            pdf_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        out_buf = io.BytesIO()
+        pdf_img.save(out_buf, format="PNG")
+        return out_buf.getvalue()
+    except Exception as e:
+        logger.debug(f"Failed to render PDF page preview: {e}")
+        return None
 
 
 def extract_text_from_rm_file(rm_file_path: Path) -> List[str]:
@@ -1287,3 +1489,236 @@ def _ocr_tesseract(rm_files: List[Path]) -> Optional[List[str]]:
     except ImportError:
         # OCR dependencies not installed
         return None
+
+
+def normalize_tag(tag: str) -> str:
+    """Normalize a tag string for use in notes and frontmatter.
+
+    - Strips leading '#'
+    - Replaces spaces with hyphens
+    - Keeps valid tag characters (alphanumeric, hyphens, underscores, slashes)
+
+    Args:
+        tag: Raw tag string.
+
+    Returns:
+        Normalized tag string.
+    """
+    clean = tag.strip().lstrip("#").strip()
+    clean = re.sub(r"\s+", "-", clean)
+    clean = re.sub(r"[^\w\-/]", "", clean)
+    return clean
+
+
+def extract_tags_from_dict(data: dict) -> List[str]:
+    """Extract and normalize unique tags from a parsed .content or .metadata dict.
+
+    Handles:
+    - 'tags': list of strings or dicts with 'name' (document-level tags)
+    - 'pageTags': list of dicts with 'name' (page-level tags)
+
+    Args:
+        data: Parsed JSON dict from .content or .metadata.
+
+    Returns:
+        List of cleaned, unique tag names preserving order.
+    """
+    raw_tags = []
+
+    # 1. Document-level tags
+    doc_tags = data.get("tags") or []
+    if isinstance(doc_tags, list):
+        for t in doc_tags:
+            if isinstance(t, str) and t.strip():
+                raw_tags.append(t.strip())
+            elif isinstance(t, dict) and "name" in t:
+                name = str(t["name"]).strip()
+                if name:
+                    raw_tags.append(name)
+
+    # 2. Page-level tags
+    page_tags = data.get("pageTags") or []
+    if isinstance(page_tags, list):
+        for t in page_tags:
+            if isinstance(t, str) and t.strip():
+                raw_tags.append(t.strip())
+            elif isinstance(t, dict) and "name" in t:
+                name = str(t["name"]).strip()
+                if name:
+                    raw_tags.append(name)
+
+    # Normalize and deduplicate
+    seen = set()
+    unique_tags = []
+    for tag in raw_tags:
+        clean = normalize_tag(tag)
+        if clean and clean.lower() not in seen:
+            seen.add(clean.lower())
+            unique_tags.append(clean)
+
+    return unique_tags
+
+
+def extract_tags_from_zip(zip_path: Path) -> List[str]:
+    """Extract document and page tags from a reMarkable document zip.
+
+    Args:
+        zip_path: Path to the downloaded document .zip archive.
+
+    Returns:
+        List of unique, normalized tags.
+    """
+    tags: List[str] = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith(".content") or name.endswith(".metadata"):
+                    try:
+                        data = json.loads(zf.read(name).decode("utf-8"))
+                        if isinstance(data, dict):
+                            tags.extend(extract_tags_from_dict(data))
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.debug(f"Failed to extract tags from zip {zip_path}: {e}")
+
+    seen = set()
+    result = []
+    for t in tags:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            result.append(t)
+    return result
+
+
+def format_page_label(page_num: int, pdf_path: Optional[Path] = None) -> str:
+    """Format a human-readable page label.
+
+    For PDFs with embedded page labels (e.g. Roman numerals in front matter,
+    or offset book page numbers), formats as:
+        'Page {label} (PDF p. {page_num})'
+    If no label is present or label equals page_num, formats as:
+        'Page {page_num}'
+
+    Args:
+        page_num: 1-indexed physical page number.
+        pdf_path: Optional path to underlying PDF file.
+
+    Returns:
+        Formatted label string, e.g. 'Page xiii (PDF p. 19)' or 'Page 51 (PDF p. 77)'.
+    """
+    if pdf_path and Path(pdf_path).exists() and Path(pdf_path).suffix.lower() == ".pdf":
+        try:
+            import pymupdf as fitz
+
+            doc = fitz.open(pdf_path)
+            try:
+                idx = page_num - 1
+                if 0 <= idx < len(doc):
+                    label = doc[idx].get_label()
+                    if label and label.strip() and label.strip().lower() != str(page_num):
+                        return f"Page {label.strip()} (pdf-{page_num})"
+            finally:
+                doc.close()
+        except Exception as e:
+            logger.debug(f"Failed to read page label from {pdf_path}: {e}")
+
+    return f"Page {page_num}"
+
+
+@lru_cache(maxsize=16)
+def _get_pdf_toc_entries(pdf_path_str: str) -> List[Tuple[int, str, int]]:
+    """Cached helper to read Table of Contents entries from a PDF."""
+    try:
+        import pymupdf as fitz
+
+        doc = fitz.open(pdf_path_str)
+        try:
+            return [(int(lvl), str(title).strip(), int(p)) for lvl, title, p in doc.get_toc()]
+        finally:
+            doc.close()
+    except Exception as e:
+        logger.debug(f"Failed to read TOC from {pdf_path_str}: {e}")
+        return []
+
+
+def get_pdf_toc_breadcrumbs(page_num: int, pdf_path: Optional[Path] = None) -> List[str]:
+    """Extract hierarchical TOC breadcrumbs for a specific page in a PDF document.
+
+    Traverses the document's Table of Contents and builds the breadcrumb trail
+    active at ``page_num``.
+
+    Args:
+        page_num: 1-indexed physical page number.
+        pdf_path: Optional path to PDF or document file.
+
+    Returns:
+        List of section titles, e.g. ['Part I', 'Chapter 2', 'Data Management'].
+    """
+    if not pdf_path or not Path(pdf_path).exists():
+        return []
+
+    toc = _get_pdf_toc_entries(str(Path(pdf_path).resolve()))
+    if not toc:
+        return []
+
+    hierarchy: Dict[int, str] = {}
+    for lvl, title, p in toc:
+        if p <= page_num:
+            hierarchy[lvl] = title
+            # Prune any deeper sub-levels from previously completed sections
+            for k in list(hierarchy.keys()):
+                if k > lvl:
+                    del hierarchy[k]
+        else:
+            break
+
+    return [hierarchy[k] for k in sorted(hierarchy.keys()) if hierarchy[k]]
+
+
+def format_page_section_header(
+    page_num: int,
+    pdf_path: Optional[Path] = None,
+    include_divider: bool = True,
+) -> str:
+    """Format a page section header with divider and two-tier styled TOC hierarchy.
+
+    The lowest level in the PDF TOC hierarchy is styled with color #777777,
+    and the parent hierarchy followed by the page label is styled with color #aaaaaa.
+
+    Example output:
+        ---
+
+        <span style="font-size: 0.9em; color: #777777"><b>Data Management</b><br><span style="font-size: 0.8em; color: #aaaaaa">Part I. Foundation and Building Blocks | Chapter 2. The Data Engineering Lifecycle | Major Undercurrents Across the Data Engineering Lifecycle | Page 51 (pdf-77)</span></span>
+
+    Args:
+        page_num: 1-indexed physical page number.
+        pdf_path: Optional path to underlying document file.
+        include_divider: Whether to prepend a Markdown divider ('---').
+
+    Returns:
+        Formatted Markdown header string.
+    """
+    page_label = format_page_label(page_num, pdf_path)
+    breadcrumbs = get_pdf_toc_breadcrumbs(page_num, pdf_path)
+
+    if breadcrumbs:
+        lowest = breadcrumbs[-1]
+        parents = breadcrumbs[:-1]
+        if parents:
+            sub_text = f"{' | '.join(parents)} | {page_label}"
+        else:
+            sub_text = page_label
+        header_html = (
+            f'<span style="font-size: 0.9em; color: #777777"><b>{lowest}</b><br>'
+            f'<span style="font-size: 0.8em; color: #aaaaaa">{sub_text}</span></span>'
+        )
+    else:
+        header_html = f'<span style="font-size: 0.9em; color: #777777"><b>{page_label}</b></span>'
+
+    lines = []
+    if include_divider:
+        lines.append("---")
+        lines.append("")
+    lines.append(header_html)
+    return "\n".join(lines)

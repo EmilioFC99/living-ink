@@ -10,14 +10,9 @@ Before running tests, ensure you have the correct dependencies and a valid confi
 # Install dependencies (if not already done)
 uv sync
 
-# Create a config file from the example
-cp config/config.yml.example config/config.yml
+# Configure Living Ink
+living-ink setup
 ```
-
-Edit `config/config.yml` with your API keys:
-*   `remarkable.device_token`
-*   `openai.api_key`
-*   `google_vision` credentials
 
 ## 2. Test Cases
 
