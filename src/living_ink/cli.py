@@ -14,6 +14,7 @@ import json
 import os
 import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Type
 
@@ -170,6 +171,198 @@ class SetupCommand(BaseCommand):
         return 0
 
 
+@dataclass
+class StatusReport:
+    """A snapshot of the system's health, independent of how it is displayed.
+
+    ``living-ink status`` has two renderers — a styled console view and
+    ``--json`` — and they used to probe the tablet, the AI provider and the
+    LaunchAgent separately, which meant the two could disagree and a new check
+    had to be written twice. This dataclass is the single collected result;
+    :func:`collect_status` fills it and the renderers only format it.
+
+    Fields are deliberately flat rather than nested, because the nesting the
+    JSON output needs is a presentation detail and lives in :meth:`to_dict`.
+    """
+
+    config_path: Path
+    config_found: bool = False
+    config_error: Optional[str] = None
+
+    preferred: str = "cloud"
+    ssh_host: str = "10.11.99.1"
+    ssh_ok: bool = False
+    ssh_msg: str = ""
+    cloud_ok: bool = False
+    cloud_msg: str = ""
+
+    ai_provider: str = "none"
+    ai_model: str = "default"
+    ai_ok: bool = False
+    ai_msg: str = ""
+
+    obsidian_enabled: bool = False
+    obsidian_vault: str = ""
+    obsidian_root_folder: str = ""
+    obsidian_valid: bool = False
+
+    apple_notes_enabled: bool = False
+    apple_notes_folder: str = "Living Ink"
+
+    auto_sync_installed: bool = False
+    auto_sync_active: bool = False
+
+    @property
+    def usable(self) -> bool:
+        """Whether a config was found and parsed; drives the process exit code."""
+        return self.config_found and self.config_error is None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Render the report in the documented ``--json`` shape.
+
+        The key names and nesting are a stable contract for anyone scripting
+        against ``living-ink status --json``; change them only deliberately.
+
+        Returns:
+            A JSON-serialisable dict. When the config is missing or unparsable,
+            every section other than ``config`` is an empty object, matching
+            the behaviour scripts already rely on.
+        """
+        empty: dict[str, Any] = {
+            "remarkable": {},
+            "ai": {},
+            "obsidian": {},
+            "apple_notes": {},
+            "auto_sync": {},
+        }
+
+        if not self.config_found:
+            return {"config": {"found": False, "path": None}, **empty}
+
+        config: dict[str, Any] = {"found": True, "path": str(self.config_path)}
+        if self.config_error:
+            config["error"] = self.config_error
+            return {"config": config, **empty}
+
+        return {
+            "config": config,
+            "remarkable": {
+                "preferred": self.preferred,
+                "ssh": {"connected": self.ssh_ok, "message": self.ssh_msg},
+                "cloud": {"connected": self.cloud_ok, "message": self.cloud_msg},
+            },
+            "ai": {
+                "provider": self.ai_provider,
+                "model": self.ai_model,
+                "valid": self.ai_ok,
+                "message": self.ai_msg,
+            },
+            "obsidian": {
+                "enabled": self.obsidian_enabled,
+                "vault_path": self.obsidian_vault,
+                "valid": self.obsidian_valid,
+            },
+            "apple_notes": {
+                "enabled": self.apple_notes_enabled,
+                "folder": self.apple_notes_folder,
+            },
+            "auto_sync": {
+                "installed": self.auto_sync_installed,
+                "active": self.auto_sync_active,
+            },
+        }
+
+
+def collect_status(config_path: Path) -> StatusReport:
+    """Probe every subsystem once and return the result.
+
+    Network and subprocess work happens here and nowhere else, so both
+    renderers are guaranteed to describe the same moment in time.
+
+    Args:
+        config_path: Config file to read. Need not exist.
+
+    Returns:
+        A populated StatusReport. Probing stops early — leaving the remaining
+        fields at their defaults — if the config is missing or unparsable.
+    """
+    import yaml
+
+    from living_ink.setup_wizard import (
+        LAUNCH_AGENT_PLIST,
+        verify_ai_provider,
+        verify_remarkable_ssh,
+        verify_remarkable_token,
+    )
+
+    report = StatusReport(config_path=config_path)
+    if not config_path.exists():
+        return report
+
+    report.config_found = True
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception as e:
+        report.config_error = str(e)
+        return report
+
+    # reMarkable transport. Both are probed when configured, because the
+    # non-preferred one is the fallback and its health is worth reporting.
+    rm_cfg = cfg.get("remarkable", {})
+    has_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
+    report.preferred = rm_cfg.get("preferred_connection", "").strip().lower() or (
+        "ssh" if has_ssh else "cloud"
+    )
+    report.ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
+
+    if has_ssh or report.preferred == "ssh":
+        report.ssh_ok, report.ssh_msg = verify_remarkable_ssh(
+            host=report.ssh_host, port=rm_cfg.get("ssh_port", 22)
+        )
+
+    token = rm_cfg.get("device_token", "")
+    if token:
+        report.cloud_ok, report.cloud_msg = verify_remarkable_token(token)
+
+    # AI provider
+    ai_cfg = cfg.get("ai", {})
+    report.ai_provider = ai_cfg.get("provider", "none")
+    model = ai_cfg.get("model", "")
+    report.ai_model = model or "default"
+    report.ai_ok, report.ai_msg = verify_ai_provider(
+        report.ai_provider, ai_cfg.get("api_key", ""), model
+    )
+
+    # Obsidian
+    obs_cfg = cfg.get("obsidian", {})
+    report.obsidian_enabled = obs_cfg.get("enabled", False)
+    vault = Path(obs_cfg.get("vault_path", ""))
+    report.obsidian_vault = str(vault)
+    report.obsidian_root_folder = obs_cfg.get("root_folder", "")
+    report.obsidian_valid = bool(report.obsidian_enabled and vault.exists() and vault.is_dir())
+
+    # Apple Notes
+    an_cfg = cfg.get("apple_notes", {})
+    report.apple_notes_enabled = an_cfg.get("enabled", False)
+    report.apple_notes_folder = an_cfg.get("folder_name", "Living Ink")
+
+    # Background sync
+    report.auto_sync_installed = LAUNCH_AGENT_PLIST.exists()
+    if report.auto_sync_installed:
+        import subprocess
+
+        res = subprocess.run(
+            ["launchctl", "list", "com.livingink.sync"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        report.auto_sync_active = res.returncode == 0
+
+    return report
+
+
 class StatusCommand(BaseCommand):
     """Display connection, vault, and sync service status."""
 
@@ -199,27 +392,21 @@ class StatusCommand(BaseCommand):
         Returns:
             0 on completion, 1 if configuration is missing or invalid.
         """
+        report = collect_status(get_config_path(self.root))
         if getattr(args, "json", False) is True:
-            return self._run_json()
-        return self._run_console()
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            self._render_console(report)
+        return 0 if report.usable else 1
 
-    def _run_console(self) -> int:
-        """Render status in styled terminal format.
+    @staticmethod
+    def _render_console(report: StatusReport) -> None:
+        """Print a styled, human-readable summary of an already-collected report.
 
-        Returns:
-            0 on success, 1 on missing or invalid configuration.
+        Args:
+            report: Snapshot produced by collect_status().
         """
-        from living_ink.setup_wizard import (
-            LAUNCH_AGENT_PLIST,
-            bold,
-            cyan,
-            dim,
-            green,
-            red,
-            verify_ai_provider,
-            verify_remarkable_token,
-            yellow,
-        )
+        from living_ink.setup_wizard import bold, cyan, dim, green, red, yellow
 
         print()
         print(bold(cyan("============================================================")))
@@ -227,239 +414,85 @@ class StatusCommand(BaseCommand):
         print(bold(cyan("============================================================")))
         print()
 
-        # 1. Config file
-        config_file = get_config_path(self.root)
-
-        if not config_file.exists():
+        if not report.config_found:
             print(f"Configuration: {red('Not found')}")
             print("Run 'living-ink setup' to configure.")
-            return 1
+            return
 
-        print(f"Configuration: {green('Found')} ({dim(str(config_file))})")
+        print(f"Configuration: {green('Found')} ({dim(str(report.config_path))})")
+        if report.config_error:
+            print(f"Configuration: {red(f'Syntax Error: {report.config_error}')}")
+            return
 
-        import yaml
-
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"Configuration: {red(f'Syntax Error: {e}')}")
-            return 1
-
-        # 2. reMarkable Tablet
-        rm_cfg = cfg.get("remarkable", {})
-        preferred = rm_cfg.get("preferred_connection", "").strip().lower()
-        has_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
-        token = rm_cfg.get("device_token", "")
-
-        if not preferred:
-            preferred = "ssh" if has_ssh else "cloud"
-
-        from living_ink.setup_wizard import verify_remarkable_ssh
-
-        ssh_ok, ssh_msg = False, ""
-        if has_ssh or preferred == "ssh":
-            ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
-            ssh_port = rm_cfg.get("ssh_port", 22)
-            ssh_ok, ssh_msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port)
-
-        cloud_ok, cloud_msg = False, ""
-        if token:
-            cloud_ok, cloud_msg = verify_remarkable_token(token)
-
-        # Format status output
-        if preferred == "ssh":
-            if ssh_ok:
-                backup_note = f" {dim('(Cloud backup ready)')}" if cloud_ok else ""
-                print(f"reMarkable:    {green('Connected')} (USB SSH — Preferred){backup_note}")
-            elif cloud_ok:
-                if "Tablet reached" in ssh_msg or "unauthorized" in ssh_msg.lower():
+        # reMarkable — report the preferred transport first, then whether the
+        # other one is standing by, since that is what the user can act on.
+        if report.preferred == "ssh":
+            if report.ssh_ok:
+                backup = f" {dim('(Cloud backup ready)')}" if report.cloud_ok else ""
+                print(f"reMarkable:    {green('Connected')} (USB SSH — Preferred){backup}")
+            elif report.cloud_ok:
+                unauthorized = (
+                    "Tablet reached" in report.ssh_msg or "unauthorized" in report.ssh_msg.lower()
+                )
+                if unauthorized:
                     print(
                         f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB plugged in but SSH key unauthorized)"
                     )
                     print(
-                        f"               {dim(f'→ Run: ssh-copy-id root@{ssh_host} to enable USB SSH')}"
+                        f"               {dim(f'→ Run: ssh-copy-id root@{report.ssh_host} to enable USB SSH')}"
                     )
                 else:
                     print(
                         f"reMarkable:    {yellow('Connected')} (Cloud backup active — USB SSH unplugged)"
                     )
             else:
-                print(f"reMarkable:    {red('Disconnected')} (USB SSH: {ssh_msg})")
-        else:  # preferred == "cloud"
-            if cloud_ok:
-                backup_note = f" {dim('(USB SSH backup ready)')}" if ssh_ok else ""
-                print(f"reMarkable:    {green('Connected')} (Cloud — Preferred){backup_note}")
-            elif ssh_ok:
+                print(f"reMarkable:    {red('Disconnected')} (USB SSH: {report.ssh_msg})")
+        else:
+            if report.cloud_ok:
+                backup = f" {dim('(USB SSH backup ready)')}" if report.ssh_ok else ""
+                print(f"reMarkable:    {green('Connected')} (Cloud — Preferred){backup}")
+            elif report.ssh_ok:
                 print(
                     f"reMarkable:    {yellow('Connected')} (USB SSH backup active — Cloud unavailable)"
                 )
             else:
-                print(f"reMarkable:    {red('Disconnected')} (Cloud: {cloud_msg})")
+                print(f"reMarkable:    {red('Disconnected')} (Cloud: {report.cloud_msg})")
 
-        # 3. AI Provider
-        ai_cfg = cfg.get("ai", {})
-        provider = ai_cfg.get("provider", "none")
-        key = ai_cfg.get("api_key", "")
-        model = ai_cfg.get("model", "")
-        ok, msg = verify_ai_provider(provider, key, model)
-        model_label = model if model else "default"
-        if ok:
-            print(f"AI Provider:   {green(f'{provider} ({model_label})')} — {msg}")
+        # AI provider
+        label = f"{report.ai_provider} ({report.ai_model})"
+        if report.ai_ok:
+            print(f"AI Provider:   {green(label)} — {report.ai_msg}")
         else:
-            print(f"AI Provider:   {yellow(f'{provider}')} — {msg}")
+            print(f"AI Provider:   {yellow(report.ai_provider)} — {report.ai_msg}")
 
-        # 4. Obsidian
-        obs_cfg = cfg.get("obsidian", {})
-        if obs_cfg.get("enabled", False):
-            vp = Path(obs_cfg.get("vault_path", ""))
-            root_f = obs_cfg.get("root_folder", "")
-            if vp.exists() and vp.is_dir():
-                target = vp / root_f if root_f else vp
+        # Obsidian
+        if report.obsidian_enabled:
+            if report.obsidian_valid:
+                vault = Path(report.obsidian_vault)
+                target = (
+                    vault / report.obsidian_root_folder if report.obsidian_root_folder else vault
+                )
                 print(f"Obsidian:      {green('Enabled')} -> {target}")
             else:
-                print(f"Obsidian:      {red('Vault path not found')} ({vp})")
+                print(f"Obsidian:      {red('Vault path not found')} ({report.obsidian_vault})")
         else:
             print(f"Obsidian:      {dim('Disabled')}")
 
-        # 5. Apple Notes
-        an_cfg = cfg.get("apple_notes", {})
-        if an_cfg.get("enabled", False):
-            print(
-                f"Apple Notes:   {green('Enabled')} (Folder: {an_cfg.get('folder_name', 'Living Ink')})"
-            )
+        # Apple Notes
+        if report.apple_notes_enabled:
+            print(f"Apple Notes:   {green('Enabled')} (Folder: {report.apple_notes_folder})")
         else:
             print(f"Apple Notes:   {dim('Disabled')}")
 
-        # 6. LaunchAgent background sync
-        if LAUNCH_AGENT_PLIST.exists():
-            import subprocess
-
-            res = subprocess.run(
-                ["launchctl", "list", "com.livingink.sync"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if res.returncode == 0:
-                print(f"Auto-Sync:     {green('Active (runs hourly in background)')}")
-            else:
-                print(f"Auto-Sync:     {yellow('Installed but not currently loaded')}")
-        else:
+        # Background sync
+        if not report.auto_sync_installed:
             print(f"Auto-Sync:     {dim('Not installed (run living-ink setup to enable)')}")
+        elif report.auto_sync_active:
+            print(f"Auto-Sync:     {green('Active (runs hourly in background)')}")
+        else:
+            print(f"Auto-Sync:     {yellow('Installed but not currently loaded')}")
 
         print()
-        return 0
-
-    def _run_json(self) -> int:
-        """Collect and output status as structured JSON.
-
-        Returns:
-            0 on success, 1 on missing or invalid configuration.
-        """
-        status_data: dict[str, Any] = {
-            "config": {"found": False, "path": None},
-            "remarkable": {},
-            "ai": {},
-            "obsidian": {},
-            "apple_notes": {},
-            "auto_sync": {},
-        }
-        config_file = get_config_path(self.root)
-        if not config_file.exists():
-            print(json.dumps(status_data, indent=2))
-            return 1
-
-        status_data["config"] = {"found": True, "path": str(config_file)}
-        import yaml
-
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            status_data["config"]["error"] = str(e)
-            print(json.dumps(status_data, indent=2))
-            return 1
-
-        # reMarkable Tablet
-        rm_cfg = cfg.get("remarkable", {})
-        preferred = rm_cfg.get("preferred_connection", "").strip().lower()
-        has_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
-        token = rm_cfg.get("device_token", "")
-        if not preferred:
-            preferred = "ssh" if has_ssh else "cloud"
-
-        from living_ink.setup_wizard import verify_remarkable_ssh, verify_remarkable_token
-
-        ssh_ok, ssh_msg = False, ""
-        if has_ssh or preferred == "ssh":
-            ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
-            ssh_port = rm_cfg.get("ssh_port", 22)
-            ssh_ok, ssh_msg = verify_remarkable_ssh(host=ssh_host, port=ssh_port)
-
-        cloud_ok, cloud_msg = False, ""
-        if token:
-            cloud_ok, cloud_msg = verify_remarkable_token(token)
-
-        status_data["remarkable"] = {
-            "preferred": preferred,
-            "ssh": {"connected": ssh_ok, "message": ssh_msg},
-            "cloud": {"connected": cloud_ok, "message": cloud_msg},
-        }
-
-        # AI Provider
-        from living_ink.setup_wizard import verify_ai_provider
-
-        ai_cfg = cfg.get("ai", {})
-        provider = ai_cfg.get("provider", "none")
-        key = ai_cfg.get("api_key", "")
-        model = ai_cfg.get("model", "")
-        ok, msg = verify_ai_provider(provider, key, model)
-        status_data["ai"] = {
-            "provider": provider,
-            "model": model or "default",
-            "valid": ok,
-            "message": msg,
-        }
-
-        # Obsidian
-        obs_cfg = cfg.get("obsidian", {})
-        obs_enabled = obs_cfg.get("enabled", False)
-        vp = Path(obs_cfg.get("vault_path", ""))
-        status_data["obsidian"] = {
-            "enabled": obs_enabled,
-            "vault_path": str(vp),
-            "valid": vp.exists() and vp.is_dir() if obs_enabled else False,
-        }
-
-        # Apple Notes
-        an_cfg = cfg.get("apple_notes", {})
-        status_data["apple_notes"] = {
-            "enabled": an_cfg.get("enabled", False),
-            "folder": an_cfg.get("folder_name", "Living Ink"),
-        }
-
-        # Auto Sync
-        from living_ink.setup_wizard import LAUNCH_AGENT_PLIST
-
-        if LAUNCH_AGENT_PLIST.exists():
-            import subprocess
-
-            res = subprocess.run(
-                ["launchctl", "list", "com.livingink.sync"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            status_data["auto_sync"] = {
-                "installed": True,
-                "active": res.returncode == 0,
-            }
-        else:
-            status_data["auto_sync"] = {"installed": False, "active": False}
-
-        print(json.dumps(status_data, indent=2))
-        return 0
 
 
 class LivingInkCLI:
