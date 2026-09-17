@@ -10,7 +10,6 @@ Based on the protocol used by ddvk/rmapi.
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -71,12 +70,6 @@ class Document:
     def ModifiedClient(self) -> Optional[datetime]:
         """Compatibility with rmapy naming."""
         return self.last_modified
-
-
-# Alias for backward compatibility with rmapy-style code
-# In our sync module, both Document and Folder are the same class,
-# distinguished by the is_folder property
-Folder = Document
 
 
 class RemarkableClient:
@@ -364,22 +357,3 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
         f"Invalid token format. Expected JSON or JWT token.\n"
         f"Token starts with: {token_data[:20]}..."
     )
-
-
-def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> RemarkableClient:
-    """
-    Load a client from a token file.
-
-    Args:
-        token_file: Path to JSON token file (default: ~/.rmapi)
-
-    Returns:
-        Configured RemarkableClient
-    """
-    if not token_file.exists():
-        raise RuntimeError(
-            f"Token file not found: {token_file}\nRegister first with: living-ink setup"
-        )
-
-    token_json = token_file.read_text()
-    return load_client_from_token(token_json)

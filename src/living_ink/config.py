@@ -78,18 +78,6 @@ def get_config_path(repo_dir: Optional[Path] = None) -> Path:
     return xdg_config.resolve()
 
 
-def get_config_dir(repo_dir: Optional[Path] = None) -> Path:
-    """Find the configuration directory.
-
-    Args:
-        repo_dir: Optional repository root.
-
-    Returns:
-        Path to the configuration directory.
-    """
-    return get_config_path(repo_dir).parent
-
-
 def get_data_dir(repo_dir: Optional[Path] = None) -> Path:
     """Find the data directory for logs, state, and rendered artifacts.
 

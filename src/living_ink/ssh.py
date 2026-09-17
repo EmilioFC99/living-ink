@@ -58,11 +58,6 @@ class Document:
         return self.doc_type == "CollectionType"
 
     @property
-    def is_cloud_archived(self) -> bool:
-        """True if document is archived to cloud (not on device)."""
-        return not self.synced or self.parent == "trash"
-
-    @property
     def VissibleName(self) -> str:
         """Compatibility with cloud client naming."""
         return self.name
@@ -86,10 +81,6 @@ class Document:
     def ModifiedClient(self) -> Optional[datetime]:
         """Compatibility with cloud client naming."""
         return self.last_modified
-
-
-# Alias for compatibility
-Folder = Document
 
 
 class SSHClient:
@@ -471,16 +462,6 @@ class SSHClient:
             logger.warning(f"Failed to batch-load file types: {e}")
 
         return self._file_type_cache
-
-
-def check_ssh_available(
-    host: str = DEFAULT_SSH_HOST,
-    user: str = DEFAULT_SSH_USER,
-    port: int = DEFAULT_SSH_PORT,
-) -> bool:
-    """Check if SSH connection to reMarkable tablet is available."""
-    client = SSHClient(host=host, user=user, port=port)
-    return client.check_connection()
 
 
 def create_ssh_client(

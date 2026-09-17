@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import sys
-import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -88,7 +87,6 @@ VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
 OCR_DIR = DATA_DIR / "output"  # OCR text files
 PDF_DIR = DATA_DIR / "remarkable_pdfs"
 DOCS_DIR = DATA_DIR / "remarkable_documents"
-PROCESSED_LOG = DATA_DIR / "processed_notebooks.json"
 LOGS_DIR = get_logs_dir()
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOGS_DIR / "pipeline.log"
@@ -380,11 +378,6 @@ def add_to_processed_log(dest_name: str, doc_id, version):
         json.dump(processed, f, indent=2, sort_keys=True)
 
 
-def find_notebook_images(notebook_name: str):
-    imgs = sorted([p for p in WHITE_DIR.iterdir() if p.name.startswith(notebook_name)])
-    return imgs
-
-
 def preprocess_image(in_path: Path, out_path: Path):
     im = Image.open(in_path)
     # Always composite onto a white background, regardless of mode
@@ -410,48 +403,6 @@ def preprocess_image(in_path: Path, out_path: Path):
 
 
 # --- Google Vision OCR using API key (legacy) ---
-def vision_ocr_image(png_path: Path, api_key: str, retries: int = 3):
-    import base64
-
-    import requests
-
-    with open(png_path, "rb") as f:
-        content_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
-    payload = {
-        "requests": [
-            {
-                "image": {"content": content_b64},
-                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            }
-        ]
-    }
-
-    backoff = 1
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(url, json=payload, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                r = data.get("responses", [None])[0]
-                if r and "fullTextAnnotation" in r:
-                    return r["fullTextAnnotation"].get("text", "").strip()
-                return ""
-            elif resp.status_code in (429, 500, 502, 503, 504):
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            else:
-                # authentication or client error — stop retrying
-                print("Vision API error", resp.status_code, resp.text)
-                return None
-        except Exception:
-            time.sleep(backoff)
-            backoff *= 2
-    return None
-
-
 def google_vision_available() -> bool:
     """Check if Google Cloud Vision credentials are configured and valid.
 
@@ -495,46 +446,6 @@ def vision_ocr_image_service_account(png_path: Path):
     except Exception as e:
         print(f"Google Cloud Vision error: {e}")
         return None
-
-
-def make_pdf_from_images(image_paths, out_pdf: Path):
-    imgs = []
-    for p in image_paths:
-        # Open and ensure consistent RGB mode (avoiding potentially problematic RGBA/transparency issues in PDF)
-        im = Image.open(p).convert("RGBA")
-        bg = Image.new("RGB", im.size, (255, 255, 255))
-        bg.paste(im, mask=im.split()[3])
-        imgs.append(bg)
-    if not imgs:
-        return None
-
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
-
-    # Use ReportLab for more robust PDF generation instead of PIL's direct save
-    try:
-        from reportlab.pdfgen import canvas
-
-        c = canvas.Canvas(str(out_pdf))
-        for img in imgs:
-            # Set page size to image size
-            width, height = img.size
-            c.setPageSize((width, height))
-
-            # Convert PIL image to ReportLab ImageReader
-            # Flattening to simpler format often helps compatibility
-
-            c.drawInlineImage(img, 0, 0, width, height)
-            c.showPage()
-        c.save()
-        return out_pdf
-    except ImportError:
-        print(
-            "ReportLab not found, falling back to PIL PDF generation. Run 'uv add reportlab' for better compatibility."
-        )
-        # Fallback to PIL
-        first, rest = imgs[0], imgs[1:]
-        first.save(out_pdf, save_all=True, append_images=rest)
-        return out_pdf
 
 
 def sanitize_filename(name: str) -> str:
