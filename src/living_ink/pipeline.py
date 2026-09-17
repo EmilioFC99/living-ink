@@ -252,8 +252,21 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     return yaml_config
 
 
-YAML_CONFIG_PATH = get_config_path()
-yaml_config = load_yaml_config(YAML_CONFIG_PATH)
+_default_config: Optional[Dict[str, Any]] = None
+
+
+def get_default_config() -> Dict[str, Any]:
+    """Return the config loaded from the standard config path, loading it once.
+
+    Deferred rather than evaluated at import time because
+    :func:`load_yaml_config` writes to ``os.environ`` and configures the AI
+    provider; importing this module should do neither.
+    """
+    global _default_config
+    if _default_config is None:
+        _default_config = load_yaml_config(get_config_path())
+    return _default_config
+
 
 max_notebooks_per_run = int(os.environ.get("SYNC_MAX_NOTEBOOKS", 1))
 
@@ -321,8 +334,19 @@ def get_destinations_from_config(config_dict) -> List[Destination]:
     return dests
 
 
-# Construct global destinations list
-ACTIVE_DESTINATIONS = get_destinations_from_config(yaml_config)
+_default_destinations: Optional[List[Destination]] = None
+
+
+def get_default_destinations() -> List[Destination]:
+    """Return the destinations enabled by the standard config, building them once.
+
+    Deferred rather than evaluated at import time so that importing this module
+    neither reads config nor prints to stdout.
+    """
+    global _default_destinations
+    if _default_destinations is None:
+        _default_destinations = get_destinations_from_config(get_default_config())
+    return _default_destinations
 
 
 def get_state_file_path(dest_name: str) -> Path:
@@ -966,7 +990,7 @@ class SyncPipeline:
         self.data_dir = data_dir or DATA_DIR
         self.keep_temp = opts.keep_temp
 
-        if self.config_path and self.config_path != YAML_CONFIG_PATH:
+        if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)
             self.destinations = (
                 destinations
@@ -974,9 +998,9 @@ class SyncPipeline:
                 else get_destinations_from_config(self.raw_config)
             )
         else:
-            self.raw_config = yaml_config
+            self.raw_config = get_default_config()
             self.destinations = (
-                destinations if destinations is not None else list(ACTIVE_DESTINATIONS)
+                destinations if destinations is not None else list(get_default_destinations())
             )
 
         # 1. Connection properties
@@ -1114,7 +1138,7 @@ class SyncPipeline:
         Returns:
             Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
         """
-        active_dests = self.destinations or ACTIVE_DESTINATIONS
+        active_dests = self.destinations or get_default_destinations()
         needs_update: Dict[str, List[Destination]] = {}
         dest_states = {}
         for dest in active_dests:
@@ -1507,7 +1531,7 @@ class SyncPipeline:
 
             # Destinations that specifically request this notebook
             targets = needs_update.get(notebook_id, [])
-            active_dests = self.destinations or ACTIVE_DESTINATIONS
+            active_dests = self.destinations or get_default_destinations()
 
             # Fallback: if 'needs_update' is empty (forced run), target all active
             if not targets and active_dests:

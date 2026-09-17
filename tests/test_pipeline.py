@@ -239,18 +239,43 @@ def test_sync_pipeline_process_notebook_item():
 
 
 class TestImportPurity:
-    """Importing the pipeline module must not touch the filesystem."""
+    """Importing the pipeline module must have no observable side effects."""
 
-    def test_import_creates_no_directories(self, tmp_path):
-        """A bare import leaves LIVING_INK_DATA_DIR untouched."""
+    def _import_in_subprocess(self, tmp_path):
+        """Import the module in a clean interpreter and return its output."""
         env = {**os.environ, "LIVING_INK_DATA_DIR": str(tmp_path / "data")}
-        subprocess.run(
+        return subprocess.run(
             [sys.executable, "-c", "import living_ink.pipeline"],
             env=env,
             check=True,
             capture_output=True,
+            text=True,
         )
+
+    def test_import_creates_no_directories(self, tmp_path):
+        """A bare import leaves LIVING_INK_DATA_DIR untouched."""
+        self._import_in_subprocess(tmp_path)
         assert not (tmp_path / "data").exists()
+
+    def test_import_prints_nothing(self, tmp_path):
+        """A bare import does not build destinations, so it stays quiet."""
+        result = self._import_in_subprocess(tmp_path)
+        assert result.stdout == ""
+
+    def test_default_config_is_loaded_once(self, monkeypatch):
+        """get_default_config caches, so config is read a single time."""
+        monkeypatch.setattr(pipeline, "_default_config", None)
+        calls = []
+
+        def fake_load(path=None):
+            calls.append(path)
+            return {"ai": {"provider": "none"}}
+
+        monkeypatch.setattr(pipeline, "load_yaml_config", fake_load)
+
+        assert pipeline.get_default_config() == {"ai": {"provider": "none"}}
+        assert pipeline.get_default_config() == {"ai": {"provider": "none"}}
+        assert len(calls) == 1
 
     def test_ensure_runtime_dirs_creates_them(self, monkeypatch, tmp_path):
         """ensure_runtime_dirs creates every runtime folder on demand."""
