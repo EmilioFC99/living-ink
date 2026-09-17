@@ -438,7 +438,22 @@ def vision_ocr_image_service_account(png_path: Path):
 
 
 def sanitize_filename(name: str) -> str:
-    """Replace / and other problematic characters in notebook names for safe file paths."""
+    """Make a notebook name safe for a temporary working-file path.
+
+    Note:
+        This is deliberately *not* the same as
+        ``ObsidianDestination._sanitize_filename``. This one names throwaway
+        artifacts under the data directory, so it collapses spaces to
+        underscores for shell-friendliness; the Obsidian one names files the
+        user will see in their vault, so it keeps spaces and uses hyphens.
+        Merging the two would silently rename every note in existing vaults.
+
+    Args:
+        name: Raw notebook name.
+
+    Returns:
+        A path-safe variant of the name.
+    """
     return name.replace("/", "_").replace("\\", "_").replace(" ", "_")
 
 

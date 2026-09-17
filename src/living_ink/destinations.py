@@ -407,6 +407,11 @@ class ObsidianDestination(Destination):
         Replaces forbidden characters (/ \\ : * ? " < > | # ^ [ ]) with a hyphen,
         preserving regular spaces and alphanumeric characters.
 
+        Note:
+            Distinct from ``pipeline.sanitize_filename`` on purpose: this names
+            files the user sees in their vault, so spaces are preserved. The
+            pipeline's version names temporary artifacts and underscores them.
+
         Args:
             name: The raw string to sanitize.
 

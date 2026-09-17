@@ -19,9 +19,10 @@ import logging
 import os
 import subprocess
 import zipfile
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+
+from living_ink.models import Document
 
 logger = logging.getLogger(__name__)
 
@@ -32,55 +33,6 @@ DEFAULT_SSH_PORT = 22
 
 # Document storage path on the tablet
 XOCHITL_PATH = "/home/root/.local/share/remarkable/xochitl"
-
-
-@dataclass
-class Document:
-    """Represents a document or folder on the reMarkable tablet."""
-
-    id: str
-    hash: str
-    name: str
-    doc_type: str  # "DocumentType" or "CollectionType"
-    parent: str = ""
-    deleted: bool = False
-    pinned: bool = False
-    synced: bool = True  # False means cloud-archived (not on device)
-    last_modified: Optional[datetime] = None
-    size: int = 0
-    files: List[Dict[str, Any]] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    # SSH-specific: local path to the document folder
-    local_path: Optional[str] = None
-
-    @property
-    def is_folder(self) -> bool:
-        return self.doc_type == "CollectionType"
-
-    @property
-    def VissibleName(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.name
-
-    @property
-    def ID(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.id
-
-    @property
-    def Parent(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.parent
-
-    @property
-    def Type(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.doc_type
-
-    @property
-    def ModifiedClient(self) -> Optional[datetime]:
-        """Compatibility with cloud client naming."""
-        return self.last_modified
 
 
 class SSHClient:
