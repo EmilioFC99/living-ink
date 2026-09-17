@@ -3,11 +3,12 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from living_ink import pipeline
 from living_ink.destinations import AppleNotesDestination, Destination
-from living_ink.pipeline import SyncOptions, SyncPipeline
+from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
 
 
 class MockDestination(Destination):
@@ -289,3 +290,89 @@ class TestImportPurity:
         assert (tmp_path / "data").is_dir()
         assert (tmp_path / "data" / "white").is_dir()
         assert (tmp_path / "logs").is_dir()
+
+
+def make_job(**overrides) -> DocumentJob:
+    """Build a DocumentJob with harmless defaults for the field under test."""
+    fields = {
+        "item": {"ID": "nb-1"},
+        "notebook": "Test Notebook",
+        "notebook_id": "nb-1",
+        "doc_type": "notebook",
+        "version": "hash-1",
+        "safe_name": "Test_Notebook",
+        "folder_path": "",
+        "display_title": "Test Notebook",
+        "keep_temp": True,
+    }
+    fields.update(overrides)
+    return DocumentJob(**fields)
+
+
+class TestDocumentJob:
+    """The job carries the per-document state the stages share."""
+
+    def test_page_number_comes_from_the_image_name(self):
+        job = make_job(imgs=[Path("nb.page-4.png"), Path("nb.page-9.png")])
+
+        assert job.page_number(0) == 4
+        assert job.page_number(1) == 9
+
+    def test_page_number_falls_back_to_position(self):
+        assert make_job(imgs=[Path("nb.cover.png")]).page_number(0) == 1
+        assert make_job().page_number(2) == 3
+
+    def test_source_file_is_none_unless_the_document_was_retrieved(self, tmp_path):
+        assert make_job().source_file() is None
+        assert make_job(doc_file_path=tmp_path / "missing.pdf").source_file() is None
+
+        present = tmp_path / "book.pdf"
+        present.write_bytes(b"%PDF")
+        assert make_job(doc_file_path=present).source_file() == present
+
+    def test_subfolders_split_the_remarkable_path(self):
+        job = make_job(folder_path="Work / Projects / Q3")
+
+        assert job.full_subfolder() == "Work/Projects/Q3"
+        assert job.top_level_subfolder() == "Work"
+
+    def test_subfolders_are_none_at_the_library_root(self):
+        job = make_job()
+
+        assert job.full_subfolder() is None
+        assert job.top_level_subfolder() is None
+
+
+class TestJobHelpers:
+    """Small pure helpers the stages rely on."""
+
+    def test_version_prefers_the_content_hash(self):
+        assert pipeline._item_version({"hash": "abc", "Version": "3"}) == "abc"
+
+    def test_version_falls_back_to_the_integer_version(self):
+        assert pipeline._item_version({"Version": "7"}) == 7
+
+    def test_version_defaults_to_one_when_unusable(self):
+        assert pipeline._item_version({"Version": "not-a-number"}) == 1
+
+    def test_metadata_line_is_stripped_from_the_transcript(self, tmp_path):
+        transcript = tmp_path / "clean.txt"
+        transcript.write_text('{"notebook": "N"}\n\n### Page 1\n\nHello\n')
+
+        assert pipeline._strip_transcript_metadata(transcript) == "### Page 1\n\nHello"
+
+    def test_missing_transcript_reads_as_empty(self, tmp_path):
+        assert pipeline._strip_transcript_metadata(None) == ""
+        assert pipeline._strip_transcript_metadata(tmp_path / "gone.txt") == ""
+
+
+class TestRendererDispatch:
+    """Document type selects the renderer; unknown types render as notebooks."""
+
+    def test_pdf_and_epub_have_their_own_renderers(self):
+        assert SyncPipeline._RENDERERS["pdf"] is SyncPipeline._render_pdf
+        assert SyncPipeline._RENDERERS["epub"] is SyncPipeline._render_epub
+
+    def test_anything_else_renders_as_a_notebook(self):
+        assert SyncPipeline._RENDERERS.get("notebook") is None
+        assert SyncPipeline._RENDERERS.get("djvu") is None
