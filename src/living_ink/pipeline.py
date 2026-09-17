@@ -21,7 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
-from living_ink.config import get_config_path, get_data_dir, get_logs_dir
+from living_ink.config import find_repo_root, get_config_path, get_data_dir, get_logs_dir
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -65,18 +65,7 @@ for logger_name in [
     _l.setLevel(logging.ERROR)
 
 
-def _find_root() -> Optional[Path]:
-    """Find project root if running from a repository checkout."""
-    cwd = Path.cwd().resolve()
-    if (cwd / "pyproject.toml").exists():
-        return cwd
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return None
-
-
-ROOT = _find_root()
+ROOT = find_repo_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()

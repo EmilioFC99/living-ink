@@ -17,38 +17,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional, Type
 
-
-def get_root() -> Optional[Path]:
-    """Find the Living Ink root directory if running from a repo checkout.
-
-    Returns:
-        Path to repository root if found, else None.
-    """
-    cwd = Path.cwd()
-    if (
-        (cwd / "pyproject.toml").exists()
-        or (cwd / "config" / "config.yml").exists()
-        or (cwd / "config.yml").exists()
-    ):
-        return cwd
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return None
-
-
-def get_config_path(root: Optional[Path] = None) -> Path:
-    """Find the config.yml file, checking LIVING_INK_CONFIG_DIR first.
-
-    Args:
-        root: Optional repository root path.
-
-    Returns:
-        Path to resolved configuration file.
-    """
-    from living_ink.config import get_config_path as _get_config_path
-
-    return _get_config_path(root)
+from living_ink.config import get_config_path
 
 
 class BaseCommand(ABC):
@@ -530,7 +499,10 @@ class LivingInkCLI:
         """Initialize CLI with optional root path and command classes.
 
         Args:
-            root: Project root path (auto-discovered if None).
+            root: Project root path. Leave None to let ``get_config_path()``
+                run its full XDG resolution; passing a root pins config lookup
+                to that directory, which is mainly useful in tests. Use
+                :func:`living_ink.config.find_repo_root` to discover one.
             commands: Optional list of BaseCommand subclasses to register.
         """
         self.root = root
