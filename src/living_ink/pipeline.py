@@ -513,6 +513,74 @@ def log(msg):
         f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
 
+def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
+    """Clean all temporary working folders (PNG, OCR, PDF, Vision, Documents) and zip archives.
+
+    Args:
+        keep_temp: If True, preserve files on disk for debugging.
+    """
+    if keep_temp:
+        log("Preserving temporary working files (--keep-temp enabled).")
+        return
+
+    import shutil
+
+    temp_folders = [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]
+    for folder in temp_folders:
+        if folder.exists():
+            for item in folder.iterdir():
+                try:
+                    if item.is_file() or item.is_symlink():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                except Exception as e:
+                    logging.debug("Failed to remove temporary item %s: %s", item, e)
+            folder.mkdir(parents=True, exist_ok=True)
+
+    # Clean any lingering zip archives in DATA_DIR
+    if DATA_DIR.exists():
+        for zip_file in DATA_DIR.glob("*.zip"):
+            try:
+                zip_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -> None:
+    """Clean temporary artifacts for a specific completed notebook.
+
+    Args:
+        safe_notebook: Sanitized notebook name prefix.
+        keep_temp: If True, preserve files on disk.
+    """
+    if keep_temp:
+        return
+
+    import shutil
+
+    for folder in [WHITE_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]:
+        if folder.exists():
+            for p in folder.glob(f"{safe_notebook}*"):
+                try:
+                    if p.is_file() or p.is_symlink():
+                        p.unlink()
+                    elif p.is_dir():
+                        shutil.rmtree(p)
+                except Exception:
+                    pass
+
+    if VISION_DIR.exists():
+        for p in VISION_DIR.glob(f"{safe_notebook}*"):
+            try:
+                if p.is_file() or p.is_symlink():
+                    p.unlink()
+                elif p.is_dir():
+                    shutil.rmtree(p)
+            except Exception:
+                pass
+
+
 def validate_environment():
     """Check configuration health and fail fast with helpful docs if missing."""
     docs_path = ROOT / "docs" / "SETUP_GUIDE.md"
@@ -874,6 +942,11 @@ def main():
         action="store_true",
         help="Sync all document types (notebooks, PDFs, and EPUBs)",
     )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
+    )
     args = parser.parse_args()
 
     if args.ssh:
@@ -883,20 +956,11 @@ def main():
         os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
         os.environ["REMARKABLE_USE_SSH"] = "false"
 
-    # --- Cleanup all cached files for all notebooks at the start of each run ---
-    import shutil
+    # Clean temporary working artifacts at start of run and register exit cleanup
+    import atexit
 
-    # Clean all output folders (PNG, OCR, PDF, Vision) at the start of each run
-    for folder in [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR]:
-        if folder.exists():
-            for item in folder.iterdir():
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item)
-    # Ensure output folders exist after cleanup
-    for folder in [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR]:
-        folder.mkdir(exist_ok=True)
+    cleanup_temp_artifacts(keep_temp=args.keep_temp)
+    atexit.register(cleanup_temp_artifacts, keep_temp=args.keep_temp)
 
     # --- Step 0: List all notebooks ---
     from living_ink.api import get_rmapi
@@ -1392,14 +1456,14 @@ def main():
 
             log(traceback.format_exc())
 
-        # Legacy log update (kept to avoid breakage if referenced elsewhere, but logically handled above)
-        # We don't really need a 'global' success anymore, as per-dest success is what matters.
         if success:
             log(f"Notebook {notebook} processing complete.")
+            clean_notebook_temp_artifacts(safe_notebook, keep_temp=args.keep_temp)
         else:
             log(f"Notebook {notebook} processing FAILED.")
 
     log("Pipeline finished.")
+    cleanup_temp_artifacts(keep_temp=getattr(args, "keep_temp", False))
 
 
 if __name__ == "__main__":

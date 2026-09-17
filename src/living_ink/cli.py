@@ -86,6 +86,8 @@ def cmd_sync(args, root: Optional[Path] = None):
         sys.argv.extend(["--sync-epubs"])
     if hasattr(args, "all_types") and args.all_types:
         sys.argv.extend(["--all-types"])
+    if hasattr(args, "keep_temp") and args.keep_temp:
+        sys.argv.extend(["--keep-temp"])
 
     sync_main()
 
@@ -275,6 +277,11 @@ def main():
         "--all-types",
         action="store_true",
         help="Sync all document types (notebooks, PDFs, and EPUBs)",
+    )
+    sync_parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
     )
 
     # setup command
