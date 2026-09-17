@@ -392,7 +392,7 @@ def render_rm_file_to_png(
     """
     Render a .rm file to PNG image bytes.
 
-    Uses rmc to convert .rm to SVG, then cairosvg to convert to PNG.
+    Uses rmc to convert .rm to SVG, then PyMuPDF to rasterise it to PNG.
     The output is sized based on the SVG content bounds with a margin.
 
     Args:

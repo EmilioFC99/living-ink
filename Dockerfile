@@ -7,9 +7,8 @@ FROM ghcr.io/astral-sh/uv:0.6.14 AS uv_bin
 
 FROM python:3.11-slim-bookworm AS runtime
 
-# System runtime dependencies (libcairo2 needed for cairosvg stroke rendering)
+# System runtime dependencies (rendering is pure-Python via rmc + PyMuPDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libcairo2 \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*

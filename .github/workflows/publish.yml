@@ -44,10 +44,6 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      # libcairo2 is needed for cairosvg stroke rendering (mirrors the Dockerfile)
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcairo2
-
       - name: Install dependencies
         run: uv sync --all-extras
 
