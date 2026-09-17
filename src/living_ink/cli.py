@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Type
 
-from living_ink.config import get_config_path
+from living_ink.config import ConfigurationMissing, get_config_path
 
 
 class BaseCommand(ABC):
@@ -134,10 +134,48 @@ class SyncCommand(BaseCommand):
             options=SyncOptions.from_args(args),
             config_path=cfg_path if cfg_path.exists() else None,
         )
-        success = pipeline.run()
+        try:
+            success = pipeline.run()
+        except ConfigurationMissing as e:
+            return self._handle_missing_config(e, args)
         if not success:
             sys.exit(1)
         return 0
+
+    def _handle_missing_config(self, error: "ConfigurationMissing", args) -> int:
+        """Report a configuration problem and, if interactive, offer the wizard.
+
+        The pipeline only reports that configuration is unusable; whether to
+        interrupt the user and walk them through setup is a front-end decision,
+        so it is made here.
+
+        Args:
+            error: The configuration problem the pipeline reported.
+            args: Parsed arguments, reused if the sync is retried after setup.
+
+        Returns:
+            0 if setup ran and the retried sync succeeded, 1 otherwise.
+        """
+        print("\n" + "=" * 60)
+        print("CONFIGURATION ERROR")
+        print("=" * 60)
+        print(str(error))
+        print("-" * 60)
+        print(error.hint)
+        print("=" * 60 + "\n")
+
+        if not sys.stdin.isatty():
+            return 1
+
+        try:
+            choice = input("Would you like to run the interactive setup wizard now? [Y/n]: ")
+        except (KeyboardInterrupt, EOFError):
+            return 1
+
+        if choice.strip().lower() not in ("", "y", "yes"):
+            return 1
+
+        return SetupCommand(root=self.root).run(args)
 
 
 class SetupCommand(BaseCommand):

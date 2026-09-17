@@ -17,7 +17,13 @@ from PIL import Image, ImageFilter, ImageOps
 
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
-from living_ink.config import find_repo_root, get_config_path, get_data_dir, get_logs_dir
+from living_ink.config import (
+    ConfigurationMissing,
+    find_repo_root,
+    get_config_path,
+    get_data_dir,
+    get_logs_dir,
+)
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -550,7 +556,12 @@ def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -
 
 
 def validate_environment():
-    """Check configuration health and fail fast with helpful docs if missing."""
+    """Check configuration health, logging warnings and failing on hard errors.
+
+    Raises:
+        ConfigurationMissing: If configuration is absent or invalid. Offering
+            the setup wizard is the CLI's decision, not this function's.
+    """
     docs_path = ROOT / "docs" / "SETUP_GUIDE.md"
     docs_hint = f"See {docs_path} for instructions."
 
@@ -624,28 +635,7 @@ def validate_environment():
         log(docs_hint)
         log("=" * 60 + "\n")
 
-        print("\n" + "=" * 60)
-        print("CONFIGURATION ERROR")
-        print("=" * 60)
-        print(msg)
-        print("-" * 60)
-        print(docs_hint)
-        print("=" * 60 + "\n")
-
-        if sys.stdin.isatty():
-            try:
-                prompt_text = "Would you like to run the interactive setup wizard now? [Y/n]: "
-                choice = input(prompt_text).strip().lower()
-                if choice in ("", "y", "yes"):
-                    from living_ink.setup_wizard import run_wizard
-
-                    run_wizard()
-                    sys.exit(0)
-            except (KeyboardInterrupt, EOFError):
-                pass
-
-        # Hard exit if non-interactive or user declines
-        sys.exit(1)
+        raise ConfigurationMissing(msg, hint=docs_hint)
 
     log("Configuration valid.")
 

@@ -10,6 +10,28 @@ from pathlib import Path
 from typing import Optional
 
 
+class ConfigurationMissing(Exception):
+    """Raised when the pipeline cannot run because configuration is absent or invalid.
+
+    Carries the remedy rather than acting on it: deciding whether to prompt the
+    user, launch the wizard or just exit is the CLI's job, so the pipeline
+    signals the problem and stays out of the interaction.
+
+    Attributes:
+        hint: Human-readable next step, e.g. "run: living-ink setup".
+    """
+
+    def __init__(self, message: str, hint: str = "run: living-ink setup"):
+        """Initialize the error.
+
+        Args:
+            message: What is wrong with the configuration.
+            hint: The suggested remedy, shown to the user by the CLI.
+        """
+        super().__init__(message)
+        self.hint = hint
+
+
 def find_repo_root() -> Optional[Path]:
     """Locate the project root when running from a source checkout.
 
