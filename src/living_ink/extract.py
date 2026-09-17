@@ -9,9 +9,10 @@ import os
 import re
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import pymupdf as fitz  # PyMuPDF
 from PIL import Image
@@ -574,6 +575,39 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     return rm_files
 
 
+@contextmanager
+def _open_document_zip(zip_path: Path) -> Iterator[Path]:
+    """Extract a document zip into a temporary directory for the caller.
+
+    Every operation that needs the *whole* document — as opposed to a single
+    named member — goes through here, so extraction, cleanup, and the
+    path-traversal guard live in one place.
+
+    Args:
+        zip_path: Path to the reMarkable document zip.
+
+    Yields:
+        Path to the temporary directory holding the extracted contents. It is
+        deleted when the block exits.
+
+    Raises:
+        ValueError: If an entry would be written outside the temp directory.
+            These zips come off the user's own tablet, but the whole point of
+            a single extract site is that the check is written once.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir).resolve()
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for name in zf.namelist():
+                target = (tmpdir_path / name).resolve()
+                if not target.is_relative_to(tmpdir_path):
+                    raise ValueError(f"Refusing to extract '{name}' outside the temp directory.")
+            zf.extractall(tmpdir_path)
+
+        yield tmpdir_path
+
+
 def render_page_from_document_zip(
     zip_path: Path, page: int = 1, background_color: Optional[str] = None
 ) -> Optional[bytes]:
@@ -589,12 +623,7 @@ def render_page_from_document_zip(
     Returns:
         PNG image bytes, or None if rendering failed or page doesn't exist
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
-
+    with _open_document_zip(zip_path) as tmpdir_path:
         rm_files = _get_ordered_rm_files(tmpdir_path)
 
         # Validate page number
@@ -616,13 +645,10 @@ def get_document_page_count(zip_path: Path) -> int:
     Returns:
         Number of pages (0 if unable to determine)
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
-
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmpdir_path)
-
-        return len(list(tmpdir_path.glob("**/*.rm")))
+    # Counted via the same ordered list the renderer walks, so the count and
+    # the valid page numbers for render_page_from_document_zip() cannot drift.
+    with _open_document_zip(zip_path) as tmpdir_path:
+        return len(_get_ordered_rm_files(tmpdir_path))
 
 
 def normalize_tag(tag: str) -> str:
