@@ -736,7 +736,7 @@ def get_document_type(item: Any, client: Optional[Any] = None) -> str:
     Returns:
         One of 'notebook', 'pdf', or 'epub'.
     """
-    if client is not None and hasattr(client, "get_file_type"):
+    if client is not None:
         try:
             ft = client.get_file_type(item)
             if ft in ("pdf", "epub"):
@@ -1273,6 +1273,7 @@ class SyncPipeline:
                 log(f'Document "{notebook}" not found in your reMarkable library. Skipping.')
                 return False
 
+            from living_ink.api import download_raw_file
             from living_ink.extract import (
                 extract_raw_document_from_zip,
                 extract_tags_from_zip,
@@ -1300,8 +1301,8 @@ class SyncPipeline:
             if doc_type == "pdf":
                 # 1. Extract raw PDF
                 extract_raw_document_from_zip(tmp_zip, doc_file_path)
-                if not doc_file_path.exists() and hasattr(client, "download_raw_file"):
-                    raw_pdf_bytes = client.download_raw_file(doc, "pdf")
+                if not doc_file_path.exists():
+                    raw_pdf_bytes = download_raw_file(client, doc, "pdf")
                     if raw_pdf_bytes:
                         doc_file_path.write_bytes(raw_pdf_bytes)
 
@@ -1335,8 +1336,8 @@ class SyncPipeline:
             elif doc_type == "epub":
                 # 1. Extract raw EPUB
                 extract_raw_document_from_zip(tmp_zip, doc_file_path)
-                if not doc_file_path.exists() and hasattr(client, "download_raw_file"):
-                    raw_epub_bytes = client.download_raw_file(doc, "epub")
+                if not doc_file_path.exists():
+                    raw_epub_bytes = download_raw_file(client, doc, "epub")
                     if raw_epub_bytes:
                         doc_file_path.write_bytes(raw_epub_bytes)
 

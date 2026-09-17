@@ -6,7 +6,16 @@ and FallbackClient failover behavior.
 
 from unittest.mock import MagicMock, patch
 
-from living_ink.api import FallbackClient, get_rmapi
+import pytest
+
+from living_ink.api import (
+    FallbackClient,
+    download_raw_file,
+    get_document_tags,
+    get_file_type,
+    get_rmapi,
+)
+from living_ink.transport import UnsupportedOperation
 
 
 def test_get_rmapi_ssh_preferred_connected(monkeypatch, tmp_path):
@@ -117,3 +126,87 @@ def test_fallback_client_download_failover():
 
     assert content == b"zip-content"
     assert client.active is backup
+
+
+class TestFallbackIsUniform:
+    """Every transport operation, not just two, retries on the backup client."""
+
+    FAILOVER_CALLS = [
+        ("check_connection", (), True),
+        ("get_doc", ("doc-1",), "a-doc"),
+        ("get_file_type", (MagicMock(),), "pdf"),
+        ("download_raw_file", (MagicMock(), "pdf"), b"%PDF"),
+        ("get_tags", (MagicMock(),), ["work"]),
+    ]
+
+    @pytest.mark.parametrize("method,args,expected", FAILOVER_CALLS)
+    def test_failover(self, method, args, expected):
+        """A primary failure is retried on the backup for each operation."""
+        primary = MagicMock()
+        getattr(primary, method).side_effect = RuntimeError("primary down")
+        backup = MagicMock()
+        getattr(backup, method).return_value = expected
+
+        client = FallbackClient(primary_client=primary, backup_client=backup)
+
+        assert getattr(client, method)(*args) == expected
+        assert client.active is backup
+
+    @pytest.mark.parametrize("method,args,expected", FAILOVER_CALLS)
+    def test_raises_when_there_is_no_backup(self, method, args, expected):
+        """Without a backup the original error surfaces instead of being masked."""
+        primary = MagicMock()
+        getattr(primary, method).side_effect = RuntimeError("primary down")
+
+        client = FallbackClient(primary_client=primary, backup_client=None)
+
+        with pytest.raises(RuntimeError, match="primary down"):
+            getattr(client, method)(*args)
+
+    def test_unsupported_operation_is_not_retried(self):
+        """A permanent capability gap propagates without touching the backup."""
+        primary = MagicMock()
+        primary.get_tags.side_effect = UnsupportedOperation("not on this transport")
+        backup = MagicMock()
+
+        client = FallbackClient(primary_client=primary, backup_client=backup)
+
+        with pytest.raises(UnsupportedOperation):
+            client.get_tags(MagicMock())
+        backup.get_tags.assert_not_called()
+        assert client.active is primary
+
+
+class TestTransportHelpers:
+    """The module-level helpers degrade when a transport cannot answer."""
+
+    def test_get_file_type_falls_back_to_the_document_name(self):
+        """An unsupported transport leaves the name as the only signal."""
+        client = MagicMock()
+        client.get_file_type.side_effect = UnsupportedOperation("no")
+        doc = MagicMock(VissibleName="Contract.pdf")
+
+        assert get_file_type(client, doc) == "pdf"
+
+    def test_get_file_type_defaults_to_notebook(self):
+        """A plain name with no extension is a notebook."""
+        client = MagicMock()
+        client.get_file_type.return_value = None
+        doc = MagicMock(VissibleName="Meeting Notes")
+
+        assert get_file_type(client, doc) == "notebook"
+
+    def test_download_raw_file_returns_none_when_unsupported(self):
+        """An unsupported raw download is a None, not an exception."""
+        client = MagicMock()
+        client.download_raw_file.side_effect = UnsupportedOperation("no")
+
+        assert download_raw_file(client, MagicMock(), "pdf") is None
+
+    def test_get_document_tags_falls_back_to_the_document(self):
+        """Tags already on the document are used when the transport fails."""
+        client = MagicMock()
+        client.get_tags.side_effect = RuntimeError("offline")
+        doc = MagicMock(tags=["ideas"])
+
+        assert get_document_tags(client, doc) == ["ideas"]
