@@ -2,7 +2,6 @@
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
 import datetime
-import importlib.util
 import json
 import logging
 import os
@@ -247,12 +246,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
 YAML_CONFIG_PATH = get_config_path()
 yaml_config = load_yaml_config(YAML_CONFIG_PATH)
 
-# Load config
-CONFIG_PATH = ROOT / "config.py" if ROOT else Path("config.py")
 max_notebooks_per_run = int(os.environ.get("SYNC_MAX_NOTEBOOKS", 1))
-
-if CONFIG_PATH.exists():
-    spec = importlib.util.spec_from_file_location("config", str(CONFIG_PATH))
 
 # --- DESTINATION SETUP ---
 
@@ -319,15 +313,7 @@ def get_destinations_from_config(config_dict) -> List[Destination]:
 
 
 # Construct global destinations list
-ACTIVE_DESTINATIONS = get_destinations_from_config(yaml_config if "yaml_config" in locals() else {})
-
-if CONFIG_PATH.exists():
-    spec = importlib.util.spec_from_file_location("config", str(CONFIG_PATH))
-    config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config)
-    # Prefer legacy config.py if it exists, otherwise fall back to env/default
-    if hasattr(config, "max_notebooks_per_run"):
-        max_notebooks_per_run = getattr(config, "max_notebooks_per_run")
+ACTIVE_DESTINATIONS = get_destinations_from_config(yaml_config)
 
 
 def get_state_file_path(dest_name: str) -> Path:
