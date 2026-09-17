@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Living Ink** is a production-grade automated pipeline that syncs handwritten notebooks from a **reMarkable tablet** to digital note-taking apps (**Apple Notes** and **Obsidian**). It connects to the tablet via USB SSH or reMarkable Cloud, renders pages to images, performs OCR and text structuring via multimodal LLMs (Gemini, OpenAI, Ollama, etc.), and publishes structured notes.
+**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to **Apple Notes** and **Obsidian**. It connects over USB SSH or reMarkable Cloud, renders pages to images, transcribes them with a multimodal LLM (Gemini, OpenAI, Ollama, …), and publishes structured notes.
 
 - **Language**: Python 3.10+
 - **Package Manager**: [uv](https://docs.astral.sh/uv/) (never pip)
@@ -14,37 +14,34 @@
 
 ```
 living-ink/
-├── src/living_ink/              # Core Python package
-│   ├── __init__.py              # Package init, version
+├── src/living_ink/
 │   ├── __main__.py              # python -m living_ink entry point
-│   ├── api.py                   # reMarkable Cloud/SSH API client factory
-│   ├── cli.py                   # Main CLI entry point (`living-ink`)
-│   ├── config.py                # XDG path resolution & configuration helpers
-│   ├── pipeline.py              # Main sync pipeline orchestrator
-│   ├── sync.py                  # Cloud sync protocol (v3/v4) implementation
-│   ├── ssh.py                   # Direct USB SSH transport to tablet
-│   ├── extract.py               # .rm binary → SVG → PNG rendering
-│   ├── clean.py                 # Multimodal AI vision OCR & text cleanup
-│   ├── providers.py             # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
-│   ├── setup_wizard.py          # Interactive onboarding setup wizard
-│   ├── destinations.py          # Pluggable publish targets (Apple Notes, Obsidian)
+│   ├── cli.py                   # CLI entry point (`living-ink`): sync | setup | status
+│   ├── pipeline.py              # SyncPipeline orchestrator + processing stages
+│   ├── settings.py              # Settings: resolved, typed configuration
+│   ├── config.py                # XDG path resolution & config helpers
+│   ├── models.py                # Shared data models
+│   ├── transport.py             # RemarkableTransport Protocol
+│   ├── api.py                   # Client factory + automatic fallback
+│   ├── sync.py                  # Cloud sync protocol (v3/v4)
+│   ├── ssh.py                   # USB SSH transport
+│   ├── extract.py               # .rm → SVG → PNG, PDF/EPUB handling
+│   ├── clean.py                 # Vision OCR & text cleanup
+│   ├── providers.py             # AI providers (presets + registry)
+│   ├── destinations.py          # Publish targets (ABC + registry)
+│   ├── setup_wizard.py          # Interactive onboarding
 │   ├── ocr_prompt.txt           # System prompt for vision OCR
-│   └── openai_cleanup_prompt.txt# System prompt for text repair
-├── scripts/
-│   ├── process_notebook.py      # Backwards-compatible proxy to living_ink.pipeline
-│   ├── cli.py                   # CLI wrapper entry point
-│   └── setup.py                 # Setup wizard runner
-├── tests/                       # Complete pytest suite
-├── docs/                        # User and developer documentation
-│   ├── SETUP_GUIDE.md           # API key / credential setup
-│   └── USER_MANUAL.md           # End-user usage guide
-├── config/
-│   └── config.yml.example       # Configuration template
-├── pyproject.toml               # Project metadata, Hatchling config, and dependencies
+│   ├── openai_cleanup_prompt.txt# System prompt for text repair
+│   └── cleanup_prompt.txt       # System prompt for local cleanup
+├── tests/                       # pytest suite + test_docker.sh smoke tests
+├── docs/                        # SETUP_GUIDE.md, USER_MANUAL.md, TEST_PLAN.md
+├── pyproject.toml               # Project metadata, Hatchling config, dependencies
 ├── install.sh                   # One-line installer
 ├── Dockerfile                   # Multi-stage production container image
 └── docker-compose.yml           # Compose file (CLI & background daemon)
 ```
+
+Deeper architectural notes — the transport Protocol, the destination and provider registries, and the notebook processing stages — live in `AGENTS.md`.
 
 ## Stateless Repository & XDG Standards
 
@@ -52,6 +49,10 @@ The repository is completely stateless:
 - **User Config**: Resolves to `~/.config/living-ink/config.yml` (overridable via `LIVING_INK_CONFIG` or `LIVING_INK_CONFIG_DIR`).
 - **Runtime Data**: Resolves to `~/.local/share/living-ink/` (overridable via `LIVING_INK_DATA_DIR`).
 - Personal tokens, credentials, and downloaded notebooks must NEVER be committed to git.
+
+## Configuration
+
+Settings are resolved once by `settings.Settings.resolve(config)`, which merges `config.yml` with the environment into one frozen typed object. Precedence is **CLI options > env var > config file > default**. A new setting means one field on `Settings` plus one line in `resolve()`; do not write settings back into `os.environ`.
 
 ## Package Management
 
@@ -94,3 +95,9 @@ uv run living-ink sync
 # Or run as module
 uv run python -m living_ink status
 ```
+
+## Conventions
+
+- Google docstrings on all modules, classes, and functions.
+- Feature branches: `feat/<description>`, bug fixes: `fix/<description>`.
+- Preserve existing comments and docstrings in code you are not modifying.
