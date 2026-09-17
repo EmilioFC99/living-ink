@@ -15,9 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from PIL import Image, ImageFilter, ImageOps
 
-# Ensure living_ink is importable
-sys.path.append(str(Path(__file__).parent.parent))
-
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
 from living_ink.config import find_repo_root, get_config_path, get_data_dir, get_logs_dir
