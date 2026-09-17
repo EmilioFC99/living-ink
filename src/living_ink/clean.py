@@ -67,7 +67,7 @@ def _read_prompt_instructions() -> str:
 def configure(config: dict) -> None:
     """Initialize the AI provider from the parsed YAML config.
 
-    Should be called once at startup (from ``process_notebook.py``).
+    Should be called once at startup (from ``living_ink.pipeline`` or ``SyncPipeline``).
     If not called, ``repair_text_with_openai()`` will attempt to
     auto-configure from legacy env vars.
 

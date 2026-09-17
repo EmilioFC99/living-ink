@@ -111,7 +111,7 @@ docker compose --profile daemon up -d
 ### Run Clean Docker Smoke Tests
 ```bash
 # Test build, CLI entrypoint, unconfigured status, and live sync against an ephemeral test vault
-./scripts/test_docker.sh
+./tests/test_docker.sh
 ```
 
 ## Acknowledgements

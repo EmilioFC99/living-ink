@@ -12,7 +12,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from PIL import Image, ImageFilter, ImageOps
@@ -94,139 +94,169 @@ OCR_DIR.mkdir(parents=True, exist_ok=True)
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # --- CONFIGURATION LOADING (YAML) ---
-YAML_CONFIG_PATH = get_config_path()
+def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load configuration from YAML and apply settings to environment.
 
-if YAML_CONFIG_PATH.exists():
-    try:
-        with open(YAML_CONFIG_PATH, "r") as f:
-            try:
-                yaml_config = yaml.safe_load(f) or {}
-            except yaml.YAMLError as ye:
-                print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
-                print("Please check your indentation. YAML is very sensitive to spaces.")
-                if hasattr(ye, "problem_mark"):
-                    mark = ye.problem_mark
-                    print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
-                print(f"Details: {ye}\n")
-                yaml_config = {}
+    Args:
+        config_path: Path to YAML config file. Defaults to get_config_path().
 
-            # 1. OpenAI
-            if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
-                os.environ["OPENAI_API_KEY"] = str(yaml_config["openai"]["api_key"]).strip()
+    Returns:
+        Dictionary containing the parsed YAML configuration.
+    """
+    cfg_path = config_path or get_config_path()
+    yaml_config: Dict[str, Any] = {}
 
-            # 2. reMarkable
-            if "remarkable" in yaml_config:
-                rm_cfg = yaml_config["remarkable"]
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                try:
+                    yaml_config = yaml.safe_load(f) or {}
+                except yaml.YAMLError as ye:
+                    print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
+                    print("Please check your indentation. YAML is very sensitive to spaces.")
+                    if hasattr(ye, "problem_mark"):
+                        mark = ye.problem_mark
+                        print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
+                    print(f"Details: {ye}\n")
+                    yaml_config = {}
 
-                if "preferred_connection" in rm_cfg and rm_cfg["preferred_connection"]:
-                    os.environ["REMARKABLE_PREFERRED_CONNECTION"] = (
-                        str(rm_cfg["preferred_connection"]).strip().lower()
+                # 1. OpenAI
+                if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
+                    os.environ.setdefault(
+                        "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
                     )
 
-                if "device_token" in rm_cfg and rm_cfg["device_token"]:
-                    os.environ["REMARKABLE_TOKEN"] = str(rm_cfg["device_token"]).strip()
+                # 2. reMarkable
+                if "remarkable" in yaml_config:
+                    rm_cfg = yaml_config["remarkable"]
 
-                # SSH connection settings
-                ssh_enabled = (
-                    rm_cfg.get("use_ssh") if "use_ssh" in rm_cfg else yaml_config.get("use_ssh")
-                )
-                if ssh_enabled is not None:
-                    if isinstance(ssh_enabled, bool):
-                        os.environ["REMARKABLE_USE_SSH"] = "true" if ssh_enabled else "false"
-                    elif str(ssh_enabled).strip().lower() in ("1", "true", "yes"):
-                        os.environ["REMARKABLE_USE_SSH"] = "true"
-                    else:
-                        os.environ["REMARKABLE_USE_SSH"] = "false"
+                    if "preferred_connection" in rm_cfg and rm_cfg["preferred_connection"]:
+                        os.environ.setdefault(
+                            "REMARKABLE_PREFERRED_CONNECTION",
+                            str(rm_cfg["preferred_connection"]).strip().lower(),
+                        )
 
-                if "ssh_host" in rm_cfg and rm_cfg["ssh_host"]:
-                    os.environ["REMARKABLE_SSH_HOST"] = str(rm_cfg["ssh_host"]).strip()
+                    if "device_token" in rm_cfg and rm_cfg["device_token"]:
+                        os.environ.setdefault(
+                            "REMARKABLE_TOKEN", str(rm_cfg["device_token"]).strip()
+                        )
 
-                if "ssh_port" in rm_cfg and rm_cfg["ssh_port"]:
-                    os.environ["REMARKABLE_SSH_PORT"] = str(rm_cfg["ssh_port"]).strip()
+                    # SSH connection settings
+                    ssh_enabled = (
+                        rm_cfg.get("use_ssh") if "use_ssh" in rm_cfg else yaml_config.get("use_ssh")
+                    )
+                    if ssh_enabled is not None and "REMARKABLE_USE_SSH" not in os.environ:
+                        if isinstance(ssh_enabled, bool):
+                            os.environ["REMARKABLE_USE_SSH"] = "true" if ssh_enabled else "false"
+                        elif str(ssh_enabled).strip().lower() in ("1", "true", "yes"):
+                            os.environ["REMARKABLE_USE_SSH"] = "true"
+                        else:
+                            os.environ["REMARKABLE_USE_SSH"] = "false"
 
-                if "ssh_user" in rm_cfg and rm_cfg["ssh_user"]:
-                    os.environ["REMARKABLE_SSH_USER"] = str(rm_cfg["ssh_user"]).strip()
+                    if "ssh_host" in rm_cfg and rm_cfg["ssh_host"]:
+                        os.environ.setdefault(
+                            "REMARKABLE_SSH_HOST", str(rm_cfg["ssh_host"]).strip()
+                        )
 
-            # 3. Google Vision (Handle JSON content directly or file path)
-            if "google_vision" in yaml_config:
-                gv = yaml_config["google_vision"]
+                    if "ssh_port" in rm_cfg and rm_cfg["ssh_port"]:
+                        os.environ.setdefault(
+                            "REMARKABLE_SSH_PORT", str(rm_cfg["ssh_port"]).strip()
+                        )
 
-                # Option A: Path to JSON file (Preferred for humans)
-                if "credentials_path" in gv and gv["credentials_path"]:
-                    path_str = str(gv["credentials_path"]).strip()
-                    # Handle typical user paths like ~/Documents
-                    expanded_path = os.path.expanduser(path_str)
+                    if "ssh_user" in rm_cfg and rm_cfg["ssh_user"]:
+                        os.environ.setdefault(
+                            "REMARKABLE_SSH_USER", str(rm_cfg["ssh_user"]).strip()
+                        )
 
-                    if os.path.exists(expanded_path):
-                        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
-                    else:
-                        print(f"❌ Config Error: credentials_path file not found at: {path_str}")
+                # 3. Google Vision (Handle JSON content directly or file path)
+                if "google_vision" in yaml_config:
+                    gv = yaml_config["google_vision"]
 
-                # Option B: Embedded JSON content
-                elif "credentials_json" in gv:
-                    creds_content = gv["credentials_json"]
+                    # Option A: Path to JSON file (Preferred for humans)
+                    if "credentials_path" in gv and gv["credentials_path"]:
+                        path_str = str(gv["credentials_path"]).strip()
+                        # Handle typical user paths like ~/Documents
+                        expanded_path = os.path.expanduser(path_str)
 
-                    # Validate if it looks like JSON
-                    if isinstance(creds_content, str):
-                        creds_content = creds_content.strip()
-                        if not creds_content.startswith("{"):
+                        if os.path.exists(expanded_path):
+                            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
+                        else:
                             print(
-                                "⚠️ Warning: 'credentials_json' in config.yml does not start with '{'. Did you forget the indentation?"
+                                f"❌ Config Error: credentials_path file not found at: {path_str}"
                             )
 
-                    if isinstance(creds_content, dict):
-                        creds_content = json.dumps(creds_content)
+                    # Option B: Embedded JSON content
+                    elif "credentials_json" in gv:
+                        creds_content = gv["credentials_json"]
 
-                    # Write to config/google_creds.json
-                    creds_path = YAML_CONFIG_PATH.parent / "google_creds.json"
-                    try:
-                        if not creds_path.exists() or creds_path.read_text() != creds_content:
-                            creds_path.write_text(creds_content)
-                        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
-                    except Exception as weave_err:
-                        print(f"❌ Error writing google_creds.json: {weave_err}")
+                        # Validate if it looks like JSON
+                        if isinstance(creds_content, str):
+                            creds_content = creds_content.strip()
+                            if not creds_content.startswith("{"):
+                                print(
+                                    "⚠️ Warning: 'credentials_json' in config.yml does not start with '{'. Did you forget the indentation?"
+                                )
 
-            # 4. Sync Settings (Global vars that will be picked up later)
-            if "sync" in yaml_config:
-                if "max_notebooks_per_run" in yaml_config["sync"]:
-                    os.environ["SYNC_MAX_NOTEBOOKS"] = str(
-                        yaml_config["sync"]["max_notebooks_per_run"]
-                    )
-                if "sync_pdfs" in yaml_config["sync"]:
-                    val = yaml_config["sync"]["sync_pdfs"]
-                    os.environ["SYNC_PDFS"] = (
-                        "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
-                    )
-                if "sync_epubs" in yaml_config["sync"]:
-                    val = yaml_config["sync"]["sync_epubs"]
-                    os.environ["SYNC_EPUBS"] = (
-                        "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
-                    )
+                        if isinstance(creds_content, dict):
+                            creds_content = json.dumps(creds_content)
 
-            # 5. Apple Notes Settings
-            if "apple_notes" in yaml_config:
-                if "folder_name" in yaml_config["apple_notes"]:
-                    os.environ["APPLE_NOTES_FOLDER"] = str(
-                        yaml_config["apple_notes"]["folder_name"]
-                    )
+                        # Write to config/google_creds.json
+                        creds_path = cfg_path.parent / "google_creds.json"
+                        try:
+                            if not creds_path.exists() or creds_path.read_text() != creds_content:
+                                creds_path.write_text(creds_content)
+                            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
+                        except Exception as weave_err:
+                            print(f"❌ Error writing google_creds.json: {weave_err}")
 
-            # 6. AI Provider — initialize from new 'ai' section or legacy 'openai' section
-            configure_ai_provider(yaml_config)
+                # 4. Sync Settings (Global vars that will be picked up later)
+                if "sync" in yaml_config:
+                    if "max_notebooks_per_run" in yaml_config["sync"]:
+                        os.environ["SYNC_MAX_NOTEBOOKS"] = str(
+                            yaml_config["sync"]["max_notebooks_per_run"]
+                        )
+                    if "sync_pdfs" in yaml_config["sync"]:
+                        val = yaml_config["sync"]["sync_pdfs"]
+                        os.environ["SYNC_PDFS"] = (
+                            "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
+                        )
+                    if "sync_epubs" in yaml_config["sync"]:
+                        val = yaml_config["sync"]["sync_epubs"]
+                        os.environ["SYNC_EPUBS"] = (
+                            "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
+                        )
 
-    except Exception as e:
-        print(f"Critical error loading config.yml: {e}")
+                # 5. Apple Notes Settings
+                if "apple_notes" in yaml_config:
+                    if "folder_name" in yaml_config["apple_notes"]:
+                        os.environ["APPLE_NOTES_FOLDER"] = str(
+                            yaml_config["apple_notes"]["folder_name"]
+                        )
 
-# Legacy Fallback
-try:
-    from dotenv import load_dotenv
+                # 6. AI Provider — initialize from new 'ai' section or legacy 'openai' section
+                configure_ai_provider(yaml_config)
 
-    load_dotenv()
-except ImportError:
-    pass
+        except Exception as e:
+            print(f"Critical error loading config.yml: {e}")
+
+    # Legacy Fallback
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+
+    return yaml_config
+
+
+YAML_CONFIG_PATH = get_config_path()
+yaml_config = load_yaml_config(YAML_CONFIG_PATH)
 
 # Load config
-CONFIG_PATH = ROOT / "config.py"
+CONFIG_PATH = ROOT / "config.py" if ROOT else Path("config.py")
 max_notebooks_per_run = int(os.environ.get("SYNC_MAX_NOTEBOOKS", 1))
 
 if CONFIG_PATH.exists():
@@ -903,205 +933,338 @@ def select_notebook_interactive(
         print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
 
 
-def main():
-    # At the start of main(), clear the log for a new run
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
-        f.write("")
+class SyncPipeline:
+    """Orchestrator for syncing reMarkable notebooks to configured destinations.
 
-    validate_environment()
+    Encapsulates configuration, runtime options, document discovery, rendering,
+    OCR text extraction, cleanup, and publication to destinations.
+    """
 
-    log("Pipeline started.")
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        data_dir: Optional[Path] = None,
+        notebook: Optional[str] = None,
+        limit: Optional[int] = None,
+        folder: Optional[str] = None,
+        ssh: bool = False,
+        cloud: bool = False,
+        preferred_connection: Optional[str] = None,
+        sync_pdfs: Optional[bool] = None,
+        sync_epubs: Optional[bool] = None,
+        all_types: bool = False,
+        keep_temp: bool = False,
+        destinations: Optional[List[Destination]] = None,
+    ):
+        """Initialize the SyncPipeline with base configuration and runtime overrides.
 
-    # --- Argument parsing ---
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--notebook",
-        help="Process a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
-    )
-    parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process per run")
-    parser.add_argument(
-        "--folder",
-        default=os.environ.get("APPLE_NOTES_FOLDER", "Living Ink"),
-        help="Apple Notes folder name",
-    )
-    parser.add_argument("--state-file", help="Ignored (legacy compatibility)")
-    parser.add_argument(
-        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
-    )
-    parser.add_argument(
-        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
-    )
-    parser.add_argument(
-        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
-    )
-    parser.add_argument(
-        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
-    )
-    parser.add_argument(
-        "--all-types",
-        action="store_true",
-        help="Sync all document types (notebooks, PDFs, and EPUBs)",
-    )
-    parser.add_argument(
-        "--keep-temp",
-        action="store_true",
-        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
-    )
-    args = parser.parse_args()
+        Args:
+            config_path: Path to YAML config file. Defaults to standard config path.
+            data_dir: Path to runtime data directory. Defaults to standard data dir.
+            notebook: Optional target notebook by name, folder path, or ID.
+            limit: Maximum number of notebooks to process.
+            folder: Optional Apple Notes folder override.
+            ssh: Force sync via USB SSH instead of Cloud.
+            cloud: Force sync via reMarkable Cloud instead of SSH.
+            preferred_connection: Preferred connection ('ssh' or 'cloud').
+            sync_pdfs: Sync PDF documents and annotations.
+            sync_epubs: Sync EPUB ebooks and annotations.
+            all_types: Sync all document types (notebooks, PDFs, and EPUBs).
+            keep_temp: If True, preserve temporary rendered artifacts for debugging.
+            destinations: Explicit list of destinations. Defaults to active destinations from config.
+        """
+        self.config_path = config_path or get_config_path()
+        self.data_dir = data_dir or DATA_DIR
+        self.keep_temp = keep_temp
 
-    if args.ssh:
-        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "ssh"
-        os.environ["REMARKABLE_USE_SSH"] = "true"
-    elif args.cloud:
-        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
-        os.environ["REMARKABLE_USE_SSH"] = "false"
+        if self.config_path and self.config_path != YAML_CONFIG_PATH:
+            self.raw_config = load_yaml_config(self.config_path)
+            self.destinations = (
+                destinations
+                if destinations is not None
+                else get_destinations_from_config(self.raw_config)
+            )
+        else:
+            self.raw_config = yaml_config
+            self.destinations = (
+                destinations if destinations is not None else list(ACTIVE_DESTINATIONS)
+            )
 
-    # Clean temporary working artifacts at start of run and register exit cleanup
-    import atexit
+        # 1. Connection properties
+        rm_cfg = self.raw_config.get("remarkable", {})
+        base_pref = (
+            rm_cfg.get("preferred_connection")
+            or os.environ.get("REMARKABLE_PREFERRED_CONNECTION")
+            or "ssh"
+        )
+        base_ssh = rm_cfg.get("use_ssh")
+        if base_ssh is None:
+            base_ssh = os.environ.get("REMARKABLE_USE_SSH", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
 
-    cleanup_temp_artifacts(keep_temp=args.keep_temp)
-    atexit.register(cleanup_temp_artifacts, keep_temp=args.keep_temp)
+        if ssh:
+            self.preferred_connection = "ssh"
+            self.use_ssh = True
+        elif cloud:
+            self.preferred_connection = "cloud"
+            self.use_ssh = False
+        elif preferred_connection:
+            self.preferred_connection = preferred_connection.strip().lower()
+            self.use_ssh = self.preferred_connection == "ssh"
+        else:
+            self.preferred_connection = str(base_pref).strip().lower()
+            self.use_ssh = bool(base_ssh)
 
-    # --- Step 0: List all notebooks ---
-    from living_ink.api import get_rmapi
+        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = self.preferred_connection
+        os.environ["REMARKABLE_USE_SSH"] = "true" if self.use_ssh else "false"
 
-    client = get_rmapi()
-    collection = client.get_meta_items()
-
-    # Build ID map for path resolution
-    id_map = {get_val(item, "ID"): item for item in collection}
-
-    # Determine sync flags for document types
-    sync_pdfs = (
-        getattr(args, "sync_pdfs", False)
-        or getattr(args, "all_types", False)
-        or os.environ.get("SYNC_PDFS", "false").strip().lower() in ("1", "true", "yes")
-    )
-    sync_epubs = (
-        getattr(args, "sync_epubs", False)
-        or getattr(args, "all_types", False)
-        or os.environ.get("SYNC_EPUBS", "false").strip().lower() in ("1", "true", "yes")
-    )
-    is_targeted = bool(getattr(args, "notebook", None))
-
-    # Filter out documents that are in the trash
-    candidates = [
-        item
-        for item in collection
-        if get_val(item, "Type") == "DocumentType"
-        and (get_val(item, "VissibleName") or get_val(item, "VisibleName"))
-        and not get_notebook_path(item, id_map).startswith("[TRASH]")
-    ]
-
-    notebooks = []
-    skipped_pdfs = 0
-    skipped_epubs = 0
-    for item in candidates:
-        dtype = get_document_type(item, client)
-        if dtype == "notebook":
-            notebooks.append(item)
-        elif dtype == "pdf":
-            if sync_pdfs or is_targeted:
-                notebooks.append(item)
-            else:
-                skipped_pdfs += 1
-        elif dtype == "epub":
-            if sync_epubs or is_targeted:
-                notebooks.append(item)
-            else:
-                skipped_epubs += 1
-
-    if skipped_pdfs > 0:
-        log(f"Skipped {skipped_pdfs} PDF documents (enable with --sync-pdfs or in config.yml).")
-    if skipped_epubs > 0:
-        log(f"Skipped {skipped_epubs} EPUB documents (enable with --sync-epubs or in config.yml).")
-
-    # --- Logic Update: Check each destination independently ---
-
-    # Map of ID -> List of Destinations that need an update
-    # e.g. "uuid123": [ObsidianDestination(...), AppleNotesDestination(...)]
-    needs_update = {}
-
-    # Load states for all active destinations
-    dest_states = {}
-    for dest in ACTIVE_DESTINATIONS:
-        dest_name = type(dest).__name__
-        dest_states[dest_name] = load_processed_log(dest_name)
-
-    for item in notebooks:
-        doc_id = get_val(item, "ID")
-
-        # Prefer 'hash', fall back to 'Version' (legacy), default to 1
-        curr_val = get_val(item, "hash")
-        if not curr_val:
-            try:
-                curr_val = int(get_val(item, "Version"))
-            except (ValueError, TypeError):
-                curr_val = 1
-
-        # Check against each ACTIVE destination
-        for dest in ACTIVE_DESTINATIONS:
-            dest_name = type(dest).__name__
-            last_val = dest_states[dest_name].get(doc_id, -1)
-
-            if str(last_val) != str(curr_val):
-                if doc_id not in needs_update:
-                    needs_update[doc_id] = []
-                needs_update[doc_id].append(dest)
-
-    # If --notebook is specified, handle targeting (by name, path, or ID) with interactive disambiguation
-    if args.notebook:
-        target_name = args.notebook.strip()
-        log(f"Filtering for notebook: {target_name}")
-
-        matched_items = [
-            item for item in notebooks if matches_notebook_target(item, target_name, id_map)
-        ]
-
-        if not matched_items:
-            log(f"Notebook '{target_name}' not found in library. Exiting.")
-            sys.exit(1)
-
-        # Disambiguate if multiple matches found
-        selected_items = select_notebook_interactive(
-            matches=matched_items,
-            query=target_name,
-            id_map=id_map,
+        # 2. Document types and limits
+        sync_cfg = self.raw_config.get("sync", {})
+        cfg_sync_pdfs = sync_cfg.get(
+            "sync_pdfs",
+            os.environ.get("SYNC_PDFS", "false").strip().lower() in ("1", "true", "yes"),
+        )
+        cfg_sync_epubs = sync_cfg.get(
+            "sync_epubs",
+            os.environ.get("SYNC_EPUBS", "false").strip().lower() in ("1", "true", "yes"),
+        )
+        cfg_limit = int(
+            sync_cfg.get(
+                "max_notebooks_per_run",
+                os.environ.get("SYNC_MAX_NOTEBOOKS", max_notebooks_per_run),
+            )
         )
 
-        if not selected_items:
-            log("Sync cancelled by user. Exiting.")
-            sys.exit(0)
+        self.target_notebook = notebook.strip() if notebook else None
+        self.all_types = all_types
 
-        notebooks_to_process = selected_items
-        # Force update for all selected notebooks
-        for it in selected_items:
-            doc_id = get_val(it, "ID")
-            needs_update[doc_id] = ACTIVE_DESTINATIONS
+        if all_types:
+            self.sync_pdfs = True
+            self.sync_epubs = True
+        else:
+            self.sync_pdfs = bool(cfg_sync_pdfs) if sync_pdfs is None else sync_pdfs
+            self.sync_epubs = bool(cfg_sync_epubs) if sync_epubs is None else sync_epubs
 
-    else:
-        # Standard sync: process notebooks that need updating across active destinations
-        notebooks_to_process_candidates = []
+        if limit is not None and limit > 0:
+            self.limit = limit
+        else:
+            self.limit = cfg_limit
+
+        # 3. Destination folder
+        self.folder = (
+            folder
+            or os.environ.get("APPLE_NOTES_FOLDER")
+            or self.raw_config.get("apple_notes", {}).get("folder_name", "Living Ink")
+        )
+        if self.folder:
+            os.environ["APPLE_NOTES_FOLDER"] = self.folder
+            for dest in self.destinations:
+                if isinstance(dest, AppleNotesDestination):
+                    dest.folder_name = self.folder
+
+    def _apply_overrides(
+        self,
+        notebook: Optional[str] = None,
+        limit: Optional[int] = None,
+        folder: Optional[str] = None,
+        ssh: bool = False,
+        cloud: bool = False,
+        preferred_connection: Optional[str] = None,
+        sync_pdfs: Optional[bool] = None,
+        sync_epubs: Optional[bool] = None,
+        all_types: bool = False,
+        keep_temp: Optional[bool] = None,
+    ) -> None:
+        """Apply ad-hoc overrides before running."""
+        if notebook is not None:
+            self.target_notebook = notebook.strip() if notebook else None
+        if limit is not None and limit > 0:
+            self.limit = limit
+        if folder is not None:
+            self.folder = folder
+            os.environ["APPLE_NOTES_FOLDER"] = folder
+            for dest in self.destinations:
+                if isinstance(dest, AppleNotesDestination):
+                    dest.folder_name = folder
+        if ssh:
+            self.preferred_connection = "ssh"
+            self.use_ssh = True
+            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "ssh"
+            os.environ["REMARKABLE_USE_SSH"] = "true"
+        elif cloud:
+            self.preferred_connection = "cloud"
+            self.use_ssh = False
+            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
+            os.environ["REMARKABLE_USE_SSH"] = "false"
+        elif preferred_connection:
+            self.preferred_connection = preferred_connection.strip().lower()
+            self.use_ssh = self.preferred_connection == "ssh"
+            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = self.preferred_connection
+            os.environ["REMARKABLE_USE_SSH"] = "true" if self.use_ssh else "false"
+        if all_types:
+            self.all_types = True
+            self.sync_pdfs = True
+            self.sync_epubs = True
+        else:
+            if sync_pdfs is not None:
+                self.sync_pdfs = sync_pdfs
+            if sync_epubs is not None:
+                self.sync_epubs = sync_epubs
+        if keep_temp is not None:
+            self.keep_temp = keep_temp
+
+    def connect(self) -> Any:
+        """Establish connection to reMarkable tablet (via SSH or Cloud)."""
+        from living_ink.api import get_rmapi
+
+        return get_rmapi()
+
+    def discover_documents(self, client: Any) -> Tuple[List[Any], Dict[str, Any]]:
+        """Discover documents in the tablet library matching configured document types.
+
+        Returns:
+            Tuple of (candidate_documents_list, id_map_dictionary).
+        """
+        collection = client.get_meta_items()
+        id_map = {get_val(item, "ID"): item for item in collection}
+
+        is_targeted = bool(self.target_notebook)
+
+        candidates = [
+            item
+            for item in collection
+            if get_val(item, "Type") == "DocumentType"
+            and (get_val(item, "VissibleName") or get_val(item, "VisibleName"))
+            and not get_notebook_path(item, id_map).startswith("[TRASH]")
+        ]
+
+        notebooks = []
+        skipped_pdfs = 0
+        skipped_epubs = 0
+        for item in candidates:
+            dtype = get_document_type(item, client)
+            if dtype == "notebook":
+                notebooks.append(item)
+            elif dtype == "pdf":
+                if self.sync_pdfs or is_targeted:
+                    notebooks.append(item)
+                else:
+                    skipped_pdfs += 1
+            elif dtype == "epub":
+                if self.sync_epubs or is_targeted:
+                    notebooks.append(item)
+                else:
+                    skipped_epubs += 1
+
+        if skipped_pdfs > 0:
+            log(f"Skipped {skipped_pdfs} PDF documents (enable with --sync-pdfs or in config.yml).")
+        if skipped_epubs > 0:
+            log(
+                f"Skipped {skipped_epubs} EPUB documents (enable with --sync-epubs or in config.yml)."
+            )
+
+        return notebooks, id_map
+
+    def filter_pending_documents(
+        self, notebooks: List[Any], id_map: Dict[str, Any]
+    ) -> Tuple[List[Any], Dict[str, List[Destination]], bool]:
+        """Determine which notebooks need updating for active destinations.
+
+        Returns:
+            Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
+        """
+        active_dests = self.destinations or ACTIVE_DESTINATIONS
+        needs_update: Dict[str, List[Destination]] = {}
+        dest_states = {}
+        for dest in active_dests:
+            dest_name = type(dest).__name__
+            dest_states[dest_name] = load_processed_log(dest_name)
+
         for item in notebooks:
             doc_id = get_val(item, "ID")
-            if doc_id in needs_update:
-                notebooks_to_process_candidates.append(item)
+            curr_val = get_val(item, "hash")
+            if not curr_val:
+                try:
+                    curr_val = int(get_val(item, "Version"))
+                except (ValueError, TypeError):
+                    curr_val = 1
 
-        if not notebooks_to_process_candidates:
-            log("No new or updated notebooks found for any active destination. Exiting.")
-            sys.exit(0)
+            for dest in active_dests:
+                dest_name = type(dest).__name__
+                last_val = dest_states[dest_name].get(doc_id, -1)
 
-        # Limit number of notebooks to process per run
-        limit = args.limit if args.limit > 0 else max_notebooks_per_run
-        if limit > 0:
-            notebooks_to_process_candidates = notebooks_to_process_candidates[:limit]
+                if str(last_val) != str(curr_val):
+                    if doc_id not in needs_update:
+                        needs_update[doc_id] = []
+                    needs_update[doc_id].append(dest)
 
-        notebooks_to_process = notebooks_to_process_candidates
+        if self.target_notebook:
+            target_name = self.target_notebook
+            log(f"Filtering for notebook: {target_name}")
 
-    for nb_item in notebooks_to_process:
+            matched_items = [
+                item for item in notebooks if matches_notebook_target(item, target_name, id_map)
+            ]
+
+            if not matched_items:
+                log(f"Notebook '{target_name}' not found in library. Exiting.")
+                return [], {}, False
+
+            selected_items = select_notebook_interactive(
+                matches=matched_items,
+                query=target_name,
+                id_map=id_map,
+            )
+
+            if not selected_items:
+                log("Sync cancelled by user. Exiting.")
+                return [], {}, True
+
+            for it in selected_items:
+                doc_id = get_val(it, "ID")
+                needs_update[doc_id] = active_dests
+
+            return selected_items, needs_update, True
+
+        else:
+            candidates = [item for item in notebooks if get_val(item, "ID") in needs_update]
+
+            if not candidates:
+                log("No new or updated notebooks found for any active destination. Exiting.")
+                return [], {}, True
+
+            if self.limit > 0:
+                candidates = candidates[: self.limit]
+
+            return candidates, needs_update, True
+
+    def process_notebook_item(
+        self,
+        nb_item: Any,
+        client: Any,
+        id_map: Dict[str, Any],
+        needs_update: Dict[str, List[Destination]],
+        keep_temp: Optional[bool] = None,
+    ) -> bool:
+        """Process a single notebook or document item through extraction, OCR, and publishing.
+
+        Args:
+            nb_item: reMarkable item metadata.
+            client: reMarkable API client.
+            id_map: Mapping from document ID to metadata item.
+            needs_update: Mapping from document ID to target destinations.
+            keep_temp: Whether to keep temporary files on disk.
+
+        Returns:
+            True if notebook was processed and published successfully, False otherwise.
+        """
         notebook = get_val(nb_item, "VissibleName") or get_val(nb_item, "VisibleName")
         notebook_id = get_val(nb_item, "ID")
         doc_type = get_document_type(nb_item, client)
+        effective_keep_temp = self.keep_temp if keep_temp is None else keep_temp
 
         # Get the value to store after processing (Hash or Version)
         item_hash = get_val(nb_item, "hash")
@@ -1149,7 +1312,7 @@ def main():
             doc = nb_item
             if not doc:
                 log(f'Document "{notebook}" not found in your reMarkable library. Skipping.')
-                continue
+                return False
 
             from living_ink.extract import (
                 extract_raw_document_from_zip,
@@ -1167,7 +1330,7 @@ def main():
             raw_bytes = client.download(doc)
             if not raw_bytes:
                 log(f"Failed to download document zip for {notebook}.")
-                continue
+                return False
             with open(tmp_zip, "wb") as f:
                 f.write(raw_bytes)
 
@@ -1237,7 +1400,7 @@ def main():
                 if page_count == 0:
                     log(f"Notebook '{notebook}' has 0 pages (empty notebook). Skipping.")
                     tmp_zip.unlink(missing_ok=True)
-                    continue
+                    return True
 
                 log(f"Rendering {page_count} pages for {notebook}...")
                 for page in range(1, page_count + 1):
@@ -1261,7 +1424,8 @@ def main():
             )
             if not imgs and not extracted_doc_text:
                 log(f"No pages or text could be extracted for '{notebook}'. Skipping.")
-                continue
+                return False
+
         log(f"Found {len(imgs)} white-background PNGs for {notebook}: {[p.name for p in imgs]}")
 
         if not notebook_tags:
@@ -1331,6 +1495,7 @@ def main():
                     log(f"  Google Cloud Vision not configured for {p.name}.")
                     raw_texts.append("")
                     cleaned_texts.append("")
+                    continue
 
         if not any(t.strip() for t in cleaned_texts) and extracted_doc_text:
             raw_texts = [extracted_doc_text]
@@ -1378,11 +1543,6 @@ def main():
                         f.write(f"{header}\n\n")
         log(f"Cleaned OCR text saved to {clean_out_txt}")
 
-        # Build PDF from the white PNGs - DISABLED for performance
-        # out_pdf = PDF_DIR / f'{safe_notebook}.pdf'
-        # make_pdf_from_images(imgs, out_pdf)
-        # log(f'PDF created: {out_pdf}')
-
         # Create Note (Apple Notes or Obsidian)
         success = False
         try:
@@ -1399,7 +1559,6 @@ def main():
             clean_text = "\n".join(lines[text_start:]).strip()
 
             # Determine folder paths for nesting
-            # folder_path is like "Work / Project A / Sprint 1"
             full_subfolder = None
             top_level_subfolder = None
             if folder_path:
@@ -1410,10 +1569,11 @@ def main():
 
             # Destinations that specifically request this notebook
             targets = needs_update.get(notebook_id, [])
+            active_dests = self.destinations or ACTIVE_DESTINATIONS
 
             # Fallback: if 'needs_update' is empty (forced run), target all active
-            if not targets and ACTIVE_DESTINATIONS:
-                targets = ACTIVE_DESTINATIONS
+            if not targets and active_dests:
+                targets = active_dests
 
             if targets:
                 all_success = True
@@ -1448,7 +1608,7 @@ def main():
                 success = all_success
             else:
                 log("No destinations need update for this notebook (or none configured).")
-                success = True  # Marked as success because we did what was asked (nothing)
+                success = True
 
         except Exception as e:
             log(f"Failed publishing note: {e}")
@@ -1458,12 +1618,137 @@ def main():
 
         if success:
             log(f"Notebook {notebook} processing complete.")
-            clean_notebook_temp_artifacts(safe_notebook, keep_temp=args.keep_temp)
+            clean_notebook_temp_artifacts(safe_notebook, keep_temp=effective_keep_temp)
         else:
             log(f"Notebook {notebook} processing FAILED.")
 
-    log("Pipeline finished.")
-    cleanup_temp_artifacts(keep_temp=getattr(args, "keep_temp", False))
+        return success
+
+    def run(
+        self,
+        notebook: Optional[str] = None,
+        limit: Optional[int] = None,
+        folder: Optional[str] = None,
+        ssh: bool = False,
+        cloud: bool = False,
+        preferred_connection: Optional[str] = None,
+        sync_pdfs: Optional[bool] = None,
+        sync_epubs: Optional[bool] = None,
+        all_types: bool = False,
+        keep_temp: Optional[bool] = None,
+    ) -> bool:
+        """Execute the sync pipeline.
+
+        Returns:
+            True if sync succeeded or completed gracefully, False on error.
+        """
+        self._apply_overrides(
+            notebook=notebook,
+            limit=limit,
+            folder=folder,
+            ssh=ssh,
+            cloud=cloud,
+            preferred_connection=preferred_connection,
+            sync_pdfs=sync_pdfs,
+            sync_epubs=sync_epubs,
+            all_types=all_types,
+            keep_temp=keep_temp,
+        )
+
+        # At the start of run(), clear the log for a new run
+        with open(LOG_PATH, "w", encoding="utf-8") as f:
+            f.write("")
+
+        validate_environment()
+        log("Pipeline started.")
+
+        # Clean temporary working artifacts at start of run and register exit cleanup
+        import atexit
+
+        cleanup_temp_artifacts(keep_temp=self.keep_temp)
+        atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
+
+        client = self.connect()
+        notebooks, id_map = self.discover_documents(client)
+        to_process, needs_update, should_continue = self.filter_pending_documents(notebooks, id_map)
+
+        if not should_continue:
+            return False
+        if not to_process:
+            return True
+
+        all_success = True
+        for nb_item in to_process:
+            item_success = self.process_notebook_item(
+                nb_item=nb_item,
+                client=client,
+                id_map=id_map,
+                needs_update=needs_update,
+                keep_temp=self.keep_temp,
+            )
+            if not item_success:
+                all_success = False
+
+        log("Pipeline finished.")
+        cleanup_temp_artifacts(keep_temp=self.keep_temp)
+        return all_success
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Main CLI entry point for the sync pipeline."""
+    parser = argparse.ArgumentParser(
+        prog="living-ink-pipeline",
+        description="Sync reMarkable notebooks to Apple Notes and Obsidian.",
+    )
+    parser.add_argument(
+        "--notebook",
+        help="Process a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
+    )
+    parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process per run")
+    parser.add_argument(
+        "--folder",
+        default=os.environ.get("APPLE_NOTES_FOLDER", "Living Ink"),
+        help="Apple Notes folder name",
+    )
+    parser.add_argument("--state-file", help="Ignored (legacy compatibility)")
+    parser.add_argument(
+        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
+    )
+    parser.add_argument(
+        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
+    )
+    parser.add_argument(
+        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
+    )
+    parser.add_argument(
+        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
+    )
+    parser.add_argument(
+        "--all-types",
+        action="store_true",
+        help="Sync all document types (notebooks, PDFs, and EPUBs)",
+    )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
+    )
+    args = parser.parse_args(argv)
+
+    pipeline = SyncPipeline(
+        notebook=args.notebook,
+        limit=args.limit,
+        folder=args.folder,
+        ssh=args.ssh,
+        cloud=args.cloud,
+        sync_pdfs=args.sync_pdfs,
+        sync_epubs=args.sync_epubs,
+        all_types=args.all_types,
+        keep_temp=args.keep_temp,
+    )
+    success = pipeline.run()
+    if not success:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

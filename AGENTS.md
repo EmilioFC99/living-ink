@@ -31,13 +31,8 @@ living-ink/
 │       ├── providers.py         # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
 │       ├── setup_wizard.py      # Interactive onboarding setup wizard
 │       └── destinations.py      # Pluggable publish targets (Apple Notes, Obsidian)
-├── scripts/
-│   ├── process_notebook.py      # Backwards-compatible proxy to living_ink.pipeline
-│   ├── cli.py                   # CLI wrapper entry point
-│   ├── setup.py                 # Setup wizard runner
-│   ├── test_docker.sh           # Automated Docker smoke test suite
-│   ├── set_env.sh               # Environment variable helper
-│   └── white_background.py      # Standalone image background tool
+├── tests/
+│   └── test_docker.sh           # Automated Docker smoke test suite
 ├── docs/                        # User and developer documentation
 │   ├── SETUP_GUIDE.md           # API key / credential setup
 │   ├── USER_MANUAL.md           # End-user usage guide
@@ -100,7 +95,7 @@ Publish: Destination.publish()
 uv sync --all-extras
 
 # Run the sync pipeline
-uv run python scripts/process_notebook.py
+uv run living-ink sync
 
 # Lint
 uv run ruff check .

@@ -408,10 +408,10 @@ class TestStateFilePath:
 
     def test_state_file_in_data_dir(self, tmp_path, monkeypatch):
         """get_state_file_path returns path inside DATA_DIR."""
-        from scripts.process_notebook import get_state_file_path
+        from living_ink.pipeline import get_state_file_path
 
-        monkeypatch.setattr("scripts.process_notebook.DATA_DIR", tmp_path / "data")
-        monkeypatch.setattr("scripts.process_notebook.ROOT", tmp_path)
+        monkeypatch.setattr("living_ink.pipeline.DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr("living_ink.pipeline.ROOT", tmp_path)
         (tmp_path / "data").mkdir(parents=True, exist_ok=True)
 
         path = get_state_file_path("Obsidian")
@@ -419,15 +419,15 @@ class TestStateFilePath:
 
     def test_legacy_state_file_auto_migration(self, tmp_path, monkeypatch):
         """Legacy state file in ROOT is automatically moved into DATA_DIR."""
-        from scripts.process_notebook import get_state_file_path
+        from living_ink.pipeline import get_state_file_path
 
         legacy = tmp_path / "processed_notebooks_Obsidian.json"
         legacy.write_text('{"doc1": 1}', encoding="utf-8")
 
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setattr("scripts.process_notebook.DATA_DIR", data_dir)
-        monkeypatch.setattr("scripts.process_notebook.ROOT", tmp_path)
+        monkeypatch.setattr("living_ink.pipeline.DATA_DIR", data_dir)
+        monkeypatch.setattr("living_ink.pipeline.ROOT", tmp_path)
 
         migrated_path = get_state_file_path("Obsidian")
         assert migrated_path == data_dir / "processed_notebooks_Obsidian.json"

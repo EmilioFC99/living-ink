@@ -375,13 +375,12 @@ def install_launch_agent(
         <string>sync</string>"""
     else:
         uv_path = find_uv_path()
-        if repo_dir is None:
-            repo_dir = Path(__file__).parent.parent.resolve()
-        script_path = repo_dir / "scripts" / "process_notebook.py"
         args_xml = f"""        <string>{uv_path}</string>
         <string>run</string>
         <string>python</string>
-        <string>{script_path}</string>"""
+        <string>-m</string>
+        <string>living_ink</string>
+        <string>sync</string>"""
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1026,19 +1025,16 @@ def run_wizard(
         print_func()
         print_func(cyan("Starting sync pipeline..."))
         print_func()
-        proc_script = (repo_dir / "scripts" / "process_notebook.py") if repo_dir else None
         uv_cmd = find_uv_path()
         try:
             if shutil.which("living-ink"):
                 subprocess.run(["living-ink", "sync"], check=False)
-            elif proc_script and proc_script.exists() and shutil.which(uv_cmd):
-                subprocess.run([uv_cmd, "run", "python", str(proc_script)], check=False)
-            elif proc_script and proc_script.exists():
-                subprocess.run([sys.executable, str(proc_script)], check=False)
+            elif shutil.which(uv_cmd):
+                subprocess.run([uv_cmd, "run", "python", "-m", "living_ink", "sync"], check=False)
             else:
-                from living_ink.pipeline import main as pipeline_main
+                from living_ink.pipeline import SyncPipeline
 
-                pipeline_main()
+                SyncPipeline().run()
         except Exception as e:
             print_func(red(f"Error running sync: {e}"))
 

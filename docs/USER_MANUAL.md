@@ -60,7 +60,7 @@ You can customize this in `~/.config/living-ink/config.yml`:
 
 The easiest way to get started is the interactive setup wizard:
 ```bash
-uv run python scripts/setup.py
+living-ink setup
 ```
 It guides you through:
 1. **reMarkable Pairing**: Pair using your 8-letter code from [my.remarkable.com](https://my.remarkable.com/device/desktop/connect) (or auto-detects `~/.rmapi`).
@@ -75,7 +75,7 @@ It guides you through:
 ### Process All New Notes
 To scan and sync all new or updated notebooks:
 ```bash
-uv run python scripts/process_notebook.py
+living-ink sync
 ```
 
 ### Process a Specific Notebook

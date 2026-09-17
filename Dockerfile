@@ -36,7 +36,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Step 3: Copy application source code
 COPY src/ ./src/
-COPY scripts/ ./scripts/
 
 # Step 4: Install the living-ink CLI package
 RUN uv sync --frozen --no-dev

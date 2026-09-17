@@ -6,7 +6,7 @@ and downloaded documents are automatically purged to prevent disk leakage.
 
 from unittest.mock import MagicMock, patch
 
-from living_ink.cli import cmd_sync, main
+from living_ink.cli import SyncCommand, main
 from living_ink.pipeline import (
     DOCS_DIR,
     OCR_DIR,
@@ -82,9 +82,9 @@ def test_clean_notebook_temp_artifacts():
         nb2_ocr.unlink(missing_ok=True)
 
 
-@patch("living_ink.cli.cmd_sync")
+@patch.object(SyncCommand, "run", return_value=0)
 def test_cli_keep_temp_flag(mock_sync):
-    """CLI parses --keep-temp flag and passes it to cmd_sync."""
+    """CLI parses --keep-temp flag and passes it to SyncCommand.run."""
     with patch("sys.argv", ["living-ink", "sync", "--keep-temp"]):
         main()
         mock_sync.assert_called_once()
@@ -92,8 +92,8 @@ def test_cli_keep_temp_flag(mock_sync):
         assert args.keep_temp is True
 
 
-def test_cmd_sync_forwards_keep_temp():
-    """cmd_sync forwards --keep-temp to pipeline entry point."""
+def test_sync_command_forwards_keep_temp():
+    """SyncCommand forwards --keep-temp to pipeline."""
     args = MagicMock(
         keep_temp=True,
         notebook=None,
@@ -105,10 +105,9 @@ def test_cmd_sync_forwards_keep_temp():
         sync_epubs=False,
         all_types=False,
     )
-    with patch("scripts.process_notebook.main") as mock_pipeline_main:
-        with patch("sys.argv", ["living-ink"]):
-            cmd_sync(args)
-            import sys
-
-            assert "--keep-temp" in sys.argv
-            mock_pipeline_main.assert_called_once()
+    with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None) as mock_init:
+        with patch("living_ink.pipeline.SyncPipeline.run", return_value=True) as mock_run:
+            SyncCommand().run(args)
+            mock_init.assert_called_once()
+            assert mock_init.call_args.kwargs["keep_temp"] is True
+            mock_run.assert_called_once()
