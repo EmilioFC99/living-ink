@@ -70,11 +70,19 @@ class BaseCommand(ABC):
 
 
 class SyncCommand(BaseCommand):
-    """Execute the reMarkable notebook sync pipeline."""
+    """Execute the reMarkable notebook sync pipeline.
+
+    Attributes:
+        offer_setup_on_missing_config: Whether an unusable config should prompt
+            the user to run the wizard. Set to False when the wizard is already
+            what invoked this command, to avoid bouncing between the two.
+    """
 
     name = "sync"
     help = "Run the sync pipeline"
     description = "Sync notes and documents from reMarkable to Obsidian/Apple Notes."
+
+    offer_setup_on_missing_config = True
 
     @classmethod
     def register_args(cls, parser: argparse.ArgumentParser) -> None:
@@ -164,7 +172,7 @@ class SyncCommand(BaseCommand):
         print(error.hint)
         print("=" * 60 + "\n")
 
-        if not sys.stdin.isatty():
+        if not self.offer_setup_on_missing_config or not sys.stdin.isatty():
             return 1
 
         try:
@@ -195,17 +203,24 @@ class SetupCommand(BaseCommand):
         pass
 
     def run(self, args: argparse.Namespace) -> int:
-        """Run the interactive setup wizard.
+        """Run the interactive setup wizard, then optionally the first sync.
 
         Args:
             args: Parsed arguments for setup.
 
         Returns:
-            0 on completion.
+            0 on completion, or the sync's exit code if the user asked to sync.
         """
         from living_ink.setup_wizard import run_wizard
 
-        run_wizard(repo_dir=self.root)
+        result = run_wizard(repo_dir=self.root)
+        if result.run_sync_requested:
+            print("\nStarting sync pipeline...\n")
+            sync = SyncCommand(root=self.root)
+            # Config was just written; if it is still unusable, reporting the
+            # problem beats looping back into the wizard that produced it.
+            sync.offer_setup_on_missing_config = False
+            return sync.run(args)
         return 0
 
 

@@ -18,7 +18,8 @@ from living_ink.cli import (
     SyncCommand,
     main,
 )
-from living_ink.config import find_repo_root, get_config_path
+from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
+from living_ink.setup_wizard import WizardResult
 
 
 def test_find_repo_root_prefers_cwd(tmp_path):
@@ -251,10 +252,75 @@ def test_setup_command_execution(tmp_path):
     """SetupCommand invokes run_wizard with root directory."""
     cmd = SetupCommand(root=tmp_path)
     args = argparse.Namespace()
-    with patch("living_ink.setup_wizard.run_wizard") as mock_wizard:
+    with patch(
+        "living_ink.setup_wizard.run_wizard", return_value=WizardResult(saved=True)
+    ) as mock_wizard:
         code = cmd.run(args)
         assert code == 0
         mock_wizard.assert_called_once_with(repo_dir=tmp_path)
+
+
+class TestWizardSyncHandoff:
+    """The CLI, not the wizard or the pipeline, decides what runs next."""
+
+    def test_setup_runs_sync_when_the_user_asks(self, tmp_path):
+        """A wizard that reports run_sync_requested hands off to SyncCommand."""
+        result = WizardResult(saved=True, run_sync_requested=True)
+        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+            with patch.object(SyncCommand, "run", return_value=0) as mock_sync:
+                assert SetupCommand(root=tmp_path).run(argparse.Namespace()) == 0
+                mock_sync.assert_called_once()
+
+    def test_setup_skips_sync_when_the_user_declines(self, tmp_path):
+        """Declining the first sync leaves SyncCommand untouched."""
+        result = WizardResult(saved=True, run_sync_requested=False)
+        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+            with patch.object(SyncCommand, "run", return_value=0) as mock_sync:
+                assert SetupCommand(root=tmp_path).run(argparse.Namespace()) == 0
+                mock_sync.assert_not_called()
+
+    def test_missing_config_offers_the_wizard_when_interactive(self, tmp_path):
+        """An unusable config prompts for setup rather than exiting silently."""
+        cmd = SyncCommand(root=tmp_path)
+        args = argparse.Namespace()
+        with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None):
+            with patch(
+                "living_ink.pipeline.SyncPipeline.run",
+                side_effect=ConfigurationMissing("no provider", hint="run: living-ink setup"),
+            ):
+                with patch("sys.stdin.isatty", return_value=True):
+                    with patch("builtins.input", return_value="y"):
+                        with patch.object(SetupCommand, "run", return_value=0) as mock_setup:
+                            assert cmd.run(args) == 0
+                            mock_setup.assert_called_once()
+
+    def test_missing_config_exits_1_when_not_interactive(self, tmp_path, capsys):
+        """Non-interactive runs report the hint and fail without prompting."""
+        cmd = SyncCommand(root=tmp_path)
+        args = argparse.Namespace()
+        with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None):
+            with patch(
+                "living_ink.pipeline.SyncPipeline.run",
+                side_effect=ConfigurationMissing("no provider", hint="run: living-ink setup"),
+            ):
+                with patch("sys.stdin.isatty", return_value=False):
+                    assert cmd.run(args) == 1
+        assert "run: living-ink setup" in capsys.readouterr().out
+
+    def test_sync_launched_by_the_wizard_does_not_reoffer_it(self, tmp_path, capsys):
+        """A still-broken config after setup reports the problem, it does not loop."""
+        result = WizardResult(saved=True, run_sync_requested=True)
+        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+            with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None):
+                with patch(
+                    "living_ink.pipeline.SyncPipeline.run",
+                    side_effect=ConfigurationMissing("still broken"),
+                ):
+                    with patch("sys.stdin.isatty", return_value=True):
+                        with patch("builtins.input") as mock_input:
+                            code = SetupCommand(root=tmp_path).run(argparse.Namespace())
+                            assert code == 1
+                            mock_input.assert_not_called()
 
 
 def test_status_command_json_output(tmp_path, capsys):
