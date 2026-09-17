@@ -127,23 +127,11 @@ class SyncCommand(BaseCommand):
         if cfg_path.exists():
             os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
 
-        from living_ink.pipeline import SyncPipeline
+        from living_ink.pipeline import SyncOptions, SyncPipeline
 
         pipeline = SyncPipeline(
+            options=SyncOptions.from_args(args),
             config_path=cfg_path if cfg_path.exists() else None,
-            notebook=getattr(args, "notebook", None),
-            limit=getattr(args, "limit", None),
-            folder=getattr(args, "folder", None),
-            ssh=getattr(args, "ssh", False),
-            cloud=getattr(args, "cloud", False),
-            sync_pdfs=getattr(args, "sync_pdfs", False)
-            if hasattr(args, "sync_pdfs") and args.sync_pdfs
-            else None,
-            sync_epubs=getattr(args, "sync_epubs", False)
-            if hasattr(args, "sync_epubs") and args.sync_epubs
-            else None,
-            all_types=getattr(args, "all_types", False),
-            keep_temp=getattr(args, "keep_temp", False),
         )
         success = pipeline.run()
         if not success:

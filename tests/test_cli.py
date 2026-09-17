@@ -235,11 +235,15 @@ def test_sync_command_execution(tmp_path):
             code = cmd.run(args)
             assert code == 0
             mock_init.assert_called_once()
-            assert mock_init.call_args.kwargs["notebook"] == "MyNotes"
-            assert mock_init.call_args.kwargs["limit"] == 5
-            assert mock_init.call_args.kwargs["folder"] == "TestFolder"
-            assert mock_init.call_args.kwargs["ssh"] is True
-            assert mock_init.call_args.kwargs["keep_temp"] is True
+            opts = mock_init.call_args.kwargs["options"]
+            assert opts.notebook == "MyNotes"
+            assert opts.limit == 5
+            assert opts.folder == "TestFolder"
+            assert opts.ssh is True
+            assert opts.sync_pdfs is True
+            # An unset store-true flag must defer to config, not force False.
+            assert opts.sync_epubs is None
+            assert opts.keep_temp is True
             mock_run.assert_called_once()
 
 
