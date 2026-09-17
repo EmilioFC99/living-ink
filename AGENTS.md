@@ -4,43 +4,42 @@
 
 ## Project Overview
 
-**Living Ink** is an automated pipeline that syncs handwritten notebooks from a **reMarkable tablet** to digital note-taking apps (**Apple Notes** and **Obsidian**). It downloads notebooks from reMarkable Cloud (or via USB SSH), renders pages to images, performs OCR via Google Cloud Vision, cleans the text with an LLM, and publishes structured notes to configured destinations.
+**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to digital note apps (**Apple Notes** and **Obsidian**). It pulls documents over USB SSH or reMarkable Cloud, renders `.rm` pages to PNG, transcribes them with a multimodal LLM (with Google Cloud Vision as an optional fallback), and publishes structured notes to every configured destination.
 
 - **Language**: Python 3.10+
-- **Package Manager**: [uv](https://docs.astral.sh/uv/) (not pip)
-- **Build System**: Hatchling
-- **Linter/Formatter**: Ruff
+- **Package manager**: [uv](https://docs.astral.sh/uv/) — never raw `pip`
+- **Build system**: Hatchling, `src/` layout
+- **Linter/formatter**: Ruff (line length 100)
+- **Test runner**: pytest
 - **License**: MIT
 
 ## Repository Structure
 
 ```
 living-ink/
-├── src/
-│   └── living_ink/              # Core Python package
-│       ├── __init__.py          # Package init, version
-│       ├── __main__.py          # Module entry point (`python -m living_ink`)
-│       ├── api.py               # reMarkable Cloud/SSH API client factory
-│       ├── cli.py               # Main CLI entry point (`living-ink`)
-│       ├── config.py            # XDG path resolution & configuration helpers
-│       ├── pipeline.py          # Main sync pipeline orchestrator
-│       ├── sync.py              # Cloud sync protocol (v3/v4) implementation
-│       ├── ssh.py               # Direct USB SSH transport to tablet
-│       ├── extract.py           # .rm binary → SVG → PNG rendering
-│       ├── clean.py             # Multimodal AI vision OCR & text cleanup
-│       ├── providers.py         # Multi-provider AI interface (Gemini, OpenAI, Ollama, etc.)
-│       ├── setup_wizard.py      # Interactive onboarding setup wizard
-│       └── destinations.py      # Pluggable publish targets (Apple Notes, Obsidian)
-├── tests/
-│   └── test_docker.sh           # Automated Docker smoke test suite
-├── docs/                        # User and developer documentation
-│   ├── SETUP_GUIDE.md           # API key / credential setup
-│   ├── USER_MANUAL.md           # End-user usage guide
-│   └── TEST_PLAN.md             # Test cases and verification matrix
-├── pyproject.toml               # Python project metadata & deps
-├── install.sh                   # One-line curl installer
-├── Dockerfile                   # Multi-stage production container image
-└── docker-compose.yml           # Compose file (CLI & background daemon)
+├── src/living_ink/
+│   ├── __main__.py          # `python -m living_ink`
+│   ├── cli.py               # Command Pattern CLI: sync | setup | status
+│   ├── pipeline.py          # SyncPipeline orchestrator + processing stages
+│   ├── settings.py          # Settings: the resolved, typed configuration
+│   ├── config.py            # XDG path resolution, ConfigurationMissing
+│   ├── models.py            # Shared data models
+│   ├── transport.py         # RemarkableTransport Protocol, UnsupportedOperation
+│   ├── api.py               # Client factory + FallbackClient
+│   ├── sync.py              # Cloud sync protocol (v3/v4)
+│   ├── ssh.py               # USB SSH transport (10.11.99.1)
+│   ├── extract.py           # .rm → SVG → PNG, PDF/EPUB handling
+│   ├── clean.py             # Vision OCR and text repair entry points
+│   ├── providers.py         # AI provider presets + provider registry
+│   ├── destinations.py      # Destination ABC + destination registry
+│   ├── setup_wizard.py      # Interactive onboarding
+│   └── *_prompt.txt         # LLM system prompts (edit these, not the Python)
+├── tests/                   # pytest suite + test_docker.sh smoke tests
+├── docs/                    # SETUP_GUIDE.md, USER_MANUAL.md, TEST_PLAN.md
+├── pyproject.toml
+├── install.sh               # One-line installer
+├── Dockerfile               # Multi-stage production image
+└── docker-compose.yml       # CLI and background daemon services
 ```
 
 ## Architecture
@@ -48,85 +47,83 @@ living-ink/
 ### Pipeline Flow
 
 ```
-reMarkable Tablet
-    ↓ (Cloud API or USB SSH)
-Download .rm notebook zip
+reMarkable tablet
+    ↓  USB SSH or Cloud API (whichever is preferred, with automatic fallback)
+Download document zip
     ↓
-Render pages: .rm → SVG → PNG (white background)
+Render pages: .rm → SVG → PNG (white background); PDFs composite annotations
     ↓
-OCR & Text Processing:
-    ├── AI Vision OCR (Default: Gemini, GPT-4o — reads handwriting + cleans in 1 step)
-    └── Google Cloud Vision (Optional fallback: DOCUMENT_TEXT_DETECTION → AI cleanup)
+Transcribe:
+    ├── AI vision OCR (default — reads handwriting and cleans in one call)
+    └── Google Cloud Vision → AI text repair (optional fallback)
     ↓
-Publish: Destination.publish()
-    ├── AppleNotesDestination (via osascript/AppleScript)
-    └── ObsidianDestination (Markdown + YAML frontmatter + WikiLinks)
+Publish via Destination.publish()
+    ├── AppleNotesDestination (AppleScript, one folder level)
+    └── ObsidianDestination (Markdown + frontmatter, full folder tree)
 ```
 
-### Key Design Patterns
+### The seams that matter
 
-- **Destination ABC**: `src/living_ink/destinations.py` defines `Destination` base class. New targets subclass it and implement `publish()`.
-- **Config Loading**: YAML-first via `living_ink.config` (checks env, repo, XDG `~/.config/living-ink/config.yml`), with env var overrides.
-- **State Tracking**: Per-destination JSON files (`processed_notebooks_{DestName}.json`) track notebook hash/version to avoid reprocessing.
-- **Folder Mirroring**: Full folder hierarchy mirroring supported in Obsidian; top-level flattening applied in Apple Notes.
+**Transport is a Protocol.** `transport.RemarkableTransport` is the whole contract. `api.get_rmapi(settings)` returns a Cloud client, an SSH client, or a `FallbackClient` wrapping both; every call goes through `FallbackClient._with_fallback`, so a new Protocol method needs one proxy line. A client that cannot serve a call raises `transport.UnsupportedOperation` — never omit the method, because callers do not use `hasattr`. `tests/test_transport.py` fails if any shipped client drops one.
 
-## Key Configuration
+**Destinations are a registry.** Subclass `Destination`, implement `publish()`, `from_config(section, settings)` and `describe()`, then decorate with `@register_destination("<config section>")`. `build_destinations()` walks the registry, so `pipeline.py` never learns the new name. A `from_config` that returns `None` or raises skips that destination with a warning rather than failing the run. Sync state is per destination: `processed_notebooks_{DestName}.json` maps doc id → version.
+
+**AI providers are presets first, classes second.** Any backend speaking the OpenAI chat API is an entry in `PROVIDER_PRESETS`, not code. One that does not is a `TextRepairProvider` subclass with `from_config()`, decorated `@register_provider("<name>")`; `get_provider()` checks the registry before the presets. Vision OCR and text repair are the same call path with different system prompts.
+
+**Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry.
+
+## Things that will bite you
+
+- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
+- **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
+- **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
+- **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR.
+- **`extract.py` monkey-patches `rmc`** to control SVG background and bounds. Upgrading `rmc`/`rmscene` is the likely cause of blank or clipped renders.
+
+## Configuration
 
 | Source | Key | Description |
 |--------|-----|-------------|
-| `config.yml` | `ai.provider` / `ai.api_key` | LLM provider preset & API key for text cleanup |
-| `config.yml` | `remarkable.preferred_connection` | Preferred connection method (`ssh` or `cloud`) |
-| `config.yml` | `remarkable.use_ssh` | Enable USB SSH connection (`true`/`false`) |
-| `config.yml` | `remarkable.ssh_host` / `remarkable.ssh_port` | SSH connection parameters (passwordless auth) |
+| `config.yml` | `ai.provider` / `ai.api_key` | LLM provider preset and API key |
+| `config.yml` | `remarkable.preferred_connection` | `ssh` or `cloud` |
+| `config.yml` | `remarkable.use_ssh` | Enable USB SSH (`true`/`false`) |
+| `config.yml` | `remarkable.ssh_host` / `ssh_user` / `ssh_port` | SSH parameters (passwordless auth) |
 | `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token |
 | `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
-| `config.yml` | `obsidian.enabled` / `obsidian.vault_path` | Obsidian destination toggle |
-| `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination toggle |
-| env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method (`ssh` or `cloud`) |
-| env var | `REMARKABLE_USE_SSH` | Use USB SSH instead of Cloud (`true`/`false`) |
-| env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH connection overrides |
-| env var | `OPENAI_REPAIR_MODEL` | Model name override |
+| `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination |
+| `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
+| `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
+| env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method |
+| env var | `REMARKABLE_USE_SSH` | Override USB SSH toggle |
+| env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH overrides |
 | env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
+| env var | `LIVING_INK_CONFIG` / `LIVING_INK_CONFIG_DIR` / `LIVING_INK_DATA_DIR` | Path overrides |
 
-## Development Commands
+## Commands
 
 ```bash
-# Install dependencies
-uv sync --all-extras
+uv sync --all-extras                                  # install deps (incl. dev)
+uv run living-ink --help                              # CLI: sync | setup | status
+uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
+uv run living-ink status --json                       # machine-readable health check
 
-# Run the sync pipeline
-uv run living-ink sync
-
-# Lint
-uv run ruff check .
-
-# Format
-uv run ruff format .
-
-# Tests
-uv run pytest -v
+uv run ruff check .           # lint
+uv run ruff format --check .  # format check (`ruff format .` to fix)
+uv run pytest -v              # full suite
+uv run pytest tests/test_pipeline.py::test_name -v    # single test
+./tests/test_docker.sh        # Docker build + smoke tests (slow)
 ```
 
-## Recent Architecture Improvements
+Before committing: `uv run ruff check . && uv run ruff format --check . && uv run pytest -v`.
 
-1. **AI Vision OCR (Single API Key)**: Multimodal AI models (Gemini, GPT-4o) perform handwriting OCR directly from page images via standard OpenAI-compatible `image_url` data URIs, combining OCR + text cleanup in one step and making Google Cloud Vision optional.
-2. **Multi-Provider AI**: `living_ink/providers.py` provides universal OpenAI-compatible completions supporting Google Gemini, OpenAI, Ollama, Groq, OpenRouter, Mistral, Together, and custom endpoints, plus raw OCR mode (`none`).
-3. **Full Folder Hierarchy Mirroring**: `living_ink/destinations.py` replicates complete reMarkable nested folders into Obsidian (`root_folder` and `mirror_folders` options supported).
-4. **Comprehensive Test Suite**: `tests/` contains 201 unit tests covering providers, vision OCR, clean, destination logic, SSH, and CLI.
-5. **Google Docstrings**: All core modules follow Google docstring conventions.
-6. **Preferred Connection with Automatic Fallback**: Users select their preferred method in setup wizard (USB SSH or Cloud). `FallbackClient` automatically tries the preferred method first and seamlessly falls back to the secondary method if the primary is unavailable. CLI flags `--ssh` and `--cloud` allow forcing either method.
+## Testing
 
-## Known Issues & Tech Debt
-
-- None currently tracking. Previous tech debt (package naming, single-provider lock-in, folder flattening) resolved.
+Test at the seam that matches the change: command-level in `test_cli.py`, stage-level in `test_pipeline.py`, transport conformance in `test_transport.py`, config resolution in `test_settings.py`, registries in `test_destination_registry.py` and `test_providers.py`.
 
 ## Conventions
 
-- Always use `uv` for package management, never raw `pip`.
-- Run `uv run ruff check . && uv run ruff format --check .` before committing.
-- Run `uv run pytest -v` before committing.
-- Follow Google docstrings format for all functions, classes, and modules.
-- Feature branches: `feat/<description>`, bug fixes: `fix/<description>`.
-- Preserve existing comments and docstrings in code you don't modify.
-- Configuration should support both YAML (`config.yml`) and environment variables.
-- New destinations must subclass `Destination` ABC in `destinations.py`.
+- Always use `uv`, never raw `pip`.
+- Google-style docstrings on all modules, classes, and functions.
+- Branches: `feat/<description>`, `fix/<description>`.
+- Preserve existing comments and docstrings in code you are not changing.
+- New destinations subclass `Destination` and register themselves; new AI backends are a preset entry unless they need custom code.
