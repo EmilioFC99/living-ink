@@ -6,6 +6,7 @@ and subcommands (status, setup, sync).
 
 import argparse
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -97,15 +98,30 @@ def test_main_sync_command_with_ssh(mock_sync):
         assert args.ssh is True
 
 
-def test_cmd_sync_sets_ssh_env(tmp_path, monkeypatch):
-    """SyncCommand sets REMARKABLE_USE_SSH when --ssh is passed."""
-    import os
+def _run_sync_capturing_pipeline(args, tmp_path):
+    """Run SyncCommand with a stubbed pipeline and return the pipeline it built."""
+    built = []
 
+    def capture(self):
+        built.append(self)
+        return True
+
+    with patch("living_ink.pipeline.SyncPipeline.run", autospec=True, side_effect=capture):
+        SyncCommand(root=tmp_path).run(args)
+
+    assert built, "SyncCommand should have built and run a pipeline"
+    return built[0]
+
+
+def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
+    """SyncCommand resolves --ssh into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
     args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False)
-    with patch("living_ink.pipeline.SyncPipeline.run", return_value=True):
-        SyncCommand(root=tmp_path).run(args)
-        assert os.environ.get("REMARKABLE_USE_SSH") == "true"
+
+    pipeline = _run_sync_capturing_pipeline(args, tmp_path)
+
+    assert pipeline.settings.use_ssh is True
+    assert pipeline.settings.preferred_connection == "ssh"
 
 
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
@@ -135,15 +151,27 @@ def test_main_sync_command_with_cloud(mock_sync):
         assert args.cloud is True
 
 
-def test_cmd_sync_sets_cloud_env(tmp_path, monkeypatch):
-    """SyncCommand sets REMARKABLE_PREFERRED_CONNECTION=cloud when --cloud is passed."""
-    import os
-
+def test_cmd_sync_cloud_flag_resolves_to_cloud(tmp_path, monkeypatch):
+    """SyncCommand resolves --cloud into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
     args = MagicMock(ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False)
-    with patch("living_ink.pipeline.SyncPipeline.run", return_value=True):
-        SyncCommand(root=tmp_path).run(args)
-        assert os.environ.get("REMARKABLE_PREFERRED_CONNECTION") == "cloud"
+
+    pipeline = _run_sync_capturing_pipeline(args, tmp_path)
+
+    assert pipeline.settings.preferred_connection == "cloud"
+    assert pipeline.settings.use_ssh is False
+
+
+def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeypatch):
+    """Resolved settings stay on the pipeline instead of leaking into os.environ."""
+    for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
+        monkeypatch.delenv(var, raising=False)
+    args = MagicMock(ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False)
+
+    _run_sync_capturing_pipeline(args, tmp_path)
+
+    for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
+        assert var not in os.environ
 
 
 @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))

@@ -4,18 +4,15 @@ reMarkable Cloud API client helpers.
 
 import json as json_module
 import logging
-import os
 from pathlib import Path
 from typing import Any, List, Optional
 
 from living_ink.models import Document
+from living_ink.settings import Settings
 from living_ink.transport import RemarkableTransport, UnsupportedOperation
 
 logger = logging.getLogger(__name__)
 
-# Configuration - check env var first, then fall back to file
-REMARKABLE_TOKEN = os.environ.get("REMARKABLE_TOKEN")
-_REMARKABLE_USE_SSH = os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
 REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
 REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
 CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
@@ -118,34 +115,33 @@ class FallbackClient:
         return self._with_fallback("get_tags", doc)
 
 
-def get_rmapi():
+def get_rmapi(settings: Optional[Settings] = None):
     """
     Get or initialize the reMarkable API client with automatic fallback.
 
     Uses preferred connection (SSH or Cloud) if available, and falls back to the
     secondary method if the primary fails or is disconnected.
-    Returns either RemarkableClient, SSHClient, or FallbackClient.
-    """
-    # 1. Determine preferred connection mode
-    pref_env = os.environ.get("REMARKABLE_PREFERRED_CONNECTION", "").strip().lower()
-    use_ssh_env = (
-        os.environ.get("REMARKABLE_USE_SSH", "").lower() in ("1", "true", "yes")
-        or _REMARKABLE_USE_SSH
-    )
 
-    if pref_env in ("ssh", "usb"):
+    Args:
+        settings: Resolved settings for this run. Defaults to resolving them
+            from the environment alone, for callers with no config in hand.
+
+    Returns:
+        Either RemarkableClient, SSHClient, or FallbackClient.
+    """
+    resolved = settings or Settings.from_env()
+
+    # 1. Determine preferred connection mode
+    pref = resolved.preferred_connection
+    if pref in ("ssh", "usb"):
         preferred = "ssh"
-    elif pref_env in ("cloud", "rmapi"):
+    elif pref in ("cloud", "rmapi"):
         preferred = "cloud"
-    elif use_ssh_env:
+    elif resolved.use_ssh:
         preferred = "ssh"
     else:
-        token_candidate = (
-            os.environ.get("REMARKABLE_TOKEN")
-            or REMARKABLE_TOKEN
-            or (Path.home() / ".rmapi").exists()
-        )
-        preferred = "cloud" if token_candidate and not use_ssh_env else "ssh"
+        token_candidate = resolved.remarkable_token or (Path.home() / ".rmapi").exists()
+        preferred = "cloud" if token_candidate else "ssh"
 
     # 2. Instantiate potential clients
     ssh_client = None
@@ -154,11 +150,13 @@ def get_rmapi():
     try:
         from living_ink.ssh import create_ssh_client
 
-        ssh_client = create_ssh_client()
+        ssh_client = create_ssh_client(
+            host=resolved.ssh_host, user=resolved.ssh_user, port=resolved.ssh_port
+        )
     except Exception as e:
         logger.debug(f"Could not create SSH client: {e}")
 
-    token = os.environ.get("REMARKABLE_TOKEN") or REMARKABLE_TOKEN
+    token = resolved.remarkable_token
     rmapi_file = Path.home() / ".rmapi"
     if not token and rmapi_file.exists():
         try:
