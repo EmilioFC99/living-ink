@@ -13,10 +13,12 @@ import pytest
 
 from living_ink.providers import (
     PROVIDER_PRESETS,
+    PROVIDER_REGISTRY,
     NoneProvider,
     TextRepairProvider,
     UniversalChatProvider,
     get_provider,
+    register_provider,
 )
 
 # =========================================================================
@@ -834,3 +836,72 @@ class TestProviderPresets:
     def test_preset_count(self):
         """Sanity check: at least 5 presets exist."""
         assert len(PROVIDER_PRESETS) >= 5
+
+
+# =========================================================================
+# Provider registry
+# =========================================================================
+
+
+class TestProviderRegistry:
+    """A provider that is not OpenAI-compatible can still be selected by name."""
+
+    @pytest.fixture
+    def clean_registry(self):
+        """Restore the registry after a test registers something into it."""
+        original = dict(PROVIDER_REGISTRY)
+        yield PROVIDER_REGISTRY
+        PROVIDER_REGISTRY.clear()
+        PROVIDER_REGISTRY.update(original)
+
+    @pytest.fixture
+    def echo_provider(self, clean_registry):
+        """Register a minimal provider under the name 'echo'."""
+
+        @register_provider("Echo")
+        class EchoProvider(TextRepairProvider):
+            def __init__(self, suffix: str = ""):
+                self.suffix = suffix
+
+            @classmethod
+            def from_config(cls, ai_config):
+                return cls(suffix=ai_config.get("suffix", ""))
+
+            def repair_text(self, raw_text: str, instructions: str) -> str:
+                return raw_text + self.suffix
+
+            @property
+            def name(self) -> str:
+                return "echo"
+
+        return EchoProvider
+
+    def test_registration_normalizes_the_name(self, echo_provider):
+        assert PROVIDER_REGISTRY["echo"] is echo_provider
+
+    def test_get_provider_builds_the_registered_class(self, echo_provider):
+        provider = get_provider({"ai": {"provider": "echo", "suffix": "!"}})
+
+        assert isinstance(provider, echo_provider)
+        assert provider.repair_text("hi", "") == "hi!"
+
+    def test_provider_name_is_case_insensitive(self, echo_provider):
+        assert isinstance(get_provider({"ai": {"provider": "ECHO"}}), echo_provider)
+
+    def test_registration_wins_over_a_preset_of_the_same_name(self, clean_registry):
+        @register_provider("ollama")
+        class Replacement(NoneProvider):
+            @classmethod
+            def from_config(cls, ai_config):
+                return cls()
+
+        assert isinstance(get_provider({"ai": {"provider": "ollama"}}), Replacement)
+
+    def test_unknown_provider_error_lists_registered_names(self, echo_provider):
+        with pytest.raises(ValueError, match="Unknown AI provider") as exc_info:
+            get_provider({"ai": {"provider": "banana"}})
+        assert "echo" in str(exc_info.value)
+
+    def test_presets_still_resolve_when_nothing_is_registered(self):
+        provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
+        assert isinstance(provider, UniversalChatProvider)
