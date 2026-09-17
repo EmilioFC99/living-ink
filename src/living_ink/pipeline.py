@@ -68,7 +68,6 @@ ROOT = find_repo_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 WHITE_DIR = DATA_DIR / "remarkable_pngs_white"
 VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
@@ -76,14 +75,24 @@ OCR_DIR = DATA_DIR / "output"  # OCR text files
 PDF_DIR = DATA_DIR / "remarkable_pdfs"
 DOCS_DIR = DATA_DIR / "remarkable_documents"
 LOGS_DIR = get_logs_dir()
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOGS_DIR / "pipeline.log"
 
-WHITE_DIR.mkdir(parents=True, exist_ok=True)
-VISION_DIR.mkdir(parents=True, exist_ok=True)
-OCR_DIR.mkdir(parents=True, exist_ok=True)
-PDF_DIR.mkdir(parents=True, exist_ok=True)
-DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+_runtime_dirs_ready = False
+
+
+def ensure_runtime_dirs() -> None:
+    """Create the runtime artifact directories if they do not exist yet.
+
+    Called on demand rather than at import time so that merely importing this
+    module has no filesystem side effects. Repeat calls are near-free.
+    """
+    global _runtime_dirs_ready
+    if _runtime_dirs_ready:
+        return
+    for folder in (DATA_DIR, LOGS_DIR, WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR):
+        folder.mkdir(parents=True, exist_ok=True)
+    _runtime_dirs_ready = True
 
 
 # --- CONFIGURATION LOADING (YAML) ---
@@ -318,6 +327,7 @@ ACTIVE_DESTINATIONS = get_destinations_from_config(yaml_config)
 
 def get_state_file_path(dest_name: str) -> Path:
     """Get the path to the state file for a specific destination."""
+    ensure_runtime_dirs()
     new_path = DATA_DIR / f"processed_notebooks_{dest_name}.json"
     legacy_path = ROOT / f"processed_notebooks_{dest_name}.json"
     # Automatically migrate legacy state file from root to data directory if present
@@ -445,6 +455,7 @@ def sanitize_filename(name: str) -> str:
 
 def log(msg):
     print(msg)
+    ensure_runtime_dirs()
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
@@ -947,6 +958,7 @@ class SyncPipeline:
             data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
+        ensure_runtime_dirs()
         self.options = options or SyncOptions()
         opts = self.options
 
