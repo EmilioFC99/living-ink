@@ -13,6 +13,8 @@ from PIL import Image
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
+    DestinationError,
+    DestinationUnavailable,
     ObsidianDestination,
 )
 
@@ -387,15 +389,41 @@ class TestAppleNotesDestination:
 
     @patch("living_ink.destinations.subprocess.run")
     def test_publish_handles_applescript_failure(self, mock_run):
-        """Returns False after retries if osascript fails."""
+        """Raises DestinationUnavailable after exhausting retries."""
         mock_run.return_value = MagicMock(returncode=1, stderr="AppleScript Error")
 
         dest = AppleNotesDestination()
         with patch("living_ink.destinations.time.sleep"):
-            success = dest.publish("Failed Note", "Content", [])
+            with pytest.raises(DestinationUnavailable) as exc_info:
+                dest.publish("Failed Note", "Content", [])
 
-        assert success is False
+        assert "AppleScript Error" in str(exc_info.value)
         assert mock_run.call_count == 3
+
+    @patch("living_ink.destinations.subprocess.run")
+    def test_publish_reports_missing_osascript(self, mock_run):
+        """A non-macOS host is reported as unavailable, not as a generic failure."""
+        mock_run.side_effect = FileNotFoundError("osascript")
+
+        with pytest.raises(DestinationUnavailable, match="osascript not found"):
+            AppleNotesDestination().publish("Note", "Content", [])
+
+
+class TestObsidianFailureReporting:
+    """An unwritable vault must be reported as a DestinationError."""
+
+    def test_unwritable_vault_raises_destination_error(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        dest = ObsidianDestination(vault_path=str(vault), root_folder="Living Ink")
+
+        with patch("living_ink.destinations.Path.mkdir", side_effect=PermissionError("denied")):
+            with pytest.raises(DestinationError, match="Could not write"):
+                dest.publish("Note", "Content", [])
+
+    def test_destination_unavailable_is_a_destination_error(self):
+        """Callers can catch the base class and handle both cases."""
+        assert issubclass(DestinationUnavailable, DestinationError)
 
 
 # =========================================================================

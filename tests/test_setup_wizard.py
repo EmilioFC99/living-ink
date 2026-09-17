@@ -260,6 +260,39 @@ class TestConfigGeneration:
         assert parsed["remarkable"]["ssh_host"] == "10.11.99.1"
         assert parsed["remarkable"]["device_token"] == ""
 
+    def test_generate_config_yaml_escapes_special_characters(self):
+        """Quotes, backslashes and colons in user input survive a round-trip."""
+        api_key = 'sk-ab"c\\d:e'
+        vault_path = '/Users/test/My "Vault": notes\\here'
+        folder = 'Note"s: #1'
+
+        parsed = yaml.safe_load(
+            generate_config_yaml(
+                ai_provider="openai",
+                ai_api_key=api_key,
+                ai_model="gpt-4o-mini",
+                obsidian_enabled=True,
+                obsidian_vault_path=vault_path,
+                obsidian_root_folder=folder,
+                apple_notes_enabled=True,
+                apple_notes_folder=folder,
+            )
+        )
+
+        assert parsed["ai"]["api_key"] == api_key
+        assert parsed["obsidian"]["vault_path"] == vault_path
+        assert parsed["obsidian"]["root_folder"] == folder
+        assert parsed["apple_notes"]["folder_name"] == folder
+
+    def test_generate_config_yaml_preserves_section_comments(self):
+        """The generated file stays readable and hand-editable."""
+        yaml_str = generate_config_yaml(
+            ai_provider="gemini", ai_api_key="k", ai_model="gemini-flash-latest"
+        )
+        assert "# Living Ink Configuration" in yaml_str
+        assert "# 1. AI Handwriting OCR & Text Cleanup" in yaml_str
+        assert "# 6. Apple Notes Destination" in yaml_str
+
 
 # =========================================================================
 # LaunchAgent Management

@@ -106,6 +106,10 @@ class SSHClient:
         self.port = port
         self._documents: List[Document] = []
         self._documents_by_id: Dict[str, Document] = {}
+        # Maps document id -> fileType ("pdf", "epub", or None for notebooks).
+        # Populated lazily; see get_file_type().
+        self._file_type_cache: Dict[str, Optional[str]] = {}
+        self._file_types_loaded = False
 
     def _ssh_command(self, command: str, timeout: int = 30) -> str:
         """Execute a command on the tablet via SSH."""
@@ -362,20 +366,33 @@ class SSHClient:
         """
         Get the file type (pdf, epub, etc.) for a document.
 
+        The result is memoised. On the first miss the whole library is
+        batch-loaded via get_all_file_types(), because discovery asks for the
+        type of every document and one SSH round-trip per document is slow
+        over USB.
+
         Returns the extension without dot, or None if not a file-based document.
         """
-        # Check cache first
-        if hasattr(self, "_file_type_cache") and doc.id in self._file_type_cache:
+        if doc.id in self._file_type_cache:
             return self._file_type_cache[doc.id]
 
-        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
+        if not self._file_types_loaded:
+            self.get_all_file_types()
+            if doc.id in self._file_type_cache:
+                return self._file_type_cache[doc.id]
 
+        # Fall back to a single-document probe: the batch read may have been
+        # partial, or this document may have appeared since it ran.
+        content_file = f"{XOCHITL_PATH}/{doc.id}.content"
         try:
             content = self._scp_download(content_file, timeout=10)
             data = json.loads(content.decode("utf-8"))
-            return data.get("fileType")
+            file_type = data.get("fileType")
         except Exception:
-            return None
+            file_type = None
+
+        self._file_type_cache[doc.id] = file_type
+        return file_type
 
     def get_tags(self, doc: Document) -> List[str]:
         """Get tags for a document from its .content file.
@@ -408,10 +425,12 @@ class SSHClient:
         Returns a dict mapping document ID to file type (pdf, epub, or None).
         Much more efficient than calling get_file_type() for each document.
         """
-        if hasattr(self, "_file_type_cache"):
+        if self._file_types_loaded:
             return self._file_type_cache
 
-        self._file_type_cache: dict[str, Optional[str]] = {}
+        # Set before the read so a failure is not retried on every lookup;
+        # get_file_type() still falls back to a per-document probe.
+        self._file_types_loaded = True
 
         try:
             # Read all .content files in a single command

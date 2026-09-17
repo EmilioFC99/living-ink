@@ -23,7 +23,12 @@ sys.path.append(str(Path(__file__).parent.parent))
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
 from living_ink.config import get_config_path, get_data_dir, get_logs_dir
-from living_ink.destinations import AppleNotesDestination, Destination, ObsidianDestination
+from living_ink.destinations import (
+    AppleNotesDestination,
+    Destination,
+    DestinationError,
+    ObsidianDestination,
+)
 
 
 # --- LOGGING SUPPRESSION ---
@@ -1588,16 +1593,31 @@ class SyncPipeline:
                     else:
                         target_subfolder = full_subfolder
 
-                    dest_success = dest.publish(
-                        notebook_name=display_title,
-                        text_content=clean_text,
-                        image_paths=imgs,
-                        sub_folder=target_subfolder,
-                        document_path=doc_file_path
-                        if (doc_file_path and doc_file_path.exists())
-                        else None,
-                        tags=notebook_tags,
-                    )
+                    # A DestinationError is an expected, user-actionable failure
+                    # (vault gone, Notes not responding): report it plainly and
+                    # carry on to the next destination. Anything else is a bug,
+                    # and is logged with a traceback so it is distinguishable.
+                    try:
+                        dest_success = dest.publish(
+                            notebook_name=display_title,
+                            text_content=clean_text,
+                            image_paths=imgs,
+                            sub_folder=target_subfolder,
+                            document_path=doc_file_path
+                            if (doc_file_path and doc_file_path.exists())
+                            else None,
+                            tags=notebook_tags,
+                        )
+                    except DestinationError as e:
+                        log(f"⚠️ {dest_name}: {e}")
+                        dest_success = False
+                    except Exception:
+                        import traceback
+
+                        log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
+                        log(traceback.format_exc())
+                        dest_success = False
+
                     if dest_success:
                         # Update state for THIS destination immediately
                         add_to_processed_log(dest_name, notebook_id, notebook_version)
