@@ -8,12 +8,15 @@ Based on the protocol used by ddvk/rmapi.
 """
 
 import json
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from living_ink.models import Document
+
+logger = logging.getLogger(__name__)
 
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
@@ -241,6 +244,101 @@ class RemarkableClient:
 
         zip_buffer.seek(0)
         return zip_buffer.read()
+
+    def check_connection(self) -> bool:
+        """Report whether the cloud is reachable with the current credentials.
+
+        Returns:
+            True if the sync root can be fetched, False otherwise.
+        """
+        try:
+            response = self._request(ROOT_URL)
+            return response.status_code == 200
+        except Exception as e:
+            logger.debug(f"Cloud connection check failed: {e}")
+            return False
+
+    def _blob_entries(self, doc: Document) -> List[Dict[str, Any]]:
+        """Return the blob index for a document, reusing the copy from get_meta_items.
+
+        Args:
+            doc: Document whose member files are wanted.
+
+        Returns:
+            List of index entries, each with at least ``id`` and ``hash``.
+        """
+        if doc.files:
+            return doc.files
+        blob_content = self._get_file(doc.hash, f"{doc.id}.docSchema")
+        return self._parse_index(blob_content)
+
+    def _content_dict(self, doc: Document) -> Dict[str, Any]:
+        """Fetch and parse a document's ``.content`` blob.
+
+        Args:
+            doc: Document whose content descriptor is wanted.
+
+        Returns:
+            The parsed descriptor, or an empty dict if it is missing or invalid.
+        """
+        for entry in self._blob_entries(doc):
+            if entry["id"].endswith(".content"):
+                try:
+                    raw = self._get_file(entry["hash"], entry["id"])
+                    return json.loads(raw.decode("utf-8"))
+                except Exception as e:
+                    logger.debug(f"Could not read .content for {doc.id}: {e}")
+                    return {}
+        return {}
+
+    def get_file_type(self, doc: Document) -> Optional[str]:
+        """Get the file type ('pdf', 'epub', …) for a document.
+
+        Args:
+            doc: The document to inspect.
+
+        Returns:
+            The extension without a dot, or None for a plain notebook.
+        """
+        return self._content_dict(doc).get("fileType") or None
+
+    def get_tags(self, doc: Document) -> List[str]:
+        """Get tags for a document from its ``.content`` blob.
+
+        Args:
+            doc: The document to inspect.
+
+        Returns:
+            List of tag strings, empty if the document has none.
+        """
+        if doc.tags:
+            return list(doc.tags)
+
+        from living_ink.extract import extract_tags_from_dict
+
+        tags = extract_tags_from_dict(self._content_dict(doc))
+        doc.tags = tags
+        return list(tags)
+
+    def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
+        """Download the source PDF or EPUB backing an annotated document.
+
+        Args:
+            doc: The document to download from.
+            extension: File extension without a dot, e.g. 'pdf' or 'epub'.
+
+        Returns:
+            Raw file bytes, or None if the document has no such member.
+        """
+        suffix = f".{extension}"
+        for entry in self._blob_entries(doc):
+            if entry["id"].endswith(suffix):
+                try:
+                    return self._get_file(entry["hash"], entry["id"])
+                except Exception as e:
+                    logger.debug(f"Could not download {entry['id']}: {e}")
+                    return None
+        return None
 
 
 def register_device(one_time_code: str) -> Dict[str, str]:
