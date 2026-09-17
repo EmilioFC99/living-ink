@@ -30,6 +30,7 @@ from living_ink.destinations import (
     DestinationError,
     ObsidianDestination,
 )
+from living_ink.settings import Settings
 
 
 # --- LOGGING SUPPRESSION ---
@@ -100,7 +101,12 @@ def ensure_runtime_dirs() -> None:
 
 # --- CONFIGURATION LOADING (YAML) ---
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load configuration from YAML and apply settings to environment.
+    """Load configuration from YAML and export the credentials third parties read.
+
+    Only settings that another library picks up from the environment on its own
+    are exported (``OPENAI_API_KEY``, ``GOOGLE_APPLICATION_CREDENTIALS``).
+    Living Ink's own settings are not: they are resolved from this dictionary by
+    :class:`living_ink.settings.Settings` and passed explicitly.
 
     Args:
         config_path: Path to YAML config file. Defaults to get_config_path().
@@ -131,49 +137,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                         "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
                     )
 
-                # 2. reMarkable
-                if "remarkable" in yaml_config:
-                    rm_cfg = yaml_config["remarkable"]
-
-                    if "preferred_connection" in rm_cfg and rm_cfg["preferred_connection"]:
-                        os.environ.setdefault(
-                            "REMARKABLE_PREFERRED_CONNECTION",
-                            str(rm_cfg["preferred_connection"]).strip().lower(),
-                        )
-
-                    if "device_token" in rm_cfg and rm_cfg["device_token"]:
-                        os.environ.setdefault(
-                            "REMARKABLE_TOKEN", str(rm_cfg["device_token"]).strip()
-                        )
-
-                    # SSH connection settings
-                    ssh_enabled = (
-                        rm_cfg.get("use_ssh") if "use_ssh" in rm_cfg else yaml_config.get("use_ssh")
-                    )
-                    if ssh_enabled is not None and "REMARKABLE_USE_SSH" not in os.environ:
-                        if isinstance(ssh_enabled, bool):
-                            os.environ["REMARKABLE_USE_SSH"] = "true" if ssh_enabled else "false"
-                        elif str(ssh_enabled).strip().lower() in ("1", "true", "yes"):
-                            os.environ["REMARKABLE_USE_SSH"] = "true"
-                        else:
-                            os.environ["REMARKABLE_USE_SSH"] = "false"
-
-                    if "ssh_host" in rm_cfg and rm_cfg["ssh_host"]:
-                        os.environ.setdefault(
-                            "REMARKABLE_SSH_HOST", str(rm_cfg["ssh_host"]).strip()
-                        )
-
-                    if "ssh_port" in rm_cfg and rm_cfg["ssh_port"]:
-                        os.environ.setdefault(
-                            "REMARKABLE_SSH_PORT", str(rm_cfg["ssh_port"]).strip()
-                        )
-
-                    if "ssh_user" in rm_cfg and rm_cfg["ssh_user"]:
-                        os.environ.setdefault(
-                            "REMARKABLE_SSH_USER", str(rm_cfg["ssh_user"]).strip()
-                        )
-
-                # 3. Google Vision (Handle JSON content directly or file path)
+                # 2. Google Vision (Handle JSON content directly or file path)
                 if "google_vision" in yaml_config:
                     gv = yaml_config["google_vision"]
 
@@ -214,31 +178,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                         except Exception as weave_err:
                             print(f"❌ Error writing google_creds.json: {weave_err}")
 
-                # 4. Sync Settings (Global vars that will be picked up later)
-                if "sync" in yaml_config:
-                    if "max_notebooks_per_run" in yaml_config["sync"]:
-                        os.environ["SYNC_MAX_NOTEBOOKS"] = str(
-                            yaml_config["sync"]["max_notebooks_per_run"]
-                        )
-                    if "sync_pdfs" in yaml_config["sync"]:
-                        val = yaml_config["sync"]["sync_pdfs"]
-                        os.environ["SYNC_PDFS"] = (
-                            "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
-                        )
-                    if "sync_epubs" in yaml_config["sync"]:
-                        val = yaml_config["sync"]["sync_epubs"]
-                        os.environ["SYNC_EPUBS"] = (
-                            "true" if str(val).strip().lower() in ("1", "true", "yes") else "false"
-                        )
-
-                # 5. Apple Notes Settings
-                if "apple_notes" in yaml_config:
-                    if "folder_name" in yaml_config["apple_notes"]:
-                        os.environ["APPLE_NOTES_FOLDER"] = str(
-                            yaml_config["apple_notes"]["folder_name"]
-                        )
-
-                # 6. AI Provider — initialize from new 'ai' section or legacy 'openai' section
+                # 3. AI Provider — initialize from new 'ai' section or legacy 'openai' section
                 configure_ai_provider(yaml_config)
 
         except Exception as e:
@@ -271,13 +211,23 @@ def get_default_config() -> Dict[str, Any]:
     return _default_config
 
 
-max_notebooks_per_run = int(os.environ.get("SYNC_MAX_NOTEBOOKS", 1))
-
 # --- DESTINATION SETUP ---
 
 
-def get_destinations_from_config(config_dict) -> List[Destination]:
-    """Factory to create a list of enabled Destinations based on config."""
+def get_destinations_from_config(
+    config_dict, settings: Optional[Settings] = None
+) -> List[Destination]:
+    """Factory to create a list of enabled Destinations based on config.
+
+    Args:
+        config_dict: Parsed ``config.yml`` contents.
+        settings: Resolved settings, used for the Apple Notes folder name.
+            Defaults to resolving them from ``config_dict`` and the environment.
+
+    Returns:
+        The destinations enabled by this configuration.
+    """
+    resolved = settings or Settings.resolve(config_dict)
     dests = []
 
     # 1. Check for Apple Notes
@@ -299,7 +249,7 @@ def get_destinations_from_config(config_dict) -> List[Destination]:
             an_enabled = False
 
     if an_enabled:
-        folder = os.environ.get("APPLE_NOTES_FOLDER", an_config.get("folder_name", "reMarkable"))
+        folder = resolved.apple_notes_folder
         dests.append(AppleNotesDestination(folder_name=folder))
         print(f"Destination added: Apple Notes (Folder: {folder})")
 
@@ -990,86 +940,88 @@ class SyncPipeline:
                 destinations if destinations is not None else list(get_default_destinations())
             )
 
+        # Config and environment are merged once, here; the CLI options layered
+        # on top are the only thing that outranks them.
+        base = Settings.resolve(self.raw_config)
+
         # 1. Connection properties
-        rm_cfg = self.raw_config.get("remarkable", {})
-        base_pref = (
-            rm_cfg.get("preferred_connection")
-            or os.environ.get("REMARKABLE_PREFERRED_CONNECTION")
-            or "ssh"
-        )
-        base_ssh = rm_cfg.get("use_ssh")
-        if base_ssh is None:
-            base_ssh = os.environ.get("REMARKABLE_USE_SSH", "true").lower() in (
-                "1",
-                "true",
-                "yes",
-            )
-
         if opts.ssh:
-            self.preferred_connection = "ssh"
-            self.use_ssh = True
+            preferred, use_ssh = "ssh", True
         elif opts.cloud:
-            self.preferred_connection = "cloud"
-            self.use_ssh = False
+            preferred, use_ssh = "cloud", False
         elif opts.preferred_connection:
-            self.preferred_connection = opts.preferred_connection.strip().lower()
-            self.use_ssh = self.preferred_connection == "ssh"
+            preferred = opts.preferred_connection.strip().lower()
+            use_ssh = preferred == "ssh"
         else:
-            self.preferred_connection = str(base_pref).strip().lower()
-            self.use_ssh = bool(base_ssh)
-
-        os.environ["REMARKABLE_PREFERRED_CONNECTION"] = self.preferred_connection
-        os.environ["REMARKABLE_USE_SSH"] = "true" if self.use_ssh else "false"
+            preferred, use_ssh = base.preferred_connection, base.use_ssh
 
         # 2. Document types and limits
-        sync_cfg = self.raw_config.get("sync", {})
-        cfg_sync_pdfs = sync_cfg.get(
-            "sync_pdfs",
-            os.environ.get("SYNC_PDFS", "false").strip().lower() in ("1", "true", "yes"),
-        )
-        cfg_sync_epubs = sync_cfg.get(
-            "sync_epubs",
-            os.environ.get("SYNC_EPUBS", "false").strip().lower() in ("1", "true", "yes"),
-        )
-        cfg_limit = int(
-            sync_cfg.get(
-                "max_notebooks_per_run",
-                os.environ.get("SYNC_MAX_NOTEBOOKS", max_notebooks_per_run),
-            )
-        )
-
         self.target_notebook = opts.notebook.strip() if opts.notebook else None
         self.all_types = opts.all_types
 
         if opts.all_types:
-            self.sync_pdfs = True
-            self.sync_epubs = True
+            sync_pdfs = sync_epubs = True
         else:
-            self.sync_pdfs = bool(cfg_sync_pdfs) if opts.sync_pdfs is None else opts.sync_pdfs
-            self.sync_epubs = bool(cfg_sync_epubs) if opts.sync_epubs is None else opts.sync_epubs
+            sync_pdfs = base.sync_pdfs if opts.sync_pdfs is None else opts.sync_pdfs
+            sync_epubs = base.sync_epubs if opts.sync_epubs is None else opts.sync_epubs
 
-        if opts.limit is not None and opts.limit > 0:
-            self.limit = opts.limit
-        else:
-            self.limit = cfg_limit
+        limit = (
+            opts.limit if opts.limit is not None and opts.limit > 0 else base.max_notebooks_per_run
+        )
+
+        self.settings = replace(
+            base,
+            preferred_connection=preferred,
+            use_ssh=use_ssh,
+            sync_pdfs=sync_pdfs,
+            sync_epubs=sync_epubs,
+            max_notebooks_per_run=limit,
+            apple_notes_folder=opts.folder or base.apple_notes_folder,
+        )
 
         # 3. Destination folder
-        self.folder = (
-            opts.folder
-            or os.environ.get("APPLE_NOTES_FOLDER")
-            or self.raw_config.get("apple_notes", {}).get("folder_name", "Living Ink")
-        )
-        if self.folder:
-            os.environ["APPLE_NOTES_FOLDER"] = self.folder
-            for dest in self.destinations:
-                if isinstance(dest, AppleNotesDestination):
-                    dest.folder_name = self.folder
+        for dest in self.destinations:
+            if isinstance(dest, AppleNotesDestination):
+                dest.folder_name = self.settings.apple_notes_folder
+
+    # The resolved settings are the single source of truth; these read-only
+    # views keep the pipeline's long-standing attribute names working.
+
+    @property
+    def preferred_connection(self) -> str:
+        """Which transport to try first, ``"ssh"`` or ``"cloud"``."""
+        return self.settings.preferred_connection
+
+    @property
+    def use_ssh(self) -> bool:
+        """Whether SSH is usable for this run."""
+        return self.settings.use_ssh
+
+    @property
+    def sync_pdfs(self) -> bool:
+        """Whether annotated PDFs are included in this run."""
+        return self.settings.sync_pdfs
+
+    @property
+    def sync_epubs(self) -> bool:
+        """Whether annotated EPUBs are included in this run."""
+        return self.settings.sync_epubs
+
+    @property
+    def limit(self) -> int:
+        """Maximum number of documents to process in this run."""
+        return self.settings.max_notebooks_per_run
+
+    @property
+    def folder(self) -> str:
+        """Destination folder name in Apple Notes."""
+        return self.settings.apple_notes_folder
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
         from living_ink.api import get_rmapi
 
-        return get_rmapi()
+        return get_rmapi(self.settings)
 
     def discover_documents(self, client: Any) -> Tuple[List[Any], Dict[str, Any]]:
         """Discover documents in the tablet library matching configured document types.

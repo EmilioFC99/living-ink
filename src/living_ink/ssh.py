@@ -422,18 +422,23 @@ def create_ssh_client(
     port: Optional[int] = None,
 ) -> SSHClient:
     """
-    Create an SSH client with settings from environment or defaults.
+    Create an SSH client for the tablet.
 
     Uses passwordless SSH key authentication (BatchMode=yes).
     Copy your key to tablet first: ssh-copy-id root@10.11.99.1
 
-    Environment variables:
-    - REMARKABLE_SSH_HOST: SSH host (default: 10.11.99.1)
-    - REMARKABLE_SSH_USER: SSH user (default: root)
-    - REMARKABLE_SSH_PORT: SSH port (default: 22)
+    Args:
+        host: Tablet address. Defaults to the USB address, 10.11.99.1.
+        user: SSH user. Defaults to root.
+        port: SSH port. Defaults to 22.
+
+    Returns:
+        An SSHClient pointed at the given endpoint. Connection settings are
+        resolved by :class:`living_ink.settings.Settings` and passed in by the
+        caller rather than read from the environment here.
     """
     return SSHClient(
-        host=host or os.environ.get("REMARKABLE_SSH_HOST", DEFAULT_SSH_HOST),
-        user=user or os.environ.get("REMARKABLE_SSH_USER", DEFAULT_SSH_USER),
-        port=port or int(os.environ.get("REMARKABLE_SSH_PORT", str(DEFAULT_SSH_PORT))),
+        host=host or DEFAULT_SSH_HOST,
+        user=user or DEFAULT_SSH_USER,
+        port=port or DEFAULT_SSH_PORT,
     )
