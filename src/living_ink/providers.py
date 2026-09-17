@@ -258,83 +258,105 @@ class UniversalChatProvider(TextRepairProvider):
         """
         return f"{self.base_url}/chat/completions"
 
-    def _chat(self, prompt: str) -> str:
-        """Send a chat completion request to the configured endpoint.
+    def _post_chat(
+        self,
+        messages: list,
+        temperature: float,
+        purpose: str = "AI API",
+    ) -> str:
+        """POST an OpenAI-compatible chat completion and return the reply text.
 
-        Constructs an OpenAI-compatible JSON payload with system and user
-        messages, sends it via HTTP POST, and extracts the response content.
+        This is the single HTTP path for the provider. Text cleanup and vision
+        OCR differ only in the messages they build and the temperature they
+        want, so they both funnel through here rather than each carrying their
+        own copy of the request construction, auth, and error handling.
 
         Uses stdlib ``urllib`` — no external HTTP libraries required.
+
+        Args:
+            messages: The ``messages`` array, already in OpenAI wire format.
+                For vision requests the user content is a list of parts.
+            temperature: Sampling temperature for this request.
+            purpose: Human-readable label used to prefix log lines, so a
+                failure is attributable to cleanup or to OCR.
+
+        Returns:
+            The assistant's reply, stripped. Empty string on any failure —
+            callers are expected to degrade gracefully (fall back to the raw
+            text) rather than abort the sync over one unreachable API.
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+
+        req = urllib.request.Request(
+            self._build_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+
+        # Some local providers (Ollama) need no auth at all.
+        if self.auth_header and self.api_key:
+            value = f"{self.auth_prefix} {self.api_key}" if self.auth_prefix else self.api_key
+            req.add_header(self.auth_header, value)
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.error("%s HTTP Error (%s): %s %s", purpose, self.name, e.code, e.reason)
+            try:
+                logger.error("Details: %s", e.read().decode("utf-8"))
+            except Exception:
+                pass
+            return ""
+        except urllib.error.URLError as e:
+            logger.error("%s Connection Error (%s): %s", purpose, self.name, e.reason)
+            return ""
+        except Exception as e:
+            logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e)
+            return ""
+
+        choices = body.get("choices", [])
+        if not choices:
+            return ""
+
+        choice = choices[0]
+        content = choice.get("message", {}).get("content")
+        if not content:
+            # A safety filter returns a well-formed response with no content;
+            # say so explicitly rather than reporting a mysterious empty result.
+            finish_reason = choice.get("finish_reason")
+            if finish_reason and "filter" in str(finish_reason).lower():
+                logger.warning(
+                    "%s completion blocked by filter (%s): %s",
+                    purpose,
+                    self.name,
+                    finish_reason,
+                )
+            return ""
+
+        return content.strip()
+
+    def _chat(self, prompt: str) -> str:
+        """Send a plain text chat completion request.
 
         Args:
             prompt: The user message content to send.
 
         Returns:
-            The assistant's response content string, or empty string
-            on any error.
+            The assistant's response content, or empty string on any error.
         """
-        url = self._build_url()
-        payload = {
-            "model": self.model,
-            "messages": [
+        return self._post_chat(
+            [
                 {"role": "system", "content": SYSTEM_MESSAGE},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": self.temperature,
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-
-        # Add auth header if configured (some local providers
-        # like Ollama don't need it)
-        if self.auth_header and self.api_key:
-            if self.auth_prefix:
-                req.add_header(
-                    self.auth_header,
-                    f"{self.auth_prefix} {self.api_key}",
-                )
-            else:
-                req.add_header(self.auth_header, self.api_key)
-
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = resp.read().decode("utf-8")
-                j = json.loads(body)
-                choices = j.get("choices", [])
-                if choices:
-                    first_msg = choices[0].get("message", {})
-                    content = first_msg.get("content")
-                    return content.strip() if content else ""
-                return ""
-        except urllib.error.HTTPError as e:
-            logger.error(
-                "AI API HTTP Error (%s): %s %s",
-                self.name,
-                e.code,
-                e.reason,
-            )
-            try:
-                err_body = e.read().decode("utf-8")
-                logger.error("Details: %s", err_body)
-            except Exception:
-                pass
-            return ""
-        except urllib.error.URLError as e:
-            logger.error(
-                "AI API Connection Error (%s): %s",
-                self.name,
-                e.reason,
-            )
-            return ""
-        except Exception as e:
-            logger.error(
-                "AI API Unexpected Error (%s): %s",
-                self.name,
-                e,
-            )
-            return ""
+            temperature=self.temperature,
+        )
 
     def repair_text(self, raw_text: str, instructions: str) -> str:
         """Clean up OCR text by sending it to the configured AI API.
@@ -376,19 +398,33 @@ class UniversalChatProvider(TextRepairProvider):
         """
         return True
 
+    #: Extension -> MIME type for the data URI. Anything else is sent as PNG,
+    #: which is what the renderer produces.
+    _MIME_TYPES = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+    }
+
     def ocr_image(self, image_path: str, instructions: str) -> str:
         """Perform OCR on an image via the provider's vision capability.
 
-        Reads the PNG image, encodes it as base64, and sends a multimodal
-        chat completion request. The AI reads the handwriting and returns
+        Reads the image, encodes it as a base64 data URI, and sends a
+        multimodal chat completion. The AI reads the handwriting and returns
         clean text in a single step — no separate OCR service required.
 
         Uses the standard OpenAI vision format (``image_url`` with data URI),
-        which is supported by Gemini, OpenAI GPT-4o, Ollama (LLaVA),
-        Groq, OpenRouter, Mistral Pixtral, and others.
+        which is supported by Gemini, OpenAI GPT-4o, Ollama (LLaVA), Groq,
+        OpenRouter, Mistral Pixtral, and others.
+
+        Note:
+            Temperature is pinned to 0.2 regardless of ``self.temperature``:
+            transcription wants determinism, whereas text repair may be
+            configured looser.
 
         Args:
-            image_path: Absolute path to the PNG image file.
+            image_path: Absolute path to the image file.
             instructions: Prompt instructions for transcription
                 (loaded from ``ocr_prompt.txt``).
 
@@ -397,99 +433,29 @@ class UniversalChatProvider(TextRepairProvider):
             string on any error.
         """
         with open(image_path, "rb") as f:
-            image_data = f.read()
+            b64_string = base64.b64encode(f.read()).decode("ascii")
 
-        b64_string = base64.b64encode(image_data).decode("ascii")
-
-        # Determine MIME type from file extension
         path_str = str(image_path)
         ext = path_str.rsplit(".", 1)[-1].lower() if "." in path_str else "png"
-        mime_map = {
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "webp": "image/webp",
-        }
-        mime_type = mime_map.get(ext, "image/png")
+        mime_type = self._MIME_TYPES.get(ext, "image/png")
 
-        data_uri = f"data:{mime_type};base64,{b64_string}"
-
-        # Build multimodal message with text + image
-        user_content = [
-            {"type": "text", "text": instructions},
-            {"type": "image_url", "image_url": {"url": data_uri}},
-        ]
-
-        url = self._build_url()
-        payload = {
-            "model": self.model,
-            "messages": [
+        return self._post_chat(
+            [
                 {"role": "system", "content": VISION_SYSTEM_MESSAGE},
-                {"role": "user", "content": user_content},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": instructions},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{b64_string}"},
+                        },
+                    ],
+                },
             ],
-            "temperature": 0.2,
-        }
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-
-        if self.auth_header and self.api_key:
-            if self.auth_prefix:
-                req.add_header(
-                    self.auth_header,
-                    f"{self.auth_prefix} {self.api_key}",
-                )
-            else:
-                req.add_header(self.auth_header, self.api_key)
-
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = resp.read().decode("utf-8")
-                j = json.loads(body)
-                choices = j.get("choices", [])
-                if not choices:
-                    return ""
-                first_choice = choices[0]
-                message = first_choice.get("message", {})
-                content = message.get("content")
-                if not content:
-                    finish_reason = first_choice.get("finish_reason")
-                    if finish_reason and "filter" in str(finish_reason).lower():
-                        logger.warning(
-                            "Vision OCR completion blocked by filter (%s): %s",
-                            self.name,
-                            finish_reason,
-                        )
-                    return ""
-                return content.strip()
-        except urllib.error.HTTPError as e:
-            logger.error(
-                "Vision OCR HTTP Error (%s): %s %s",
-                self.name,
-                e.code,
-                e.reason,
-            )
-            try:
-                err_body = e.read().decode("utf-8")
-                logger.error("Details: %s", err_body)
-            except Exception:
-                pass
-            return ""
-        except urllib.error.URLError as e:
-            logger.error(
-                "Vision OCR Connection Error (%s): %s",
-                self.name,
-                e.reason,
-            )
-            return ""
-        except Exception as e:
-            logger.error(
-                "Vision OCR Unexpected Error (%s): %s",
-                self.name,
-                e,
-            )
-            return ""
+            temperature=0.2,
+            purpose="Vision OCR",
+        )
 
 
 # ---------------------------------------------------------------------------

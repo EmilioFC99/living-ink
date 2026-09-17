@@ -8,11 +8,12 @@ Based on the protocol used by ddvk/rmapi.
 """
 
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from living_ink.models import Document
 
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
@@ -24,52 +25,6 @@ USER_TOKEN_URL = f"{AUTH_HOST}/token/json/2/user/new"
 SYNC_HOST = "https://internal.cloud.remarkable.com"
 ROOT_URL = f"{SYNC_HOST}/sync/v4/root"
 FILES_URL = f"{SYNC_HOST}/sync/v3/files"
-
-
-@dataclass
-class Document:
-    """Represents a document or folder in the reMarkable cloud."""
-
-    id: str
-    hash: str
-    name: str
-    doc_type: str  # "DocumentType" or "CollectionType"
-    parent: str = ""
-    deleted: bool = False
-    pinned: bool = False
-    last_modified: Optional[datetime] = None
-    size: int = 0
-    files: List[Dict[str, Any]] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-
-    @property
-    def is_folder(self) -> bool:
-        return self.doc_type == "CollectionType"
-
-    @property
-    def VissibleName(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.name
-
-    @property
-    def ID(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.id
-
-    @property
-    def Parent(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.parent
-
-    @property
-    def Type(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.doc_type
-
-    @property
-    def ModifiedClient(self) -> Optional[datetime]:
-        """Compatibility with rmapy naming."""
-        return self.last_modified
 
 
 class RemarkableClient:
