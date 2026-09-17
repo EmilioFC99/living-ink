@@ -23,17 +23,12 @@ classifiers = [
 
 dependencies = [
     "rmscene>=0.6.0",
-    "pytesseract>=0.3.10",
     "Pillow>=10.0.0",
     "rmc>=0.3.0",
     "requests>=2.28.0",
-    "cairosvg>=2.8.2",
     "pymupdf>=1.24.0",
     "ebooklib>=0.18",
     "beautifulsoup4>=4.12.0",
-    "google-cloud-vision>=3.11.0",
-    "pypdf>=6.6.0",
-    "reportlab>=4.4.7",
     "pyyaml>=6.0.3",
 ]
 
@@ -41,11 +36,12 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=1.0.0",
-    "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+# Optional fallback OCR backend. Without it the pipeline uses AI vision OCR;
+# see pipeline.vision_ocr_image_service_account(), which degrades gracefully.
 ocr = [
-    "google-cloud-vision>=3.0.0",
+    "google-cloud-vision>=3.11.0",
 ]
 
 [project.scripts]
@@ -57,9 +53,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/living_ink"]
-
-[tool.black]
-line-length = 100
 
 [tool.ruff]
 line-length = 100

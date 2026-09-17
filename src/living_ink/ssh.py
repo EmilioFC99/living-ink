@@ -19,9 +19,10 @@ import logging
 import os
 import subprocess
 import zipfile
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
+
+from living_ink.models import Document
 
 logger = logging.getLogger(__name__)
 
@@ -32,64 +33,6 @@ DEFAULT_SSH_PORT = 22
 
 # Document storage path on the tablet
 XOCHITL_PATH = "/home/root/.local/share/remarkable/xochitl"
-
-
-@dataclass
-class Document:
-    """Represents a document or folder on the reMarkable tablet."""
-
-    id: str
-    hash: str
-    name: str
-    doc_type: str  # "DocumentType" or "CollectionType"
-    parent: str = ""
-    deleted: bool = False
-    pinned: bool = False
-    synced: bool = True  # False means cloud-archived (not on device)
-    last_modified: Optional[datetime] = None
-    size: int = 0
-    files: List[Dict[str, Any]] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    # SSH-specific: local path to the document folder
-    local_path: Optional[str] = None
-
-    @property
-    def is_folder(self) -> bool:
-        return self.doc_type == "CollectionType"
-
-    @property
-    def is_cloud_archived(self) -> bool:
-        """True if document is archived to cloud (not on device)."""
-        return not self.synced or self.parent == "trash"
-
-    @property
-    def VissibleName(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.name
-
-    @property
-    def ID(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.id
-
-    @property
-    def Parent(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.parent
-
-    @property
-    def Type(self) -> str:
-        """Compatibility with cloud client naming."""
-        return self.doc_type
-
-    @property
-    def ModifiedClient(self) -> Optional[datetime]:
-        """Compatibility with cloud client naming."""
-        return self.last_modified
-
-
-# Alias for compatibility
-Folder = Document
 
 
 class SSHClient:
@@ -471,16 +414,6 @@ class SSHClient:
             logger.warning(f"Failed to batch-load file types: {e}")
 
         return self._file_type_cache
-
-
-def check_ssh_available(
-    host: str = DEFAULT_SSH_HOST,
-    user: str = DEFAULT_SSH_USER,
-    port: int = DEFAULT_SSH_PORT,
-) -> bool:
-    """Check if SSH connection to reMarkable tablet is available."""
-    client = SSHClient(host=host, user=user, port=port)
-    return client.check_connection()
 
 
 def create_ssh_client(

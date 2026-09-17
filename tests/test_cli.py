@@ -16,18 +16,25 @@ from living_ink.cli import (
     SetupCommand,
     StatusCommand,
     SyncCommand,
-    get_config_path,
-    get_root,
     main,
 )
+from living_ink.config import find_repo_root, get_config_path
 
 
-def test_get_root(tmp_path):
-    """get_root identifies directory with pyproject.toml."""
+def test_find_repo_root_prefers_cwd(tmp_path):
+    """find_repo_root identifies a directory holding pyproject.toml."""
     (tmp_path / "pyproject.toml").write_text("[project]\nname='test'")
     with patch("pathlib.Path.cwd", return_value=tmp_path):
-        root = get_root()
+        root = find_repo_root()
         assert (root / "pyproject.toml").exists()
+
+
+def test_find_repo_root_accepts_a_bare_config_dir(tmp_path):
+    """A directory with only config/config.yml still counts as a root."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.yml").write_text("{}")
+    with patch("pathlib.Path.cwd", return_value=tmp_path):
+        assert find_repo_root() == tmp_path
 
 
 def test_get_config_path(tmp_path, monkeypatch):
@@ -228,11 +235,15 @@ def test_sync_command_execution(tmp_path):
             code = cmd.run(args)
             assert code == 0
             mock_init.assert_called_once()
-            assert mock_init.call_args.kwargs["notebook"] == "MyNotes"
-            assert mock_init.call_args.kwargs["limit"] == 5
-            assert mock_init.call_args.kwargs["folder"] == "TestFolder"
-            assert mock_init.call_args.kwargs["ssh"] is True
-            assert mock_init.call_args.kwargs["keep_temp"] is True
+            opts = mock_init.call_args.kwargs["options"]
+            assert opts.notebook == "MyNotes"
+            assert opts.limit == 5
+            assert opts.folder == "TestFolder"
+            assert opts.ssh is True
+            assert opts.sync_pdfs is True
+            # An unset store-true flag must defer to config, not force False.
+            assert opts.sync_epubs is None
+            assert opts.keep_temp is True
             mock_run.assert_called_once()
 
 

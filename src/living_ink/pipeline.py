@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
-import argparse
 import datetime
 import importlib.util
 import json
@@ -9,8 +8,8 @@ import logging
 import os
 import re
 import sys
-import time
 import zipfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,7 +21,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
-from living_ink.config import get_config_path, get_data_dir, get_logs_dir
+from living_ink.config import find_repo_root, get_config_path, get_data_dir, get_logs_dir
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -66,18 +65,7 @@ for logger_name in [
     _l.setLevel(logging.ERROR)
 
 
-def _find_root() -> Optional[Path]:
-    """Find project root if running from a repository checkout."""
-    cwd = Path.cwd().resolve()
-    if (cwd / "pyproject.toml").exists():
-        return cwd
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return None
-
-
-ROOT = _find_root()
+ROOT = find_repo_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
@@ -88,7 +76,6 @@ VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
 OCR_DIR = DATA_DIR / "output"  # OCR text files
 PDF_DIR = DATA_DIR / "remarkable_pdfs"
 DOCS_DIR = DATA_DIR / "remarkable_documents"
-PROCESSED_LOG = DATA_DIR / "processed_notebooks.json"
 LOGS_DIR = get_logs_dir()
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOGS_DIR / "pipeline.log"
@@ -380,11 +367,6 @@ def add_to_processed_log(dest_name: str, doc_id, version):
         json.dump(processed, f, indent=2, sort_keys=True)
 
 
-def find_notebook_images(notebook_name: str):
-    imgs = sorted([p for p in WHITE_DIR.iterdir() if p.name.startswith(notebook_name)])
-    return imgs
-
-
 def preprocess_image(in_path: Path, out_path: Path):
     im = Image.open(in_path)
     # Always composite onto a white background, regardless of mode
@@ -410,48 +392,6 @@ def preprocess_image(in_path: Path, out_path: Path):
 
 
 # --- Google Vision OCR using API key (legacy) ---
-def vision_ocr_image(png_path: Path, api_key: str, retries: int = 3):
-    import base64
-
-    import requests
-
-    with open(png_path, "rb") as f:
-        content_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
-    payload = {
-        "requests": [
-            {
-                "image": {"content": content_b64},
-                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            }
-        ]
-    }
-
-    backoff = 1
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(url, json=payload, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                r = data.get("responses", [None])[0]
-                if r and "fullTextAnnotation" in r:
-                    return r["fullTextAnnotation"].get("text", "").strip()
-                return ""
-            elif resp.status_code in (429, 500, 502, 503, 504):
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            else:
-                # authentication or client error — stop retrying
-                print("Vision API error", resp.status_code, resp.text)
-                return None
-        except Exception:
-            time.sleep(backoff)
-            backoff *= 2
-    return None
-
-
 def google_vision_available() -> bool:
     """Check if Google Cloud Vision credentials are configured and valid.
 
@@ -497,48 +437,23 @@ def vision_ocr_image_service_account(png_path: Path):
         return None
 
 
-def make_pdf_from_images(image_paths, out_pdf: Path):
-    imgs = []
-    for p in image_paths:
-        # Open and ensure consistent RGB mode (avoiding potentially problematic RGBA/transparency issues in PDF)
-        im = Image.open(p).convert("RGBA")
-        bg = Image.new("RGB", im.size, (255, 255, 255))
-        bg.paste(im, mask=im.split()[3])
-        imgs.append(bg)
-    if not imgs:
-        return None
-
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
-
-    # Use ReportLab for more robust PDF generation instead of PIL's direct save
-    try:
-        from reportlab.pdfgen import canvas
-
-        c = canvas.Canvas(str(out_pdf))
-        for img in imgs:
-            # Set page size to image size
-            width, height = img.size
-            c.setPageSize((width, height))
-
-            # Convert PIL image to ReportLab ImageReader
-            # Flattening to simpler format often helps compatibility
-
-            c.drawInlineImage(img, 0, 0, width, height)
-            c.showPage()
-        c.save()
-        return out_pdf
-    except ImportError:
-        print(
-            "ReportLab not found, falling back to PIL PDF generation. Run 'uv add reportlab' for better compatibility."
-        )
-        # Fallback to PIL
-        first, rest = imgs[0], imgs[1:]
-        first.save(out_pdf, save_all=True, append_images=rest)
-        return out_pdf
-
-
 def sanitize_filename(name: str) -> str:
-    """Replace / and other problematic characters in notebook names for safe file paths."""
+    """Make a notebook name safe for a temporary working-file path.
+
+    Note:
+        This is deliberately *not* the same as
+        ``ObsidianDestination._sanitize_filename``. This one names throwaway
+        artifacts under the data directory, so it collapses spaces to
+        underscores for shell-friendliness; the Obsidian one names files the
+        user will see in their vault, so it keeps spaces and uses hyphens.
+        Merging the two would silently rename every note in existing vaults.
+
+    Args:
+        name: Raw notebook name.
+
+    Returns:
+        A path-safe variant of the name.
+    """
     return name.replace("/", "_").replace("\\", "_").replace(" ", "_")
 
 
@@ -938,6 +853,87 @@ def select_notebook_interactive(
         print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
 
 
+@dataclass(frozen=True)
+class SyncOptions:
+    """Per-run choices for a single sync, separate from the persisted config.
+
+    These are the knobs a caller sets at invocation time — the CLI flags, in
+    practice. Config supplies the defaults; a field left at ``None`` means
+    "no override, use whatever config says". The boolean flags default to
+    ``False`` rather than ``None`` because they are store-true switches with no
+    meaningful third state.
+
+    Kept frozen so a pipeline's options cannot drift underneath it mid-run; use
+    :meth:`merged_with` to derive a variant.
+
+    Attributes:
+        notebook: Target a single notebook by name, folder path, or document ID.
+        limit: Maximum number of notebooks to process. None or 0 means "use config".
+        folder: Apple Notes folder override.
+        ssh: Force the USB SSH transport.
+        cloud: Force the reMarkable Cloud transport.
+        preferred_connection: Explicit transport preference ('ssh' or 'cloud'),
+            used when neither ``ssh`` nor ``cloud`` is set.
+        sync_pdfs: Include PDF documents. None means "use config".
+        sync_epubs: Include EPUB documents. None means "use config".
+        all_types: Include every document type; overrides sync_pdfs/sync_epubs.
+        keep_temp: Preserve rendered PNGs and OCR transcripts for debugging.
+    """
+
+    notebook: Optional[str] = None
+    limit: Optional[int] = None
+    folder: Optional[str] = None
+    ssh: bool = False
+    cloud: bool = False
+    preferred_connection: Optional[str] = None
+    sync_pdfs: Optional[bool] = None
+    sync_epubs: Optional[bool] = None
+    all_types: bool = False
+    keep_temp: bool = False
+
+    @classmethod
+    def from_args(cls, args: Any) -> "SyncOptions":
+        """Build options from a parsed argparse namespace.
+
+        This is the single place that knows CLI flag names, so adding a flag
+        means touching the parser and this method — not the pipeline internals.
+
+        Note:
+            ``--sync-pdfs`` / ``--sync-epubs`` are store-true flags, so an unset
+            flag is mapped to None ("defer to config") rather than to False
+            ("explicitly disable"), which would silently override the config.
+
+        Args:
+            args: Namespace produced by the sync subparser.
+
+        Returns:
+            A populated SyncOptions.
+        """
+        return cls(
+            notebook=getattr(args, "notebook", None),
+            limit=getattr(args, "limit", None),
+            folder=getattr(args, "folder", None),
+            ssh=getattr(args, "ssh", False),
+            cloud=getattr(args, "cloud", False),
+            sync_pdfs=getattr(args, "sync_pdfs", False) or None,
+            sync_epubs=getattr(args, "sync_epubs", False) or None,
+            all_types=getattr(args, "all_types", False),
+            keep_temp=getattr(args, "keep_temp", False),
+        )
+
+    def merged_with(self, **overrides: Any) -> "SyncOptions":
+        """Return a copy with the supplied non-None fields replaced.
+
+        Args:
+            **overrides: Field names and values. None values are ignored so
+                callers can pass through optional arguments unconditionally.
+
+        Returns:
+            A new SyncOptions; the receiver is unchanged.
+        """
+        return replace(self, **{k: v for k, v in overrides.items() if v is not None})
+
+
 class SyncPipeline:
     """Orchestrator for syncing reMarkable notebooks to configured destinations.
 
@@ -947,40 +943,30 @@ class SyncPipeline:
 
     def __init__(
         self,
+        options: Optional[SyncOptions] = None,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
-        notebook: Optional[str] = None,
-        limit: Optional[int] = None,
-        folder: Optional[str] = None,
-        ssh: bool = False,
-        cloud: bool = False,
-        preferred_connection: Optional[str] = None,
-        sync_pdfs: Optional[bool] = None,
-        sync_epubs: Optional[bool] = None,
-        all_types: bool = False,
-        keep_temp: bool = False,
         destinations: Optional[List[Destination]] = None,
     ):
-        """Initialize the SyncPipeline with base configuration and runtime overrides.
+        """Initialize the SyncPipeline by resolving options against configuration.
+
+        Every per-run knob arrives in ``options``; config supplies the defaults
+        that the options do not override. The resolution happens once, here, so
+        that by the time :meth:`run` is called the pipeline's state is settled.
 
         Args:
+            options: Per-run overrides. Defaults to an all-defaults SyncOptions,
+                i.e. "do exactly what the config says".
             config_path: Path to YAML config file. Defaults to standard config path.
             data_dir: Path to runtime data directory. Defaults to standard data dir.
-            notebook: Optional target notebook by name, folder path, or ID.
-            limit: Maximum number of notebooks to process.
-            folder: Optional Apple Notes folder override.
-            ssh: Force sync via USB SSH instead of Cloud.
-            cloud: Force sync via reMarkable Cloud instead of SSH.
-            preferred_connection: Preferred connection ('ssh' or 'cloud').
-            sync_pdfs: Sync PDF documents and annotations.
-            sync_epubs: Sync EPUB ebooks and annotations.
-            all_types: Sync all document types (notebooks, PDFs, and EPUBs).
-            keep_temp: If True, preserve temporary rendered artifacts for debugging.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
+        self.options = options or SyncOptions()
+        opts = self.options
+
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
-        self.keep_temp = keep_temp
+        self.keep_temp = opts.keep_temp
 
         if self.config_path and self.config_path != YAML_CONFIG_PATH:
             self.raw_config = load_yaml_config(self.config_path)
@@ -1010,14 +996,14 @@ class SyncPipeline:
                 "yes",
             )
 
-        if ssh:
+        if opts.ssh:
             self.preferred_connection = "ssh"
             self.use_ssh = True
-        elif cloud:
+        elif opts.cloud:
             self.preferred_connection = "cloud"
             self.use_ssh = False
-        elif preferred_connection:
-            self.preferred_connection = preferred_connection.strip().lower()
+        elif opts.preferred_connection:
+            self.preferred_connection = opts.preferred_connection.strip().lower()
             self.use_ssh = self.preferred_connection == "ssh"
         else:
             self.preferred_connection = str(base_pref).strip().lower()
@@ -1043,24 +1029,24 @@ class SyncPipeline:
             )
         )
 
-        self.target_notebook = notebook.strip() if notebook else None
-        self.all_types = all_types
+        self.target_notebook = opts.notebook.strip() if opts.notebook else None
+        self.all_types = opts.all_types
 
-        if all_types:
+        if opts.all_types:
             self.sync_pdfs = True
             self.sync_epubs = True
         else:
-            self.sync_pdfs = bool(cfg_sync_pdfs) if sync_pdfs is None else sync_pdfs
-            self.sync_epubs = bool(cfg_sync_epubs) if sync_epubs is None else sync_epubs
+            self.sync_pdfs = bool(cfg_sync_pdfs) if opts.sync_pdfs is None else opts.sync_pdfs
+            self.sync_epubs = bool(cfg_sync_epubs) if opts.sync_epubs is None else opts.sync_epubs
 
-        if limit is not None and limit > 0:
-            self.limit = limit
+        if opts.limit is not None and opts.limit > 0:
+            self.limit = opts.limit
         else:
             self.limit = cfg_limit
 
         # 3. Destination folder
         self.folder = (
-            folder
+            opts.folder
             or os.environ.get("APPLE_NOTES_FOLDER")
             or self.raw_config.get("apple_notes", {}).get("folder_name", "Living Ink")
         )
@@ -1069,57 +1055,6 @@ class SyncPipeline:
             for dest in self.destinations:
                 if isinstance(dest, AppleNotesDestination):
                     dest.folder_name = self.folder
-
-    def _apply_overrides(
-        self,
-        notebook: Optional[str] = None,
-        limit: Optional[int] = None,
-        folder: Optional[str] = None,
-        ssh: bool = False,
-        cloud: bool = False,
-        preferred_connection: Optional[str] = None,
-        sync_pdfs: Optional[bool] = None,
-        sync_epubs: Optional[bool] = None,
-        all_types: bool = False,
-        keep_temp: Optional[bool] = None,
-    ) -> None:
-        """Apply ad-hoc overrides before running."""
-        if notebook is not None:
-            self.target_notebook = notebook.strip() if notebook else None
-        if limit is not None and limit > 0:
-            self.limit = limit
-        if folder is not None:
-            self.folder = folder
-            os.environ["APPLE_NOTES_FOLDER"] = folder
-            for dest in self.destinations:
-                if isinstance(dest, AppleNotesDestination):
-                    dest.folder_name = folder
-        if ssh:
-            self.preferred_connection = "ssh"
-            self.use_ssh = True
-            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "ssh"
-            os.environ["REMARKABLE_USE_SSH"] = "true"
-        elif cloud:
-            self.preferred_connection = "cloud"
-            self.use_ssh = False
-            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = "cloud"
-            os.environ["REMARKABLE_USE_SSH"] = "false"
-        elif preferred_connection:
-            self.preferred_connection = preferred_connection.strip().lower()
-            self.use_ssh = self.preferred_connection == "ssh"
-            os.environ["REMARKABLE_PREFERRED_CONNECTION"] = self.preferred_connection
-            os.environ["REMARKABLE_USE_SSH"] = "true" if self.use_ssh else "false"
-        if all_types:
-            self.all_types = True
-            self.sync_pdfs = True
-            self.sync_epubs = True
-        else:
-            if sync_pdfs is not None:
-                self.sync_pdfs = sync_pdfs
-            if sync_epubs is not None:
-                self.sync_epubs = sync_epubs
-        if keep_temp is not None:
-            self.keep_temp = keep_temp
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
@@ -1644,37 +1579,16 @@ class SyncPipeline:
 
         return success
 
-    def run(
-        self,
-        notebook: Optional[str] = None,
-        limit: Optional[int] = None,
-        folder: Optional[str] = None,
-        ssh: bool = False,
-        cloud: bool = False,
-        preferred_connection: Optional[str] = None,
-        sync_pdfs: Optional[bool] = None,
-        sync_epubs: Optional[bool] = None,
-        all_types: bool = False,
-        keep_temp: Optional[bool] = None,
-    ) -> bool:
+    def run(self) -> bool:
         """Execute the sync pipeline.
+
+        Options were resolved in ``__init__``; to sync with different options,
+        construct a new pipeline (``SyncPipeline(opts.merged_with(limit=1))``)
+        rather than mutating this one.
 
         Returns:
             True if sync succeeded or completed gracefully, False on error.
         """
-        self._apply_overrides(
-            notebook=notebook,
-            limit=limit,
-            folder=folder,
-            ssh=ssh,
-            cloud=cloud,
-            preferred_connection=preferred_connection,
-            sync_pdfs=sync_pdfs,
-            sync_epubs=sync_epubs,
-            all_types=all_types,
-            keep_temp=keep_temp,
-        )
-
         # At the start of run(), clear the log for a new run
         with open(LOG_PATH, "w", encoding="utf-8") as f:
             f.write("")
@@ -1712,69 +1626,3 @@ class SyncPipeline:
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
         return all_success
-
-
-def main(argv: Optional[List[str]] = None) -> None:
-    """Main CLI entry point for the sync pipeline."""
-    parser = argparse.ArgumentParser(
-        prog="living-ink-pipeline",
-        description="Sync reMarkable notebooks to Apple Notes and Obsidian.",
-    )
-    parser.add_argument(
-        "--notebook",
-        help="Process a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
-    )
-    parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process per run")
-    parser.add_argument(
-        "--folder",
-        default=os.environ.get("APPLE_NOTES_FOLDER", "Living Ink"),
-        help="Apple Notes folder name",
-    )
-    parser.add_argument("--state-file", help="Ignored (legacy compatibility)")
-    parser.add_argument(
-        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
-    )
-    parser.add_argument(
-        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
-    )
-    parser.add_argument(
-        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
-    )
-    parser.add_argument(
-        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
-    )
-    parser.add_argument(
-        "--all-types",
-        action="store_true",
-        help="Sync all document types (notebooks, PDFs, and EPUBs)",
-    )
-    parser.add_argument(
-        "--keep-temp",
-        action="store_true",
-        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
-    )
-    args = parser.parse_args(argv)
-
-    pipeline = SyncPipeline(
-        notebook=args.notebook,
-        limit=args.limit,
-        folder=args.folder,
-        ssh=args.ssh,
-        cloud=args.cloud,
-        sync_pdfs=args.sync_pdfs,
-        sync_epubs=args.sync_epubs,
-        all_types=args.all_types,
-        keep_temp=args.keep_temp,
-    )
-    success = pipeline.run()
-    if not success:
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    import multiprocessing
-
-    multiprocessing.freeze_support()
-
-    log(f"Script started. Working directory: {os.getcwd()}. Log path: {LOG_PATH.resolve()}")
-    main()

@@ -8,12 +8,12 @@ Based on the protocol used by ddvk/rmapi.
 """
 
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from living_ink.models import Document
 
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
@@ -25,58 +25,6 @@ USER_TOKEN_URL = f"{AUTH_HOST}/token/json/2/user/new"
 SYNC_HOST = "https://internal.cloud.remarkable.com"
 ROOT_URL = f"{SYNC_HOST}/sync/v4/root"
 FILES_URL = f"{SYNC_HOST}/sync/v3/files"
-
-
-@dataclass
-class Document:
-    """Represents a document or folder in the reMarkable cloud."""
-
-    id: str
-    hash: str
-    name: str
-    doc_type: str  # "DocumentType" or "CollectionType"
-    parent: str = ""
-    deleted: bool = False
-    pinned: bool = False
-    last_modified: Optional[datetime] = None
-    size: int = 0
-    files: List[Dict[str, Any]] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-
-    @property
-    def is_folder(self) -> bool:
-        return self.doc_type == "CollectionType"
-
-    @property
-    def VissibleName(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.name
-
-    @property
-    def ID(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.id
-
-    @property
-    def Parent(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.parent
-
-    @property
-    def Type(self) -> str:
-        """Compatibility with rmapy naming."""
-        return self.doc_type
-
-    @property
-    def ModifiedClient(self) -> Optional[datetime]:
-        """Compatibility with rmapy naming."""
-        return self.last_modified
-
-
-# Alias for backward compatibility with rmapy-style code
-# In our sync module, both Document and Folder are the same class,
-# distinguished by the is_folder property
-Folder = Document
 
 
 class RemarkableClient:
@@ -364,22 +312,3 @@ def load_client_from_token(token_data: str) -> RemarkableClient:
         f"Invalid token format. Expected JSON or JWT token.\n"
         f"Token starts with: {token_data[:20]}..."
     )
-
-
-def load_client_from_file(token_file: Path = Path.home() / ".rmapi") -> RemarkableClient:
-    """
-    Load a client from a token file.
-
-    Args:
-        token_file: Path to JSON token file (default: ~/.rmapi)
-
-    Returns:
-        Configured RemarkableClient
-    """
-    if not token_file.exists():
-        raise RuntimeError(
-            f"Token file not found: {token_file}\nRegister first with: living-ink setup"
-        )
-
-    token_json = token_file.read_text()
-    return load_client_from_token(token_json)

@@ -109,5 +109,5 @@ def test_sync_command_forwards_keep_temp():
         with patch("living_ink.pipeline.SyncPipeline.run", return_value=True) as mock_run:
             SyncCommand().run(args)
             mock_init.assert_called_once()
-            assert mock_init.call_args.kwargs["keep_temp"] is True
+            assert mock_init.call_args.kwargs["options"].keep_temp is True
             mock_run.assert_called_once()

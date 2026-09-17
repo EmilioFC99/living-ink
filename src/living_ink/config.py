@@ -10,8 +10,29 @@ from pathlib import Path
 from typing import Optional
 
 
-def _find_repo_root() -> Optional[Path]:
-    """Find repository root by walking up parents looking for pyproject.toml."""
+def find_repo_root() -> Optional[Path]:
+    """Locate the project root when running from a source checkout.
+
+    The current working directory wins if it looks like a checkout or already
+    holds a config file, so that ``cd``-ing into a clone behaves the way a user
+    expects. Otherwise the package's own location is walked upwards looking for
+    ``pyproject.toml``.
+
+    This is the single root-discovery implementation for the whole package; the
+    CLI and the pipeline both call it rather than rolling their own.
+
+    Returns:
+        Path to the project root, or None when installed as a plain wheel with
+        no checkout in sight.
+    """
+    cwd = Path.cwd().resolve()
+    if (
+        (cwd / "pyproject.toml").exists()
+        or (cwd / "config" / "config.yml").exists()
+        or (cwd / "config.yml").exists()
+    ):
+        return cwd
+
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").exists():
             return parent
@@ -58,7 +79,7 @@ def get_config_path(repo_dir: Optional[Path] = None) -> Path:
         return xdg_config.resolve()
 
     # Fallback to local git checkout config if present
-    repo_root = _find_repo_root()
+    repo_root = find_repo_root()
     if repo_root:
         for candidate in [repo_root / "config" / "config.yml", repo_root / "config.yml"]:
             if candidate.exists():
@@ -76,18 +97,6 @@ def get_config_path(repo_dir: Optional[Path] = None) -> Path:
         return legacy_config.resolve()
 
     return xdg_config.resolve()
-
-
-def get_config_dir(repo_dir: Optional[Path] = None) -> Path:
-    """Find the configuration directory.
-
-    Args:
-        repo_dir: Optional repository root.
-
-    Returns:
-        Path to the configuration directory.
-    """
-    return get_config_path(repo_dir).parent
 
 
 def get_data_dir(repo_dir: Optional[Path] = None) -> Path:

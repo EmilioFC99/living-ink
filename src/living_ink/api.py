@@ -6,7 +6,7 @@ import json as json_module
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -211,12 +211,6 @@ def get_rmapi():
         )
 
 
-def ensure_config_dir():
-    """Ensure configuration directory exists."""
-    REMARKABLE_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def register_and_get_token(one_time_code: str) -> str:
     """
     Register with reMarkable using a one-time code and return the token.
@@ -236,33 +230,6 @@ def register_and_get_token(one_time_code: str) -> str:
         return token_json
     except Exception as e:
         raise RuntimeError(str(e))
-
-
-def get_items_by_id(collection) -> Dict[str, Any]:
-    """Build a lookup dict of items by ID."""
-    return {item.ID: item for item in collection}
-
-
-def get_items_by_parent(collection) -> Dict[str, List]:
-    """Build a lookup dict of items grouped by parent ID."""
-    items_by_parent: Dict[str, List] = {}
-    for item in collection:
-        parent = item.Parent if hasattr(item, "Parent") else ""
-        if parent not in items_by_parent:
-            items_by_parent[parent] = []
-        items_by_parent[parent].append(item)
-    return items_by_parent
-
-
-def get_item_path(item, items_by_id: Dict[str, Any]) -> str:
-    """Get the full path of an item."""
-    path_parts = [item.VissibleName]
-    parent_id = item.Parent if hasattr(item, "Parent") else ""
-    while parent_id and parent_id in items_by_id:
-        parent = items_by_id[parent_id]
-        path_parts.insert(0, parent.VissibleName)
-        parent_id = parent.Parent if hasattr(parent, "Parent") else ""
-    return "/" + "/".join(path_parts)
 
 
 def download_raw_file(client, doc, extension: str):
