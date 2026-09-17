@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 from typing import Any, List, Optional
 
+from living_ink.models import Document
+from living_ink.transport import RemarkableTransport, UnsupportedOperation
+
 logger = logging.getLogger(__name__)
 
 # Configuration - check env var first, then fall back to file
@@ -19,10 +22,12 @@ CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
 
 
 class FallbackClient:
-    """A resilient client wrapping primary and backup reMarkable transports.
+    """A resilient transport wrapping a primary and a backup reMarkable client.
 
-    Attempts operations using the preferred client first, and automatically falls back
-    to the secondary client if the primary connection fails or is disconnected.
+    Every :class:`~living_ink.transport.RemarkableTransport` operation is tried
+    on the preferred client first and retried once on the backup if it fails,
+    so the fallback promise holds for the whole surface rather than method by
+    method. The first successful failover makes the backup the active client.
     """
 
     def __init__(
@@ -38,64 +43,79 @@ class FallbackClient:
         self.backup_name = backup_name
         self.active = primary_client
 
-    def get_meta_items(self, limit: Optional[int] = None) -> List[Any]:
-        """Fetch notebook metadata, falling back to backup client if primary fails."""
-        try:
-            return self.active.get_meta_items(limit=limit)
-        except Exception as e:
-            if self.backup and self.active is not self.backup:
-                logger.warning(
-                    f"{self.primary_name} get_meta_items failed ({e}). Falling back to {self.backup_name}..."
-                )
-                print(f"ℹ️ {self.primary_name} failed ({e}). Falling back to {self.backup_name}...")
-                self.active = self.backup
-                return self.active.get_meta_items(limit=limit)
-            raise
+    def _with_fallback(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Call a transport method, retrying once on the backup client.
 
-    def download(self, doc: Any) -> bytes:
-        """Download document content zip, falling back to backup client if needed."""
+        Args:
+            method_name: Name of the transport method to invoke.
+            *args: Positional arguments forwarded to the method.
+            **kwargs: Keyword arguments forwarded to the method.
+
+        Returns:
+            Whatever the active (or, after a failover, the backup) client returns.
+
+        Raises:
+            Exception: The original error, if there is no usable backup.
+        """
+        try:
+            return getattr(self.active, method_name)(*args, **kwargs)
+        except UnsupportedOperation:
+            raise
+        except Exception as e:
+            if not self.backup or self.active is self.backup:
+                raise
+            logger.warning(
+                f"{self.primary_name} {method_name} failed ({e}). "
+                f"Falling back to {self.backup_name}..."
+            )
+            print(
+                f"ℹ️ {self.primary_name} {method_name} failed. Falling back to {self.backup_name}..."
+            )
+            self.active = self.backup
+            return getattr(self.active, method_name)(*args, **kwargs)
+
+    def check_connection(self) -> bool:
+        """Report whether either transport is reachable."""
+        return self._with_fallback("check_connection")
+
+    def get_meta_items(self, limit: Optional[int] = None) -> List[Document]:
+        """Fetch document metadata, falling back to the backup client if needed."""
+        return self._with_fallback("get_meta_items", limit=limit)
+
+    def get_doc(self, doc_id: str) -> Optional[Document]:
+        """Get a document by id, falling back to the backup client if needed."""
+        return self._with_fallback("get_doc", doc_id)
+
+    def download(self, doc: Document) -> bytes:
+        """Download a document zip, falling back to the backup client if needed.
+
+        On failover the document is re-resolved against the backup, because the
+        two transports identify the same notebook by different hashes.
+        """
         try:
             return self.active.download(doc)
         except Exception as e:
-            if self.backup and self.active is not self.backup:
-                logger.warning(
-                    f"{self.primary_name} download failed ({e}). Falling back to {self.backup_name}..."
-                )
-                print(
-                    f"ℹ️ {self.primary_name} download failed. Falling back to {self.backup_name}..."
-                )
-                self.active = self.backup
-                # Find matching doc in backup if needed
-                doc_id = getattr(doc, "id", getattr(doc, "ID", ""))
-                backup_doc = None
-                if hasattr(self.backup, "get_doc"):
-                    backup_doc = self.backup.get_doc(doc_id)
-                return self.active.download(backup_doc or doc)
-            raise
+            if not self.backup or self.active is self.backup:
+                raise
+            logger.warning(
+                f"{self.primary_name} download failed ({e}). Falling back to {self.backup_name}..."
+            )
+            print(f"ℹ️ {self.primary_name} download failed. Falling back to {self.backup_name}...")
+            self.active = self.backup
+            backup_doc = self.active.get_doc(getattr(doc, "id", ""))
+            return self.active.download(backup_doc or doc)
 
-    def get_doc(self, doc_id: str) -> Optional[Any]:
-        """Get document by ID from active client."""
-        if hasattr(self.active, "get_doc"):
-            return self.active.get_doc(doc_id)
-        return None
+    def get_file_type(self, doc: Document) -> Optional[str]:
+        """Get a document's file type, falling back to the backup client if needed."""
+        return self._with_fallback("get_file_type", doc)
 
-    def get_file_type(self, doc: Any) -> Optional[str]:
-        """Get file type from active client."""
-        if hasattr(self.active, "get_file_type"):
-            return self.active.get_file_type(doc)
-        return None
+    def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
+        """Download a document's source file, falling back to the backup if needed."""
+        return self._with_fallback("download_raw_file", doc, extension)
 
-    def download_raw_file(self, doc: Any, extension: str) -> Optional[bytes]:
-        """Download raw file from active client."""
-        if hasattr(self.active, "download_raw_file"):
-            return self.active.download_raw_file(doc, extension)
-        return None
-
-    def get_tags(self, doc: Any) -> List[str]:
-        """Get tags from active client."""
-        if hasattr(self.active, "get_tags"):
-            return self.active.get_tags(doc)
-        return []
+    def get_tags(self, doc: Document) -> List[str]:
+        """Get a document's tags, falling back to the backup client if needed."""
+        return self._with_fallback("get_tags", doc)
 
 
 def get_rmapi():
@@ -232,45 +252,45 @@ def register_and_get_token(one_time_code: str) -> str:
         raise RuntimeError(str(e))
 
 
-def download_raw_file(client, doc, extension: str):
+def download_raw_file(client: RemarkableTransport, doc: Document, extension: str):
     """
     Download a raw file (PDF or EPUB) for a document.
 
     Args:
-        client: The reMarkable API client (SSH or Cloud)
+        client: The reMarkable transport (SSH, Cloud or Fallback)
         doc: The document to download
         extension: File extension without dot (e.g., 'pdf', 'epub')
 
     Returns:
-        Raw file bytes, or None if file doesn't exist or not supported
+        Raw file bytes, or None if the file doesn't exist or isn't supported
     """
-    # SSH client has direct download_raw_file method
-    if hasattr(client, "download_raw_file"):
+    try:
         return client.download_raw_file(doc, extension)
-
-    # Cloud client - raw files are not available via API
-    # The cloud API only returns the notebook annotations, not source PDFs/EPUBs
-    return None
+    except UnsupportedOperation:
+        return None
 
 
-def get_file_type(client, doc) -> str:
+def get_file_type(client: RemarkableTransport, doc: Document) -> str:
     """
     Get the file type (pdf, epub, notebook) for a document.
 
+    Falls back to the document name when the transport cannot tell, which
+    covers documents whose descriptor is missing or unreadable.
+
     Args:
-        client: The reMarkable API client (SSH or Cloud)
+        client: The reMarkable transport (SSH, Cloud or Fallback)
         doc: The document to check
 
     Returns:
         File type string: 'pdf', 'epub', or 'notebook'
     """
-    # SSH client has direct get_file_type method
-    if hasattr(client, "get_file_type"):
+    try:
         file_type = client.get_file_type(doc)
         if file_type:
             return file_type
+    except UnsupportedOperation:
+        pass
 
-    # Infer from document name
     name = doc.VissibleName.lower()
     if name.endswith(".pdf"):
         return "pdf"
@@ -280,23 +300,22 @@ def get_file_type(client, doc) -> str:
     return "notebook"
 
 
-def get_document_tags(client: Any, doc: Any) -> List[str]:
-    """Get tags for a document from client or doc attributes.
+def get_document_tags(client: RemarkableTransport, doc: Document) -> List[str]:
+    """Get tags for a document from the transport, or from the document itself.
 
     Args:
-        client: The reMarkable API client.
+        client: The reMarkable transport.
         doc: The document to check.
 
     Returns:
         List of tag strings.
     """
-    if hasattr(client, "get_tags"):
-        try:
-            tags = client.get_tags(doc)
-            if tags:
-                return list(tags)
-        except Exception:
-            pass
-    if hasattr(doc, "tags") and doc.tags:
+    try:
+        tags = client.get_tags(doc)
+        if tags:
+            return list(tags)
+    except Exception:
+        pass
+    if doc.tags:
         return list(doc.tags)
     return []
