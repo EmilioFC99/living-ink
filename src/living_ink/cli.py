@@ -119,6 +119,11 @@ class SyncCommand(BaseCommand):
             action="store_true",
             help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
         )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Transcribe as usual but publish nothing; prints where each transcript was written",
+        )
 
     def run(self, args: argparse.Namespace) -> int:
         """Run the notebook sync pipeline.

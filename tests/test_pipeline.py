@@ -6,6 +6,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from living_ink import pipeline
@@ -453,3 +454,52 @@ class TestPageConcurrency:
         with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
             with patch.object(pipeline_obj, "_google_ocr_page", return_value=("raw", "clean")):
                 assert pipeline_obj._transcribe_page(Path("p.png"), True) == ("raw", "clean")
+
+
+class TestDryRun:
+    """A dry run transcribes as usual, then publishes and records nothing."""
+
+    def _job(self, tmp_path) -> DocumentJob:
+        transcript = tmp_path / "Notes_clean.txt"
+        transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
+        return make_job(folder_path="Work", clean_out_txt=transcript)
+
+    def test_nothing_is_published(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log") as recorded:
+            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+
+        assert dest.published == []
+        recorded.assert_not_called()
+
+    def test_it_reports_where_the_transcript_landed(self, tmp_path, capsys):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        job = self._job(tmp_path)
+
+        pipeline_obj._publish(job, {"nb-1": [dest]})
+        out = capsys.readouterr().out
+
+        assert "Dry run" in out
+        assert str(job.clean_out_txt) in out
+
+    def test_a_normal_run_still_publishes(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log") as recorded:
+            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+
+        assert len(dest.published) == 1
+        recorded.assert_called_once()
+
+    def test_dry_run_keeps_the_artifacts_it_points_at(self):
+        assert SyncPipeline(options=SyncOptions(dry_run=True)).keep_temp is True
+        assert SyncPipeline(options=SyncOptions()).keep_temp is False
+
+    def test_the_flag_reaches_the_options(self):
+        args = SimpleNamespace(dry_run=True)
+        assert SyncOptions.from_args(args).dry_run is True
+        assert SyncOptions.from_args(SimpleNamespace()).dry_run is False

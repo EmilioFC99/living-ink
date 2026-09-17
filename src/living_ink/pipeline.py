@@ -784,6 +784,7 @@ class SyncOptions:
         sync_epubs: Include EPUB documents. None means "use config".
         all_types: Include every document type; overrides sync_pdfs/sync_epubs.
         keep_temp: Preserve rendered PNGs and OCR transcripts for debugging.
+        dry_run: Do everything except publish, so a run can be inspected first.
     """
 
     notebook: Optional[str] = None
@@ -796,6 +797,7 @@ class SyncOptions:
     sync_epubs: Optional[bool] = None
     all_types: bool = False
     keep_temp: bool = False
+    dry_run: bool = False
 
     @classmethod
     def from_args(cls, args: Any) -> "SyncOptions":
@@ -825,6 +827,7 @@ class SyncOptions:
             sync_epubs=getattr(args, "sync_epubs", False) or None,
             all_types=getattr(args, "all_types", False),
             keep_temp=getattr(args, "keep_temp", False),
+            dry_run=getattr(args, "dry_run", False),
         )
 
     def merged_with(self, **overrides: Any) -> "SyncOptions":
@@ -997,7 +1000,10 @@ class SyncPipeline:
 
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
-        self.keep_temp = opts.keep_temp
+        self.dry_run = opts.dry_run
+        # A dry run's whole output is the transcripts it leaves behind, so it
+        # implies --keep-temp; purging them would delete what it points at.
+        self.keep_temp = opts.keep_temp or opts.dry_run
 
         if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)
@@ -1703,6 +1709,10 @@ class SyncPipeline:
                 log("No destinations need update for this notebook (or none configured).")
                 return True
 
+            if self.dry_run:
+                self._report_dry_run(job, targets)
+                return True
+
             all_success = True
             for dest in targets:
                 if self._publish_to(dest, job, clean_text):
@@ -1719,6 +1729,31 @@ class SyncPipeline:
 
             log(traceback.format_exc())
             return False
+
+    def _report_dry_run(self, job: DocumentJob, targets: List[Destination]) -> None:
+        """Say what a real run would have published, and where to read it.
+
+        Nothing is sent and no processed-log entry is written, so the same
+        notebook is still pending afterwards and a later real run picks it up.
+
+        Args:
+            job: The processed job.
+            targets: The destinations a real run would have published to.
+        """
+        log(f"🔍 Dry run — not publishing '{job.display_title}'.")
+        for dest in targets:
+            sub_folder = (
+                job.top_level_subfolder()
+                if isinstance(dest, AppleNotesDestination)
+                else job.full_subfolder()
+            )
+            where = f" under '{sub_folder}'" if sub_folder else ""
+            log(f"   Would publish to {dest.describe()}{where}")
+        log(f"   Transcript: {job.clean_out_txt}")
+        if job.imgs:
+            log(f"   {len(job.imgs)} page image(s) in {WHITE_DIR}")
+        if job.tags:
+            log(f"   Tags: {job.tags}")
 
     def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> bool:
         """Publish one note to one destination.
@@ -1782,6 +1817,8 @@ class SyncPipeline:
 
         validate_environment()
         log("Pipeline started.")
+        if self.dry_run:
+            log("🔍 Dry run: nothing will be published and no sync state will be recorded.")
 
         # Clean temporary working artifacts at start of run and register exit cleanup
         import atexit
