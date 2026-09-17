@@ -48,7 +48,3 @@ Four seams matter more than the file list:
 - Google-style docstrings on all modules, classes, and functions.
 - Branches: `feat/<description>`, `fix/<description>`.
 - Preserve existing comments and docstrings in code you aren't changing.
-
-## Stale docs to distrust
-
-- `AGENTS.md` and `.github/copilot-instructions.md` still describe a `scripts/` directory and `config/config.yml.example` that no longer exist, and predate the `SyncPipeline` class / CLI Command Pattern refactor (`8be0bc1`).
