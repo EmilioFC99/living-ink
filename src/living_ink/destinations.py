@@ -27,6 +27,21 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
+class DestinationError(Exception):
+    """Publishing failed for an expected, user-actionable reason.
+
+    Raised for conditions the user can fix (a vault path that no longer
+    exists, a full disk, macOS denying automation access). Anything that is
+    *not* one of these — an ``AttributeError`` in our own code, say — is
+    deliberately left to propagate rather than being reported as an ordinary
+    publish failure.
+    """
+
+
+class DestinationUnavailable(DestinationError):
+    """The destination could not be reached; retrying later is sensible."""
+
+
 class Destination(abc.ABC):
     """Abstract base class for publication destinations.
 
@@ -55,7 +70,11 @@ class Destination(abc.ABC):
             tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
-            True if publication succeeded, False otherwise.
+            True if publication succeeded.
+
+        Raises:
+            DestinationError: Publication failed for an expected reason. The
+                message is user-facing and names the cause.
         """
 
 
@@ -198,7 +217,11 @@ class AppleNotesDestination(Destination):
             tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
-            True if AppleScript executed successfully, False otherwise.
+            True if AppleScript executed successfully.
+
+        Raises:
+            DestinationUnavailable: osascript is missing, timed out, or Notes
+                rejected the script on every attempt.
         """
         retries = 3
 
@@ -307,16 +330,27 @@ end tell
                     if attempt < retries:
                         time.sleep(2)
                         continue
-                    return False
+                    raise DestinationUnavailable(
+                        f"Apple Notes rejected the script after {retries} attempts "
+                        f"(exit {result.returncode}): {result.stderr.strip()}"
+                    )
 
                 logger.info("Apple Note created for %s", notebook_name)
                 return True
 
-        except Exception as e:
-            logger.error("Failed creating Apple Note: %s", e)
-            return False
+        except FileNotFoundError as e:
+            raise DestinationUnavailable(
+                "osascript not found — Apple Notes publishing requires macOS."
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise DestinationUnavailable(
+                f"Apple Notes did not respond within {e.timeout}s. Is the Notes app "
+                "busy or awaiting a permission prompt?"
+            ) from e
+        except OSError as e:
+            raise DestinationUnavailable(f"Could not run osascript: {e}") from e
 
-        return False
+        raise DestinationUnavailable("Apple Notes publishing exhausted all retries.")
 
 
 class ObsidianDestination(Destination):
@@ -420,8 +454,11 @@ class ObsidianDestination(Destination):
             tags: Optional list of tags associated with the notebook or its pages.
 
         Returns:
-            True if the Markdown file and attachments were written successfully,
-            False otherwise.
+            True if the Markdown file and attachments were written successfully.
+
+        Raises:
+            DestinationError: The vault is unreachable or unwritable (missing
+                path, permission denied, disk full).
         """
         try:
             # 1. Parse Note Name and Source Path
@@ -571,6 +608,7 @@ class ObsidianDestination(Destination):
             logger.info("Obsidian note created at: %s", note_path)
             return True
 
-        except Exception as e:
-            logger.error("Failed creating Obsidian note for %s: %s", notebook_name, e)
-            return False
+        except (OSError, shutil.Error) as e:
+            raise DestinationError(
+                f"Could not write '{notebook_name}' into the vault at {self.vault_path}: {e}"
+            ) from e
