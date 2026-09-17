@@ -1,4 +1,4 @@
-name: Publish to PyPI and MCP Registry
+name: Publish to PyPI
 
 on:
   push:
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   create-release:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -42,15 +43,22 @@ jobs:
       
       - name: Set up Python
         run: uv python install 3.12
-      
+
+      # libcairo2 is needed for cairosvg stroke rendering (mirrors the Dockerfile)
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcairo2
+
       - name: Install dependencies
-        run: uv sync --extra dev
-      
+        run: uv sync --all-extras
+
       - name: Run tests
-        run: uv run pytest test_server.py -v
-      
+        run: uv run pytest tests/ -v
+
       - name: Run linting
         run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
 
   build:
     needs: [create-release, test]
@@ -103,29 +111,3 @@ jobs:
           # Uses trusted publishing (no API token needed)
           # Configure at: https://pypi.org/manage/account/publishing/
           print-hash: true
-
-  publish-mcp-registry:
-    needs: publish-pypi
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write  # Required for OIDC authentication
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      
-      - name: Update server.json version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          # Update version in server.json
-          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp && mv server.tmp server.json
-          cat server.json
-      
-      - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
-      
-      - name: Authenticate to MCP Registry
-        run: ./mcp-publisher login github-oidc
-      
-      - name: Publish server to MCP Registry
-        run: ./mcp-publisher publish
