@@ -1,0 +1,115 @@
+/*
+ * Living Ink — internal module dependency graph
+ *
+ * Render:
+ *   dot -Tsvg docs/architecture/dependencies.dot -o docs/architecture/dependencies.svg
+ *   dot -Tpng docs/architecture/dependencies.dot -o docs/architecture/dependencies.png
+ *
+ * Edge styles:
+ *   solid  = module-level import
+ *   dashed = lazy import inside a function body (deferred to break a cycle
+ *            or to keep an optional dependency out of the import path)
+ *   red    = dependency that violates layering and should be removed
+ *
+ * Generated from the current tree. Regenerate after any refactor phase.
+ */
+digraph living_ink {
+    rankdir=TB;
+    graph [fontname="Helvetica", splines=true, nodesep=0.45, ranksep=0.6];
+    node  [fontname="Helvetica", shape=box, style="rounded,filled", fillcolor="#f5f5f5"];
+    edge  [fontname="Helvetica", fontsize=9];
+
+    /* ---------------------------------------------------------------- */
+    /* Layer 0 — entrypoint                                              */
+    /* ---------------------------------------------------------------- */
+    subgraph cluster_entry {
+        label="Entrypoint";
+        style=dashed; color="#999999";
+        __main__ [label="__main__\n(python -m living_ink)"];
+        cli      [label="cli\nCommand Pattern:\nSyncCommand / SetupCommand / StatusCommand", fillcolor="#dce9f7"];
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Layer 1 — orchestration                                           */
+    /* ---------------------------------------------------------------- */
+    subgraph cluster_orchestration {
+        label="Orchestration";
+        style=dashed; color="#999999";
+        pipeline     [label="pipeline\nSyncPipeline: connect → discover →\nfilter → process → publish", fillcolor="#f7e3dc"];
+        setup_wizard [label="setup_wizard\ninteractive TTY onboarding", fillcolor="#f7e3dc"];
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Layer 2 — capability seams (the four extension points)            */
+    /* ---------------------------------------------------------------- */
+    subgraph cluster_seams {
+        label="Capability seams";
+        style=dashed; color="#999999";
+        api          [label="api\nFallbackClient (transport selection)", fillcolor="#e3f0dc"];
+        destinations [label="destinations\nDestination ABC:\nAppleNotes / Obsidian", fillcolor="#e3f0dc"];
+        providers    [label="providers\nTextRepairProvider ABC:\nUniversalChat / None", fillcolor="#e3f0dc"];
+        clean        [label="clean\nOCR + AI text repair facade", fillcolor="#e3f0dc"];
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Layer 3 — transports and rendering                                */
+    /* ---------------------------------------------------------------- */
+    subgraph cluster_leaf {
+        label="Transports / rendering / paths";
+        style=dashed; color="#999999";
+        ssh     [label="ssh\nSSHClient (USB 10.11.99.1, xochitl)"];
+        sync    [label="sync\nRemarkableClient (Cloud v3/v4)"];
+        extract [label="extract\n.rm → SVG → PNG, PDF/EPUB text,\ntags, page labels"];
+        config  [label="config\nXDG path resolution"];
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Edges                                                             */
+    /* ---------------------------------------------------------------- */
+    __main__ -> cli;
+
+    cli -> config;
+    cli -> pipeline;
+    cli -> setup_wizard;
+
+    pipeline -> api;
+    pipeline -> clean;
+    pipeline -> config;
+    pipeline -> destinations;
+    pipeline -> extract;
+    pipeline -> providers;
+    pipeline -> setup_wizard [style=dashed, color=red,
+                              label="lazy (pipeline.py:702)\nCYCLE"];
+
+    setup_wizard -> api;
+    setup_wizard -> config;
+    setup_wizard -> providers;
+    setup_wizard -> ssh;
+    setup_wizard -> sync;
+    setup_wizard -> pipeline [style=dashed, color=red,
+                              label="lazy (setup_wizard.py:1035)\nCYCLE"];
+
+    api -> ssh;
+    api -> sync;
+
+    clean -> providers;
+
+    destinations -> extract [style=dashed, label="lazy"];
+    ssh          -> extract [style=dashed, label="lazy"];
+
+    /* ---------------------------------------------------------------- */
+    /* Legend                                                            */
+    /* ---------------------------------------------------------------- */
+    subgraph cluster_legend {
+        label="Legend";
+        style=dashed; color="#bbbbbb"; fontsize=10;
+        node [shape=plaintext, style="", fillcolor="none", fontsize=9];
+        legend [label=<
+          <table border="0" cellborder="0" cellspacing="2">
+            <tr><td align="left">solid edge</td><td align="left">module-level import</td></tr>
+            <tr><td align="left">dashed edge</td><td align="left">lazy import inside a function</td></tr>
+            <tr><td align="left"><font color="red">red edge</font></td><td align="left">layering violation to remove</td></tr>
+          </table>
+        >];
+    }
+}
