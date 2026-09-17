@@ -27,7 +27,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Dict, Optional, Type
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,35 @@ PROVIDER_PRESETS = {
 
 
 # ---------------------------------------------------------------------------
+# Provider registry — for backends that are not OpenAI-compatible and so
+# cannot be expressed as a preset above.
+# ---------------------------------------------------------------------------
+
+PROVIDER_REGISTRY: Dict[str, Type["TextRepairProvider"]] = {}
+
+
+def register_provider(name: str):
+    """Register a provider class under the name used in ``ai.provider``.
+
+    Presets cover any backend that speaks the OpenAI chat API; this covers the
+    ones that do not, without :func:`get_provider` having to grow a branch for
+    each. A registered name takes precedence over a preset of the same name.
+
+    Args:
+        name: The value users write for ``ai.provider`` in config.yml.
+
+    Returns:
+        The class decorator.
+    """
+
+    def decorator(cls: Type["TextRepairProvider"]) -> Type["TextRepairProvider"]:
+        PROVIDER_REGISTRY[name.strip().lower()] = cls
+        return cls
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
 # Provider interface
 # ---------------------------------------------------------------------------
 
@@ -93,7 +122,22 @@ class TextRepairProvider(abc.ABC):
     All providers must implement ``repair_text()`` and the ``name`` property.
     Subclass this to add new provider types beyond the built-in
     ``UniversalChatProvider`` and ``NoneProvider``.
+
+    A subclass reachable from configuration also implements
+    :meth:`from_config` and is decorated with :func:`register_provider`.
     """
+
+    @classmethod
+    def from_config(cls, ai_config: dict) -> "TextRepairProvider":
+        """Build this provider from the ``ai`` section of config.yml.
+
+        Args:
+            ai_config: The ``ai`` section, e.g. ``{"provider": "x", "api_key": "..."}``.
+
+        Returns:
+            A configured provider.
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def repair_text(self, raw_text: str, instructions: str) -> str:
@@ -467,8 +511,9 @@ def get_provider(config: dict) -> TextRepairProvider:
     """Create a text repair provider from a YAML config dictionary.
 
     Factory function that reads the ``ai`` section of the config and
-    returns the appropriate provider instance. Supports named presets,
-    custom endpoints, and backward-compatible legacy ``openai`` config.
+    returns the appropriate provider instance. Resolution order: a class in
+    :data:`PROVIDER_REGISTRY`, then a name in :data:`PROVIDER_PRESETS`, then
+    ``custom`` endpoints, plus backward-compatible legacy ``openai`` config.
 
     Args:
         config: The parsed YAML configuration dictionary. Expected
@@ -539,13 +584,18 @@ def get_provider(config: dict) -> TextRepairProvider:
             provider_label="custom",
         )
 
+    # ── Registered provider class ──
+    registered = PROVIDER_REGISTRY.get(provider_name)
+    if registered:
+        return registered.from_config(ai_config)
+
     # ── Named preset ──
     preset = PROVIDER_PRESETS.get(provider_name)
     if not preset:
-        available = ", ".join(sorted(PROVIDER_PRESETS.keys()))
+        available = ", ".join(sorted({*PROVIDER_PRESETS, *PROVIDER_REGISTRY}))
         raise ValueError(
             f"Unknown AI provider: '{provider_name}'.\n"
-            f"Available presets: {available}, 'custom', 'none'"
+            f"Available providers: {available}, 'custom', 'none'"
         )
 
     api_key = str(ai_config.get("api_key", "")).strip()

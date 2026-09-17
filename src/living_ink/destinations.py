@@ -20,9 +20,11 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from PIL import Image
+
+from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +44,74 @@ class DestinationUnavailable(DestinationError):
     """The destination could not be reached; retrying later is sensible."""
 
 
+DESTINATION_REGISTRY: Dict[str, Type["Destination"]] = {}
+
+
+def register_destination(config_key: str, enabled_by_default: bool = False):
+    """Register a Destination subclass under its ``config.yml`` section name.
+
+    Adding a destination is then a matter of writing the class and decorating
+    it; :func:`build_destinations` picks it up without anyone editing the
+    pipeline.
+
+    Args:
+        config_key: The config section that configures this destination.
+        enabled_by_default: Whether it runs when ``enabled`` is not stated.
+
+    Returns:
+        The class decorator.
+    """
+
+    def decorator(cls: Type["Destination"]) -> Type["Destination"]:
+        cls.config_key = config_key
+        cls.enabled_by_default = enabled_by_default
+        DESTINATION_REGISTRY[config_key] = cls
+        return cls
+
+    return decorator
+
+
 class Destination(abc.ABC):
     """Abstract base class for publication destinations.
 
-    Subclasses must implement the ``publish`` method to handle formatting
-    and writing notes to their respective storage systems.
+    Subclasses implement :meth:`publish` to format and write notes, and
+    :meth:`from_config` to build themselves from their own section of
+    ``config.yml``. Decorating the subclass with :func:`register_destination`
+    is what makes it reachable from configuration — no other module needs to
+    learn the new name.
+
+    Attributes:
+        config_key: The ``config.yml`` section this destination reads, set by
+            :func:`register_destination`.
+        enabled_by_default: Whether the destination is active when its section
+            says nothing about ``enabled``.
     """
+
+    config_key: ClassVar[str] = ""
+    enabled_by_default: ClassVar[bool] = False
+
+    @classmethod
+    def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
+        """Build this destination from its config section.
+
+        Args:
+            section: The destination's own section of ``config.yml``.
+            settings: The run's resolved settings.
+
+        Returns:
+            The configured destination, or None if the section is incomplete
+            and the destination should be skipped. Implementations explain the
+            skip to the user rather than failing the whole run.
+        """
+        raise NotImplementedError
+
+    def describe(self) -> str:
+        """Return a one-line description for the startup summary.
+
+        Returns:
+            The destination's name and the setting a user would want confirmed.
+        """
+        return self.config_key or type(self).__name__
 
     @abc.abstractmethod
     def publish(
@@ -78,12 +142,27 @@ class Destination(abc.ABC):
         """
 
 
+@register_destination("apple_notes", enabled_by_default=True)
 class AppleNotesDestination(Destination):
     """Publishes notes to Apple Notes application via AppleScript.
 
     Attributes:
         folder_name: The root folder in Apple Notes where notes are stored.
     """
+
+    @classmethod
+    def from_config(cls, section: Dict[str, Any], settings: Settings) -> "Destination":
+        """Build an Apple Notes destination.
+
+        The folder name comes from the resolved settings rather than the
+        section, because a ``--folder`` flag and the ``APPLE_NOTES_FOLDER``
+        environment variable both outrank the config file.
+        """
+        return cls(folder_name=settings.apple_notes_folder)
+
+    def describe(self) -> str:
+        """Name this destination and the Apple Notes folder it writes to."""
+        return f"Apple Notes (Folder: {self.folder_name})"
 
     def __init__(self, folder_name: str = "reMarkable") -> None:
         """Initialize AppleNotesDestination.
@@ -353,6 +432,7 @@ end tell
         raise DestinationUnavailable("Apple Notes publishing exhausted all retries.")
 
 
+@register_destination("obsidian")
 class ObsidianDestination(Destination):
     """Publishes notes to a local Obsidian Vault as Markdown files.
 
@@ -368,6 +448,30 @@ class ObsidianDestination(Destination):
 
     # Characters forbidden in filenames across macOS, Windows, Linux, and Obsidian
     FORBIDDEN_CHARS_REGEX = re.compile(r'[/\\:*?"<>|#^\[\]]')
+
+    @classmethod
+    def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
+        """Build an Obsidian destination, or skip it if no vault is configured.
+
+        Returns:
+            The destination, or None when ``vault_path`` is missing — a vault
+            is the one thing this destination cannot guess.
+        """
+        vault_path = section.get("vault_path")
+        if not vault_path:
+            print("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
+            return None
+        return cls(
+            vault_path=vault_path,
+            attachments_folder=section.get("attachments_folder", "_attachments"),
+            root_folder=section.get("root_folder"),
+            mirror_folders=section.get("mirror_folders", True),
+        )
+
+    def describe(self) -> str:
+        """Name this destination, its vault, and the root folder if one is set."""
+        root = f" (Root: {self.root_folder})" if self.root_folder else ""
+        return f"Obsidian (Vault: {self.vault_path}{root})"
 
     def __init__(
         self,
@@ -617,3 +721,82 @@ class ObsidianDestination(Destination):
             raise DestinationError(
                 f"Could not write '{notebook_name}' into the vault at {self.vault_path}: {e}"
             ) from e
+
+
+def _apply_legacy_destination(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Translate the old single ``destination`` key into per-destination sections.
+
+    Early configs named one destination at the top level, either as a string
+    (``destination: obsidian``) or as a dict carrying that destination's own
+    settings. Both forms mean "this one and no other", so they are normalized
+    into the same per-section shape the registry reads.
+
+    Args:
+        config: Parsed ``config.yml`` contents.
+
+    Returns:
+        One section per registered destination, legacy overrides applied.
+    """
+    sections = {key: dict(config.get(key) or {}) for key in DESTINATION_REGISTRY}
+
+    legacy = config.get("destination")
+    if legacy is None:
+        return sections
+
+    if isinstance(legacy, str):
+        # The string form only rules the others out; the named destination is
+        # still configured by, and enabled by, its own section.
+        named, extras, selects = legacy.strip(), {}, False
+    elif isinstance(legacy, dict):
+        named = str(legacy.get("type", "")).strip()
+        extras = {k: v for k, v in legacy.items() if k != "type"}
+        selects = True
+    else:
+        return sections
+
+    for key, section in sections.items():
+        if key != named:
+            section["enabled"] = False
+        elif selects:
+            # A legacy dict both selects the destination and configures it.
+            section.update(extras)
+            section["enabled"] = True
+
+    return sections
+
+
+def build_destinations(config: Dict[str, Any], settings: Settings) -> List[Destination]:
+    """Build every destination the configuration enables.
+
+    Walks :data:`DESTINATION_REGISTRY` rather than naming destinations one by
+    one, so a newly registered subclass is picked up here for free.
+
+    Args:
+        config: Parsed ``config.yml`` contents.
+        settings: The run's resolved settings.
+
+    Returns:
+        The enabled destinations, in registration order. A destination whose
+        section is incomplete is skipped with a warning rather than aborting
+        the run.
+    """
+    sections = _apply_legacy_destination(config)
+    built: List[Destination] = []
+
+    for key, cls in DESTINATION_REGISTRY.items():
+        section = sections.get(key, {})
+        if not section.get("enabled", cls.enabled_by_default):
+            continue
+
+        try:
+            destination = cls.from_config(section, settings)
+        except Exception as e:
+            print(f"⚠️ Could not set up destination '{key}': {e}")
+            logger.warning("Destination '%s' failed to build: %s", key, e)
+            continue
+
+        if destination is not None:
+            built.append(destination)
+            print(f"Destination added: {destination.describe()}")
+
+    return built
