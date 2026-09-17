@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import zipfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -839,6 +839,130 @@ class SyncOptions:
         return replace(self, **{k: v for k, v in overrides.items() if v is not None})
 
 
+class _StopProcessing(Exception):
+    """Raised by a stage when there is nothing left to do for a document.
+
+    Attributes:
+        success: The verdict to report for the document. An empty notebook is
+            a success with nothing to publish; a failed download is not.
+        reason: Message to log, if any.
+    """
+
+    def __init__(self, success: bool, reason: str = "") -> None:
+        super().__init__(reason)
+        self.success = success
+        self.reason = reason
+
+
+def _item_version(item: Any) -> Any:
+    """Return the value that identifies this revision of a document.
+
+    Sync v3/v4 items carry a content hash; older items only carry an integer
+    version. Either is stored in the processed log and compared on the next run.
+
+    Args:
+        item: reMarkable item metadata.
+
+    Returns:
+        The item's hash, else its integer version, else 1.
+    """
+    item_hash = get_val(item, "hash")
+    if item_hash:
+        return item_hash
+    try:
+        return int(get_val(item, "Version"))
+    except (ValueError, TypeError):
+        return 1
+
+
+def _strip_transcript_metadata(path: Optional[Path]) -> str:
+    """Read a transcript and drop the leading metadata line.
+
+    Args:
+        path: The transcript file, or None.
+
+    Returns:
+        The note body: everything from the first page header or divider on.
+    """
+    if not path or not path.exists():
+        return ""
+
+    lines = path.read_text(errors="ignore").split("\n")
+    start = 0
+    for i, line in enumerate(lines):
+        if line.startswith("---") or line.startswith("###"):
+            start = i
+            break
+    return "\n".join(lines[start:]).strip()
+
+
+@dataclass
+class DocumentJob:
+    """One document's state as it moves through the processing stages.
+
+    The stages of :meth:`SyncPipeline.process_notebook_item` communicate
+    through this object rather than through a few hundred lines of locals.
+    Identity fields are set once by ``_describe_job``; the rest accumulate.
+    """
+
+    item: Any
+    notebook: str
+    notebook_id: Any
+    doc_type: str
+    version: Any
+    safe_name: str
+    folder_path: str
+    display_title: str
+    keep_temp: bool
+    doc_file_path: Optional[Path] = None
+
+    tags: List[str] = field(default_factory=list)
+    imgs: List[Path] = field(default_factory=list)
+    pre_paths: List[Path] = field(default_factory=list)
+    extracted_doc_text: str = ""
+    raw_texts: List[str] = field(default_factory=list)
+    cleaned_texts: List[str] = field(default_factory=list)
+    clean_out_txt: Optional[Path] = None
+
+    def page_number(self, index: int) -> int:
+        """Return the document page number for the given transcript index.
+
+        Annotated PDFs only render the pages that were written on, so the
+        page number comes from the image name rather than the loop counter.
+
+        Args:
+            index: Position in the transcript list.
+
+        Returns:
+            The page number to show in the section header.
+        """
+        if index < len(self.imgs):
+            match = re.search(r"page-(\d+)", self.imgs[index].name, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        return index + 1
+
+    def source_file(self) -> Optional[Path]:
+        """Return the original PDF/EPUB to attach, if one was retrieved."""
+        if self.doc_file_path and self.doc_file_path.exists():
+            return self.doc_file_path
+        return None
+
+    def _folder_parts(self) -> List[str]:
+        """Split the reMarkable folder path into its individual folder names."""
+        return [p.strip() for p in self.folder_path.split(" / ") if p.strip()]
+
+    def full_subfolder(self) -> Optional[str]:
+        """Return the whole folder hierarchy, for destinations that nest."""
+        parts = self._folder_parts()
+        return "/".join(parts) if parts else None
+
+    def top_level_subfolder(self) -> Optional[str]:
+        """Return only the outermost folder, for destinations that do not nest."""
+        parts = self._folder_parts()
+        return sanitize_filename(parts[0]) if parts else None
+
+
 class SyncPipeline:
     """Orchestrator for syncing reMarkable notebooks to configured destinations.
 
@@ -1099,6 +1223,11 @@ class SyncPipeline:
     ) -> bool:
         """Process a single notebook or document item through extraction, OCR, and publishing.
 
+        The stages run in a fixed order and pass state through a
+        :class:`DocumentJob`: acquire pages, collect tags, preprocess images,
+        OCR, write transcripts, publish. A stage that finds nothing left to do
+        raises :class:`_StopProcessing` carrying the verdict to report.
+
         Args:
             nb_item: reMarkable item metadata.
             client: reMarkable API client.
@@ -1109,384 +1238,497 @@ class SyncPipeline:
         Returns:
             True if notebook was processed and published successfully, False otherwise.
         """
+        job = self._describe_job(nb_item, client, id_map, keep_temp)
+
+        try:
+            self._acquire_pages(job, client)
+            self._collect_tags(job, client)
+            self._preprocess_images(job)
+            self._ocr_pages(job)
+            self._write_transcripts(job)
+            success = self._publish(job, needs_update)
+        except _StopProcessing as stop:
+            if stop.reason:
+                log(stop.reason)
+            return stop.success
+
+        if success:
+            log(f"Notebook {job.notebook} processing complete.")
+            clean_notebook_temp_artifacts(job.safe_name, keep_temp=job.keep_temp)
+        else:
+            log(f"Notebook {job.notebook} processing FAILED.")
+
+        return success
+
+    # ── Stage 1: identify ────────────────────────────────────────────────
+
+    def _describe_job(
+        self,
+        nb_item: Any,
+        client: Any,
+        id_map: Dict[str, Any],
+        keep_temp: Optional[bool],
+    ) -> DocumentJob:
+        """Resolve a library item into the job the later stages operate on.
+
+        Args:
+            nb_item: reMarkable item metadata.
+            client: reMarkable API client, used to determine the document type.
+            id_map: Mapping from document ID to metadata item, for folder paths.
+            keep_temp: Per-call override for keeping temp artifacts.
+
+        Returns:
+            A DocumentJob with identity, paths and titles filled in.
+        """
         notebook = get_val(nb_item, "VissibleName") or get_val(nb_item, "VisibleName")
-        notebook_id = get_val(nb_item, "ID")
         doc_type = get_document_type(nb_item, client)
-        effective_keep_temp = self.keep_temp if keep_temp is None else keep_temp
-
-        # Get the value to store after processing (Hash or Version)
-        item_hash = get_val(nb_item, "hash")
-        if item_hash:
-            notebook_version = item_hash
-        else:
-            try:
-                notebook_version = int(get_val(nb_item, "Version"))
-            except (ValueError, TypeError):
-                notebook_version = 1
-
-        safe_notebook = sanitize_filename(notebook)
-
-        # Determine Path and Display Title
         folder_path = get_notebook_path(nb_item, id_map)
-        if folder_path:
-            display_title = f"{folder_path} / {notebook}"
-        else:
-            display_title = notebook
+        safe_name = sanitize_filename(notebook)
+
+        job = DocumentJob(
+            item=nb_item,
+            notebook=notebook,
+            notebook_id=get_val(nb_item, "ID"),
+            doc_type=doc_type,
+            version=_item_version(nb_item),
+            safe_name=safe_name,
+            folder_path=folder_path,
+            display_title=f"{folder_path} / {notebook}" if folder_path else notebook,
+            keep_temp=self.keep_temp if keep_temp is None else keep_temp,
+            doc_file_path=(
+                DOCS_DIR / f"{safe_name}.{doc_type}" if doc_type in ("pdf", "epub") else None
+            ),
+        )
 
         type_badge = f" ({doc_type.upper()})" if doc_type != "notebook" else ""
-        log(f"Processing {doc_type}: {display_title}{type_badge} (ID: {notebook_id})")
+        log(f"Processing {doc_type}: {job.display_title}{type_badge} (ID: {job.notebook_id})")
+        return job
 
-        notebook_tags: List[str] = []
+    # ── Stage 2: acquire pages ───────────────────────────────────────────
 
-        # Step 1: Pull and render pages / extract document
-        prefix_pattern = safe_notebook + "."
-        imgs = sorted(
-            [
-                p
-                for p in WHITE_DIR.iterdir()
-                if p.name.startswith(prefix_pattern) and p.suffix.lower() == ".png"
-            ]
-        )
-        doc_file_path = None
-        extracted_doc_text = ""
+    def _acquire_pages(self, job: DocumentJob, client: Any) -> None:
+        """Ensure rendered page images exist for this job, downloading if needed.
 
-        if doc_type in ("pdf", "epub"):
-            doc_file_path = DOCS_DIR / f"{safe_notebook}.{doc_type}"
+        Pages left on disk by an earlier run are reused as-is. Otherwise the
+        document zip is downloaded once and handed to the renderer registered
+        for its type.
 
-        if not imgs:
+        Args:
+            job: The job to fill in; sets ``imgs`` and ``extracted_doc_text``.
+            client: reMarkable API client.
+
+        Raises:
+            _StopProcessing: If the document cannot be downloaded, or yields
+                neither pages nor text.
+        """
+        job.imgs = self._rendered_pages(job)
+
+        if not job.imgs:
             log(
-                f"No white-background PNGs found for {notebook}. Attempting to pull from reMarkable..."
+                f"No white-background PNGs found for {job.notebook}. "
+                "Attempting to pull from reMarkable..."
             )
-            doc = nb_item
-            if not doc:
-                log(f'Document "{notebook}" not found in your reMarkable library. Skipping.')
-                return False
+            if not job.item:
+                raise _StopProcessing(
+                    False,
+                    f'Document "{job.notebook}" not found in your reMarkable library. Skipping.',
+                )
 
-            from living_ink.api import download_raw_file
-            from living_ink.extract import (
-                extract_raw_document_from_zip,
-                extract_tags_from_zip,
-                extract_text_from_epub,
-                extract_text_from_pdf,
-                get_document_page_count,
-                get_pdf_annotated_page_map,
-                render_composite_pdf_page,
-                render_page_from_document_zip,
-                render_pdf_page_preview,
-            )
+            self._render_document(job, client)
 
-            tmp_zip = DATA_DIR / f"{safe_notebook}.zip"
-            raw_bytes = client.download(doc)
-            if not raw_bytes:
-                log(f"Failed to download document zip for {notebook}.")
-                return False
-            with open(tmp_zip, "wb") as f:
-                f.write(raw_bytes)
+            job.imgs = self._rendered_pages(job)
+            if not job.imgs and not job.extracted_doc_text:
+                raise _StopProcessing(
+                    False, f"No pages or text could be extracted for '{job.notebook}'. Skipping."
+                )
 
-            zip_tags = extract_tags_from_zip(tmp_zip)
-            if zip_tags:
-                notebook_tags.extend(zip_tags)
+        log(
+            f"Found {len(job.imgs)} white-background PNGs for {job.notebook}: "
+            f"{[p.name for p in job.imgs]}"
+        )
 
-            if doc_type == "pdf":
-                # 1. Extract raw PDF
-                extract_raw_document_from_zip(tmp_zip, doc_file_path)
-                if not doc_file_path.exists():
-                    raw_pdf_bytes = download_raw_file(client, doc, "pdf")
-                    if raw_pdf_bytes:
-                        doc_file_path.write_bytes(raw_pdf_bytes)
+    def _rendered_pages(self, job: DocumentJob) -> List[Path]:
+        """List the page images already rendered for this job, in page order."""
+        prefix = job.safe_name + "."
+        return sorted(
+            p
+            for p in WHITE_DIR.iterdir()
+            if p.name.startswith(prefix) and p.suffix.lower() == ".png"
+        )
 
-                # 2. Check for annotated pages
-                annotated_pages = get_pdf_annotated_page_map(tmp_zip)
-                if annotated_pages and doc_file_path.exists():
-                    log(f"Rendering {len(annotated_pages)} annotated pages for PDF '{notebook}'...")
-                    with zipfile.ZipFile(tmp_zip, "r") as zf:
-                        for p_info in annotated_pages:
-                            rm_name = p_info["rm_file_name"]
-                            rm_data = zf.read(rm_name) if rm_name in zf.namelist() else b""
-                            page_num = p_info["page_num"]
-                            comp_bytes = render_composite_pdf_page(
-                                doc_file_path, p_info["pdf_page_index"], rm_data
-                            )
-                            if comp_bytes:
-                                out_img = WHITE_DIR / f"{safe_notebook}.page-{page_num}.png"
-                                out_img.write_bytes(comp_bytes)
-                                log(f"Saved annotated page: {out_img}")
-                elif doc_file_path.exists():
-                    log(
-                        f"PDF '{notebook}' has no handwritten annotations. Extracting text & cover preview..."
-                    )
-                    cover_bytes = render_pdf_page_preview(doc_file_path, 0)
-                    if cover_bytes:
-                        out_img = WHITE_DIR / f"{safe_notebook}.page-1.png"
-                        out_img.write_bytes(cover_bytes)
-                        log(f"Saved cover preview: {out_img}")
-                    extracted_doc_text = extract_text_from_pdf(doc_file_path)
+    def _render_document(self, job: DocumentJob, client: Any) -> None:
+        """Download the document zip and render it with the right renderer.
 
-            elif doc_type == "epub":
-                # 1. Extract raw EPUB
-                extract_raw_document_from_zip(tmp_zip, doc_file_path)
-                if not doc_file_path.exists():
-                    raw_epub_bytes = download_raw_file(client, doc, "epub")
-                    if raw_epub_bytes:
-                        doc_file_path.write_bytes(raw_epub_bytes)
+        Args:
+            job: The job being rendered.
+            client: reMarkable API client.
 
-                if doc_file_path.exists():
-                    extracted_doc_text = extract_text_from_epub(doc_file_path)
+        Raises:
+            _StopProcessing: If the zip cannot be downloaded.
+        """
+        from living_ink.extract import extract_tags_from_zip
 
-                # If there are any .rm files, render them as page images
-                page_count = get_document_page_count(tmp_zip)
-                if page_count > 0:
-                    log(f"Rendering {page_count} annotation pages for EPUB '{notebook}'...")
-                    for page in range(1, page_count + 1):
-                        png_bytes = render_page_from_document_zip(tmp_zip, page)
-                        if png_bytes:
-                            out_img = WHITE_DIR / f"{safe_notebook}.page-{page}.png"
-                            out_img.write_bytes(png_bytes)
-                            log(f"Saved: {out_img}")
+        tmp_zip = DATA_DIR / f"{job.safe_name}.zip"
+        raw_bytes = client.download(job.item)
+        if not raw_bytes:
+            raise _StopProcessing(False, f"Failed to download document zip for {job.notebook}.")
+        tmp_zip.write_bytes(raw_bytes)
 
-            else:  # Standard notebook
-                page_count = get_document_page_count(tmp_zip)
-                if page_count == 0:
-                    log(f"Notebook '{notebook}' has 0 pages (empty notebook). Skipping.")
-                    tmp_zip.unlink(missing_ok=True)
-                    return True
-
-                log(f"Rendering {page_count} pages for {notebook}...")
-                for page in range(1, page_count + 1):
-                    png_bytes = render_page_from_document_zip(tmp_zip, page)
-                    if png_bytes is None:
-                        log(f"Failed to render page {page} of {notebook}.")
-                        continue
-                    out_img = WHITE_DIR / f"{safe_notebook}.page-{page}.png"
-                    out_img.write_bytes(png_bytes)
-                    log(f"Saved: {out_img}")
-
-            # Remove temp zip
+        try:
+            job.tags.extend(extract_tags_from_zip(tmp_zip) or [])
+            renderer = self._RENDERERS.get(job.doc_type, SyncPipeline._render_notebook)
+            renderer(self, job, tmp_zip, client)
+        finally:
             tmp_zip.unlink(missing_ok=True)
-            # Re-scan for white PNGs
-            imgs = sorted(
-                [
-                    p
-                    for p in WHITE_DIR.iterdir()
-                    if p.name.startswith(prefix_pattern) and p.suffix.lower() == ".png"
-                ]
+
+    def _ensure_source_file(self, job: DocumentJob, tmp_zip: Path, client: Any) -> bool:
+        """Put the original PDF/EPUB on disk, from the zip or by direct download.
+
+        Args:
+            job: The job whose ``doc_file_path`` should end up on disk.
+            tmp_zip: The downloaded document zip.
+            client: reMarkable API client, for the direct-download fallback.
+
+        Returns:
+            True if the source file is now on disk.
+        """
+        from living_ink.api import download_raw_file
+        from living_ink.extract import extract_raw_document_from_zip
+
+        extract_raw_document_from_zip(tmp_zip, job.doc_file_path)
+        if not job.doc_file_path.exists():
+            raw = download_raw_file(client, job.item, job.doc_type)
+            if raw:
+                job.doc_file_path.write_bytes(raw)
+        return job.doc_file_path.exists()
+
+    def _render_pdf(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
+        """Render an annotated PDF's marked-up pages, or fall back to its text."""
+        from living_ink.extract import (
+            extract_text_from_pdf,
+            get_pdf_annotated_page_map,
+            render_composite_pdf_page,
+            render_pdf_page_preview,
+        )
+
+        if not self._ensure_source_file(job, tmp_zip, client):
+            return
+
+        annotated_pages = get_pdf_annotated_page_map(tmp_zip)
+        if annotated_pages:
+            log(f"Rendering {len(annotated_pages)} annotated pages for PDF '{job.notebook}'...")
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                names = set(zf.namelist())
+                for p_info in annotated_pages:
+                    rm_name = p_info["rm_file_name"]
+                    rm_data = zf.read(rm_name) if rm_name in names else b""
+                    comp_bytes = render_composite_pdf_page(
+                        job.doc_file_path, p_info["pdf_page_index"], rm_data
+                    )
+                    if comp_bytes:
+                        self._save_page(job, p_info["page_num"], comp_bytes, "Saved annotated page")
+            return
+
+        log(
+            f"PDF '{job.notebook}' has no handwritten annotations. "
+            "Extracting text & cover preview..."
+        )
+        cover_bytes = render_pdf_page_preview(job.doc_file_path, 0)
+        if cover_bytes:
+            self._save_page(job, 1, cover_bytes, "Saved cover preview")
+        job.extracted_doc_text = extract_text_from_pdf(job.doc_file_path)
+
+    def _render_epub(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
+        """Extract an EPUB's text, and render any annotation pages it carries."""
+        from living_ink.extract import (
+            extract_text_from_epub,
+            get_document_page_count,
+            render_page_from_document_zip,
+        )
+
+        if self._ensure_source_file(job, tmp_zip, client):
+            job.extracted_doc_text = extract_text_from_epub(job.doc_file_path)
+
+        page_count = get_document_page_count(tmp_zip)
+        if page_count > 0:
+            log(f"Rendering {page_count} annotation pages for EPUB '{job.notebook}'...")
+            for page in range(1, page_count + 1):
+                png_bytes = render_page_from_document_zip(tmp_zip, page)
+                if png_bytes:
+                    self._save_page(job, page, png_bytes)
+
+    def _render_notebook(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
+        """Render every page of a handwritten notebook.
+
+        Raises:
+            _StopProcessing: If the notebook is empty. That is not a failure —
+                there is simply nothing to publish.
+        """
+        from living_ink.extract import get_document_page_count, render_page_from_document_zip
+
+        page_count = get_document_page_count(tmp_zip)
+        if page_count == 0:
+            raise _StopProcessing(
+                True, f"Notebook '{job.notebook}' has 0 pages (empty notebook). Skipping."
             )
-            if not imgs and not extracted_doc_text:
-                log(f"No pages or text could be extracted for '{notebook}'. Skipping.")
-                return False
 
-        log(f"Found {len(imgs)} white-background PNGs for {notebook}: {[p.name for p in imgs]}")
+        log(f"Rendering {page_count} pages for {job.notebook}...")
+        for page in range(1, page_count + 1):
+            png_bytes = render_page_from_document_zip(tmp_zip, page)
+            if png_bytes is None:
+                log(f"Failed to render page {page} of {job.notebook}.")
+                continue
+            self._save_page(job, page, png_bytes)
 
-        if not notebook_tags:
+    def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
+        """Write one rendered page image into the white-background directory."""
+        out_img = WHITE_DIR / f"{job.safe_name}.page-{page}.png"
+        out_img.write_bytes(data)
+        log(f"{label}: {out_img}")
+
+    # Which renderer handles which document type. A type with no entry here is
+    # rendered as a handwritten notebook.
+    _RENDERERS = {"pdf": _render_pdf, "epub": _render_epub}
+
+    # ── Stage 3: tags ────────────────────────────────────────────────────
+
+    def _collect_tags(self, job: DocumentJob, client: Any) -> None:
+        """Fill in the job's tags from the transport if the zip carried none."""
+        if not job.tags:
             from living_ink.api import get_document_tags
 
-            fallback_tags = get_document_tags(client, nb_item)
-            if fallback_tags:
-                notebook_tags.extend(fallback_tags)
+            job.tags.extend(get_document_tags(client, job.item) or [])
 
-        if notebook_tags:
-            log(f"Tags found for '{notebook}': {notebook_tags}")
+        if job.tags:
+            log(f"Tags found for '{job.notebook}': {job.tags}")
 
-        # Preprocess images
-        pre_dir = VISION_DIR / safe_notebook
+    # ── Stage 4: preprocess ──────────────────────────────────────────────
+
+    def _preprocess_images(self, job: DocumentJob) -> None:
+        """Prepare each page image for OCR, writing the results to VISION_DIR."""
+        pre_dir = VISION_DIR / job.safe_name
         pre_dir.mkdir(parents=True, exist_ok=True)
-        pre_paths = []
-        for p in imgs:
+
+        for p in job.imgs:
             out_p = pre_dir / p.name
             preprocess_image(p, out_p)
-            pre_paths.append(out_p)
+            job.pre_paths.append(out_p)
 
-        # OCR — try AI vision first, fall back to Google Cloud Vision
+    # ── Stage 5: OCR ─────────────────────────────────────────────────────
+
+    def _ocr_pages(self, job: DocumentJob) -> None:
+        """Transcribe every prepared page into raw and cleaned text.
+
+        Prefers single-step AI vision OCR, which reads and cleans in one call,
+        and falls back per page to Google Cloud Vision plus AI text repair. If
+        no page yielded text but the document carried extractable text (an
+        unannotated PDF, an EPUB), that text is used instead.
+        """
         use_vision_ocr = vision_ocr_available()
         if use_vision_ocr:
             log("Using AI vision OCR (single-step: reads image + cleans text)")
         else:
             log("Using Google Cloud Vision OCR + AI text cleanup")
 
-        raw_texts = []
-        cleaned_texts = []
-        if pre_paths:
-            for p in pre_paths:
-                if use_vision_ocr:
-                    # Single-step: AI reads the image and returns clean text
-                    log(f"  AI Vision OCR: {p.name}...")
-                    cleaned_text = ocr_and_repair(str(p))
-                    if cleaned_text:
-                        raw_texts.append(cleaned_text)  # No separate raw text in vision mode
-                        cleaned_texts.append(cleaned_text)
-                        continue
-                    # Vision returned None/empty — fall through to Google Vision if configured
-                    log(f"  AI Vision returned empty for {p.name}")
-                    if google_vision_available():
-                        log("  Falling back to Google Cloud Vision...")
-                    else:
-                        log(
-                            f"  Google Cloud Vision not configured; skipping OCR fallback for {p.name}."
-                        )
-                        raw_texts.append("")
-                        cleaned_texts.append("")
-                        continue
-
-                # Two-step: Google Cloud Vision OCR → AI text cleanup
-                if google_vision_available():
-                    log(f"  Google Vision OCR: {p.name}...")
-                    txt = vision_ocr_image_service_account(p)
-                    if txt is None:
-                        log(f"  Vision failed for {p}")
-
-                    raw_text = txt or ""
-                    raw_texts.append(raw_text)
-
-                    log(f"  Cleaning text with AI for {p.name}...")
-                    cleaned_text = repair_text_with_openai(raw_text)
-                    cleaned_texts.append(cleaned_text)
-                else:
-                    log(f"  Google Cloud Vision not configured for {p.name}.")
-                    raw_texts.append("")
-                    cleaned_texts.append("")
+        for p in job.pre_paths:
+            if use_vision_ocr:
+                cleaned_text = self._vision_ocr_page(p)
+                if cleaned_text:
+                    # Vision mode produces no separate raw transcript.
+                    job.raw_texts.append(cleaned_text)
+                    job.cleaned_texts.append(cleaned_text)
                     continue
 
-        if not any(t.strip() for t in cleaned_texts) and extracted_doc_text:
-            raw_texts = [extracted_doc_text]
-            cleaned_texts = [extracted_doc_text]
+            raw_text, cleaned_text = self._google_ocr_page(p)
+            job.raw_texts.append(raw_text)
+            job.cleaned_texts.append(cleaned_text)
 
-        from living_ink.extract import format_page_section_header
+        if not any(t.strip() for t in job.cleaned_texts) and job.extracted_doc_text:
+            job.raw_texts = [job.extracted_doc_text]
+            job.cleaned_texts = [job.extracted_doc_text]
 
-        def _get_page_pnum(idx: int) -> int:
-            if idx < len(imgs):
-                page_m = re.search(r"page-(\d+)", imgs[idx].name, re.IGNORECASE)
-                if page_m:
-                    return int(page_m.group(1))
-            return idx + 1
+    def _vision_ocr_page(self, path: Path) -> str:
+        """Read and clean one page in a single AI vision call.
 
-        # Save RAW text
-        raw_out_txt = OCR_DIR / f"{safe_notebook}_raw.txt"
-        meta = {"notebook": notebook, "images": [p.name for p in imgs]}
-        with open(raw_out_txt, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta) + "\n\n")
-            if raw_texts == [extracted_doc_text] and extracted_doc_text:
-                f.write(extracted_doc_text + "\n")
-            else:
-                for i, t in enumerate(raw_texts):
-                    header = format_page_section_header(
-                        _get_page_pnum(i), doc_file_path, include_divider=True
-                    )
-                    f.write(f"{header}\n\n{(t or '').strip()}\n\n")
+        Args:
+            path: The prepared page image.
+
+        Returns:
+            The cleaned text, or an empty string if vision returned nothing.
+        """
+        log(f"  AI Vision OCR: {path.name}...")
+        cleaned_text = ocr_and_repair(str(path))
+        if cleaned_text:
+            return cleaned_text
+
+        log(f"  AI Vision returned empty for {path.name}")
+        if google_vision_available():
+            log("  Falling back to Google Cloud Vision...")
+        return ""
+
+    def _google_ocr_page(self, path: Path) -> Tuple[str, str]:
+        """Read one page with Google Cloud Vision, then repair the text with AI.
+
+        Args:
+            path: The prepared page image.
+
+        Returns:
+            A (raw text, cleaned text) pair; both empty if Vision is unavailable.
+        """
+        if not google_vision_available():
+            log(f"  Google Cloud Vision not configured for {path.name}.")
+            return "", ""
+
+        log(f"  Google Vision OCR: {path.name}...")
+        txt = vision_ocr_image_service_account(path)
+        if txt is None:
+            log(f"  Vision failed for {path}")
+
+        log(f"  Cleaning text with AI for {path.name}...")
+        return txt or "", repair_text_with_openai(txt or "")
+
+    # ── Stage 6: transcripts ─────────────────────────────────────────────
+
+    def _write_transcripts(self, job: DocumentJob) -> None:
+        """Write the raw and cleaned transcripts to the output directory.
+
+        The cleaned file is the one that gets published; the raw file exists so
+        a user can see what OCR actually read before the AI tidied it.
+        """
+        meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
+
+        raw_out_txt = OCR_DIR / f"{job.safe_name}_raw.txt"
+        self._write_transcript(job, raw_out_txt, meta, job.raw_texts, pad_empty_pages=True)
         log(f"Raw OCR text saved to {raw_out_txt}")
 
-        # Save CLEANED text (this is what goes to Apple Notes / Obsidian)
-        clean_out_txt = OCR_DIR / f"{safe_notebook}_clean.txt"
-        with open(clean_out_txt, "w", encoding="utf-8") as f:
+        job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
+        self._write_transcript(
+            job, job.clean_out_txt, meta, job.cleaned_texts, pad_empty_pages=False
+        )
+        log(f"Cleaned OCR text saved to {job.clean_out_txt}")
+
+    def _write_transcript(
+        self,
+        job: DocumentJob,
+        path: Path,
+        meta: Dict[str, Any],
+        texts: List[str],
+        pad_empty_pages: bool,
+    ) -> None:
+        """Write one transcript: a metadata line, then a section per page.
+
+        Args:
+            job: The job being transcribed.
+            path: File to write.
+            meta: Metadata dict, written as the first line.
+            texts: One entry per page, in page order.
+            pad_empty_pages: Whether a page that produced no text still gets a
+                blank body under its header.
+        """
+        from living_ink.extract import format_page_section_header
+
+        with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta) + "\n\n")
-            if cleaned_texts == [extracted_doc_text] and extracted_doc_text:
-                f.write(extracted_doc_text + "\n")
-            else:
-                for i, t in enumerate(cleaned_texts):
-                    header = format_page_section_header(
-                        _get_page_pnum(i), doc_file_path, include_divider=True
-                    )
-                    body = (t or "").strip()
-                    if body:
-                        f.write(f"{header}\n\n{body}\n\n")
-                    else:
-                        f.write(f"{header}\n\n")
-        log(f"Cleaned OCR text saved to {clean_out_txt}")
 
-        # Create Note (Apple Notes or Obsidian)
-        success = False
+            if job.extracted_doc_text and texts == [job.extracted_doc_text]:
+                f.write(job.extracted_doc_text + "\n")
+                return
+
+            for i, text in enumerate(texts):
+                header = format_page_section_header(
+                    job.page_number(i), job.doc_file_path, include_divider=True
+                )
+                body = (text or "").strip()
+                if body or pad_empty_pages:
+                    f.write(f"{header}\n\n{body}\n\n")
+                else:
+                    f.write(f"{header}\n\n")
+
+    # ── Stage 7: publish ─────────────────────────────────────────────────
+
+    def _publish(self, job: DocumentJob, needs_update: Dict[str, List[Destination]]) -> bool:
+        """Publish the cleaned transcript to every destination that wants it.
+
+        Args:
+            job: The processed job.
+            needs_update: Mapping from document ID to the destinations that are
+                behind on it. No entry means a forced run, which targets every
+                active destination.
+
+        Returns:
+            True if every targeted destination accepted the note.
+        """
         try:
-            # Prepare text content (extract from saved file)
-            full_text = clean_out_txt.read_text(errors="ignore") if clean_out_txt.exists() else ""
-
-            # Skip the first JSON line/metadata and find first page marker or divider
-            lines = full_text.split("\n")
-            text_start = 0
-            for i, line in enumerate(lines):
-                if line.startswith("---") or line.startswith("###"):
-                    text_start = i
-                    break
-            clean_text = "\n".join(lines[text_start:]).strip()
-
-            # Determine folder paths for nesting
-            full_subfolder = None
-            top_level_subfolder = None
-            if folder_path:
-                parts = [p.strip() for p in folder_path.split(" / ") if p.strip()]
-                if parts:
-                    top_level_subfolder = sanitize_filename(parts[0])
-                    full_subfolder = "/".join(parts)
-
-            # Destinations that specifically request this notebook
-            targets = needs_update.get(notebook_id, [])
-            active_dests = self.destinations or get_default_destinations()
-
-            # Fallback: if 'needs_update' is empty (forced run), target all active
-            if not targets and active_dests:
-                targets = active_dests
-
-            if targets:
-                all_success = True
-                for dest in targets:
-                    dest_name = type(dest).__name__
-                    log(f"Publishing to {dest_name}...")
-
-                    # Apple Notes only supports 1 level of sub-folder under rootFolder.
-                    # Obsidian supports full nested hierarchy.
-                    if isinstance(dest, AppleNotesDestination):
-                        target_subfolder = top_level_subfolder
-                    else:
-                        target_subfolder = full_subfolder
-
-                    # A DestinationError is an expected, user-actionable failure
-                    # (vault gone, Notes not responding): report it plainly and
-                    # carry on to the next destination. Anything else is a bug,
-                    # and is logged with a traceback so it is distinguishable.
-                    try:
-                        dest_success = dest.publish(
-                            notebook_name=display_title,
-                            text_content=clean_text,
-                            image_paths=imgs,
-                            sub_folder=target_subfolder,
-                            document_path=doc_file_path
-                            if (doc_file_path and doc_file_path.exists())
-                            else None,
-                            tags=notebook_tags,
-                        )
-                    except DestinationError as e:
-                        log(f"⚠️ {dest_name}: {e}")
-                        dest_success = False
-                    except Exception:
-                        import traceback
-
-                        log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
-                        log(traceback.format_exc())
-                        dest_success = False
-
-                    if dest_success:
-                        # Update state for THIS destination immediately
-                        add_to_processed_log(dest_name, notebook_id, notebook_version)
-                    else:
-                        all_success = False
-                        log(f"⚠️ Failed to publish to {dest_name}")
-
-                success = all_success
-            else:
+            clean_text = _strip_transcript_metadata(job.clean_out_txt)
+            targets = needs_update.get(job.notebook_id) or (
+                self.destinations or get_default_destinations()
+            )
+            if not targets:
                 log("No destinations need update for this notebook (or none configured).")
-                success = True
+                return True
 
+            all_success = True
+            for dest in targets:
+                if self._publish_to(dest, job, clean_text):
+                    # Update state for THIS destination immediately.
+                    add_to_processed_log(type(dest).__name__, job.notebook_id, job.version)
+                else:
+                    all_success = False
+                    log(f"⚠️ Failed to publish to {type(dest).__name__}")
+
+            return all_success
         except Exception as e:
             log(f"Failed publishing note: {e}")
             import traceback
 
             log(traceback.format_exc())
+            return False
 
-        if success:
-            log(f"Notebook {notebook} processing complete.")
-            clean_notebook_temp_artifacts(safe_notebook, keep_temp=effective_keep_temp)
-        else:
-            log(f"Notebook {notebook} processing FAILED.")
+    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> bool:
+        """Publish one note to one destination.
 
-        return success
+        A DestinationError is an expected, user-actionable failure (vault gone,
+        Notes not responding): report it plainly and let the caller carry on to
+        the next destination. Anything else is a bug, and is logged with a
+        traceback so it is distinguishable.
+
+        Args:
+            dest: The destination to publish to.
+            job: The processed job.
+            clean_text: The note body.
+
+        Returns:
+            True if the destination accepted the note.
+        """
+        dest_name = type(dest).__name__
+        log(f"Publishing to {dest_name}...")
+
+        # Apple Notes only supports 1 level of sub-folder under rootFolder.
+        # Obsidian supports the full nested hierarchy.
+        sub_folder = (
+            job.top_level_subfolder()
+            if isinstance(dest, AppleNotesDestination)
+            else job.full_subfolder()
+        )
+
+        try:
+            return dest.publish(
+                notebook_name=job.display_title,
+                text_content=clean_text,
+                image_paths=job.imgs,
+                sub_folder=sub_folder,
+                document_path=job.source_file(),
+                tags=job.tags,
+            )
+        except DestinationError as e:
+            log(f"⚠️ {dest_name}: {e}")
+            return False
+        except Exception:
+            import traceback
+
+            log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
+            log(traceback.format_exc())
+            return False
 
     def run(self) -> bool:
         """Execute the sync pipeline.
