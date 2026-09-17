@@ -19,12 +19,36 @@ import platform
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WizardResult:
+    """What the setup wizard achieved, and what the user asked for next.
+
+    The wizard used to run the first sync itself, which meant the onboarding UI
+    imported the orchestrator and the orchestrator imported the onboarding UI.
+    Returning the request instead leaves the decision to the CLI, the one layer
+    that legitimately knows about both.
+
+    Attributes:
+        saved: Whether a config file was written.
+        run_sync_requested: Whether the user asked to sync immediately.
+    """
+
+    saved: bool
+    run_sync_requested: bool = False
+
+    def __bool__(self) -> bool:
+        """Report success, so existing truthiness checks keep working."""
+        return self.saved
+
 
 # ANSI styling helpers (disabled when stdout is not a TTY)
 IS_TTY = sys.stdout.isatty()
@@ -680,7 +704,7 @@ def run_wizard(
     print_func: Callable[..., None] = print,
     repo_dir: Optional[Path] = None,
     bin_dir: Optional[Path] = None,
-) -> bool:
+) -> WizardResult:
     """Run the interactive setup walkthrough.
 
     Args:
@@ -690,7 +714,8 @@ def run_wizard(
         bin_dir: Optional custom bin directory for CLI wrapper installation.
 
     Returns:
-        True if configuration was successfully created, False if aborted.
+        A WizardResult recording whether config was saved and whether the user
+        asked to sync straight away. Running that sync is the caller's job.
     """
     from living_ink.config import get_config_path
 
@@ -774,7 +799,7 @@ def run_wizard(
             )
             if retry not in ("", "y", "yes"):
                 print_func(red("Setup aborted."))
-                return False
+                return WizardResult(saved=False)
 
         # Offer Cloud as automatic backup
         print_func()
@@ -792,7 +817,7 @@ def run_wizard(
         remarkable_token = _prompt_cloud_pairing(input_func, print_func)
         if not remarkable_token:
             print_func(red("reMarkable Cloud pairing is required for Cloud mode. Setup aborted."))
-            return False
+            return WizardResult(saved=False)
 
         # Offer USB SSH as automatic backup
         print_func()
@@ -1055,25 +1080,5 @@ def run_wizard(
     run_first = (
         input_func(bold("Would you like to run your first sync now? [Y/n]: ")).strip().lower()
     )
-    if run_first in ("", "y", "yes"):
-        print_func()
-        print_func(cyan("Starting sync pipeline..."))
-        print_func()
-        uv_cmd = find_uv_path()
-        try:
-            if shutil.which("living-ink"):
-                subprocess.run(["living-ink", "sync"], check=False)
-            elif shutil.which(uv_cmd):
-                subprocess.run([uv_cmd, "run", "python", "-m", "living_ink", "sync"], check=False)
-            else:
-                from living_ink.pipeline import SyncPipeline
 
-                SyncPipeline().run()
-        except Exception as e:
-            print_func(red(f"Error running sync: {e}"))
-
-    return True
-
-
-if __name__ == "__main__":
-    run_wizard()
+    return WizardResult(saved=True, run_sync_requested=run_first in ("", "y", "yes"))

@@ -415,7 +415,8 @@ class TestRunWizard:
             bin_dir=tmp_path / "bin",
         )
 
-        assert result is True
+        assert result.saved is True
+        assert result.run_sync_requested is False
         saved_config = tmp_path / "config" / "config.yml"
         assert saved_config.exists()
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
@@ -475,7 +476,8 @@ class TestRunWizard:
             bin_dir=tmp_path / "bin",
         )
 
-        assert result is True
+        assert result.saved is True
+        assert result.run_sync_requested is False
         saved_config = tmp_path / "config" / "config.yml"
         assert saved_config.exists()
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
@@ -539,7 +541,8 @@ class TestRunWizard:
             bin_dir=tmp_path / "bin",
         )
 
-        assert result is True
+        assert result.saved is True
+        assert result.run_sync_requested is False
         saved_config = tmp_path / "config" / "config.yml"
         assert saved_config.exists()
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Type
 
-from living_ink.config import get_config_path
+from living_ink.config import ConfigurationMissing, get_config_path
 
 
 class BaseCommand(ABC):
@@ -70,11 +70,19 @@ class BaseCommand(ABC):
 
 
 class SyncCommand(BaseCommand):
-    """Execute the reMarkable notebook sync pipeline."""
+    """Execute the reMarkable notebook sync pipeline.
+
+    Attributes:
+        offer_setup_on_missing_config: Whether an unusable config should prompt
+            the user to run the wizard. Set to False when the wizard is already
+            what invoked this command, to avoid bouncing between the two.
+    """
 
     name = "sync"
     help = "Run the sync pipeline"
     description = "Sync notes and documents from reMarkable to Obsidian/Apple Notes."
+
+    offer_setup_on_missing_config = True
 
     @classmethod
     def register_args(cls, parser: argparse.ArgumentParser) -> None:
@@ -134,10 +142,48 @@ class SyncCommand(BaseCommand):
             options=SyncOptions.from_args(args),
             config_path=cfg_path if cfg_path.exists() else None,
         )
-        success = pipeline.run()
+        try:
+            success = pipeline.run()
+        except ConfigurationMissing as e:
+            return self._handle_missing_config(e, args)
         if not success:
             sys.exit(1)
         return 0
+
+    def _handle_missing_config(self, error: "ConfigurationMissing", args) -> int:
+        """Report a configuration problem and, if interactive, offer the wizard.
+
+        The pipeline only reports that configuration is unusable; whether to
+        interrupt the user and walk them through setup is a front-end decision,
+        so it is made here.
+
+        Args:
+            error: The configuration problem the pipeline reported.
+            args: Parsed arguments, reused if the sync is retried after setup.
+
+        Returns:
+            0 if setup ran and the retried sync succeeded, 1 otherwise.
+        """
+        print("\n" + "=" * 60)
+        print("CONFIGURATION ERROR")
+        print("=" * 60)
+        print(str(error))
+        print("-" * 60)
+        print(error.hint)
+        print("=" * 60 + "\n")
+
+        if not self.offer_setup_on_missing_config or not sys.stdin.isatty():
+            return 1
+
+        try:
+            choice = input("Would you like to run the interactive setup wizard now? [Y/n]: ")
+        except (KeyboardInterrupt, EOFError):
+            return 1
+
+        if choice.strip().lower() not in ("", "y", "yes"):
+            return 1
+
+        return SetupCommand(root=self.root).run(args)
 
 
 class SetupCommand(BaseCommand):
@@ -157,17 +203,24 @@ class SetupCommand(BaseCommand):
         pass
 
     def run(self, args: argparse.Namespace) -> int:
-        """Run the interactive setup wizard.
+        """Run the interactive setup wizard, then optionally the first sync.
 
         Args:
             args: Parsed arguments for setup.
 
         Returns:
-            0 on completion.
+            0 on completion, or the sync's exit code if the user asked to sync.
         """
         from living_ink.setup_wizard import run_wizard
 
-        run_wizard(repo_dir=self.root)
+        result = run_wizard(repo_dir=self.root)
+        if result.run_sync_requested:
+            print("\nStarting sync pipeline...\n")
+            sync = SyncCommand(root=self.root)
+            # Config was just written; if it is still unusable, reporting the
+            # problem beats looping back into the wizard that produced it.
+            sync.offer_setup_on_missing_config = False
+            return sync.run(args)
         return 0
 
 
