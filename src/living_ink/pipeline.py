@@ -28,7 +28,7 @@ from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
     DestinationError,
-    ObsidianDestination,
+    build_destinations,
 )
 from living_ink.settings import Settings
 
@@ -217,74 +217,21 @@ def get_default_config() -> Dict[str, Any]:
 def get_destinations_from_config(
     config_dict, settings: Optional[Settings] = None
 ) -> List[Destination]:
-    """Factory to create a list of enabled Destinations based on config.
+    """Build the destinations this configuration enables.
+
+    Thin wrapper over :func:`living_ink.destinations.build_destinations`, which
+    walks the destination registry. Adding a destination means registering it
+    there, not editing this module.
 
     Args:
         config_dict: Parsed ``config.yml`` contents.
-        settings: Resolved settings, used for the Apple Notes folder name.
-            Defaults to resolving them from ``config_dict`` and the environment.
+        settings: Resolved settings. Defaults to resolving them from
+            ``config_dict`` and the environment.
 
     Returns:
         The destinations enabled by this configuration.
     """
-    resolved = settings or Settings.resolve(config_dict)
-    dests = []
-
-    # 1. Check for Apple Notes
-    # Enabled by default if not explicitly disabled or if folder is set
-    an_config = config_dict.get("apple_notes", {})
-    an_enabled = an_config.get("enabled", True)  # Default true
-
-    # Check if we were explicitly told to target something else in the old 'destination' key
-    if "destination" in config_dict:
-        if (
-            isinstance(config_dict["destination"], str)
-            and config_dict["destination"] != "apple_notes"
-        ):
-            an_enabled = False
-        elif (
-            isinstance(config_dict["destination"], dict)
-            and config_dict["destination"].get("type") != "apple_notes"
-        ):
-            an_enabled = False
-
-    if an_enabled:
-        folder = resolved.apple_notes_folder
-        dests.append(AppleNotesDestination(folder_name=folder))
-        print(f"Destination added: Apple Notes (Folder: {folder})")
-
-    # 2. Check for Obsidian
-    # Check legacy 'destination' key first
-    obs_config = config_dict.get("obsidian", {})
-    obs_enabled = obs_config.get("enabled", False)  # Default false unless configured
-    vault_path = obs_config.get("vault_path")
-
-    # Legacy config support
-    if "destination" in config_dict:
-        d = config_dict["destination"]
-        if isinstance(d, dict) and d.get("type") == "obsidian":
-            obs_enabled = True
-            vault_path = d.get("vault_path", vault_path)
-
-    if obs_enabled:
-        if vault_path:
-            root_folder = obs_config.get("root_folder")
-            mirror_folders = obs_config.get("mirror_folders", True)
-            attachments_folder = obs_config.get("attachments_folder", "_attachments")
-            dests.append(
-                ObsidianDestination(
-                    vault_path=vault_path,
-                    attachments_folder=attachments_folder,
-                    root_folder=root_folder,
-                    mirror_folders=mirror_folders,
-                )
-            )
-            folder_info = f" (Root: {root_folder})" if root_folder else ""
-            print(f"Destination added: Obsidian (Vault: {vault_path}{folder_info})")
-        else:
-            print("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
-
-    return dests
+    return build_destinations(config_dict, settings or Settings.resolve(config_dict))
 
 
 _default_destinations: Optional[List[Destination]] = None
