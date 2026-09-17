@@ -36,6 +36,10 @@ DEFAULT_PREFERRED_CONNECTION = "ssh"
 DEFAULT_APPLE_NOTES_FOLDER = "Living Ink"
 DEFAULT_MAX_NOTEBOOKS_PER_RUN = 1
 
+# Pages are transcribed by one network call each, so a handful in flight is a
+# large speedup. The ceiling is the provider's rate limit, not local CPU.
+DEFAULT_OCR_CONCURRENCY = 4
+
 _TRUTHY = ("1", "true", "yes", "on")
 
 
@@ -108,6 +112,7 @@ class Settings:
         sync_pdfs: Whether annotated PDFs are synced alongside notebooks.
         sync_epubs: Whether annotated EPUBs are synced alongside notebooks.
         max_notebooks_per_run: Cap on documents processed in one run.
+        ocr_concurrency: How many pages to transcribe at once. 1 is serial.
         apple_notes_folder: Destination folder name in Apple Notes.
     """
 
@@ -121,6 +126,7 @@ class Settings:
     sync_pdfs: bool = False
     sync_epubs: bool = False
     max_notebooks_per_run: int = DEFAULT_MAX_NOTEBOOKS_PER_RUN
+    ocr_concurrency: int = DEFAULT_OCR_CONCURRENCY
 
     apple_notes_folder: str = DEFAULT_APPLE_NOTES_FOLDER
 
@@ -184,6 +190,13 @@ class Settings:
             max_notebooks_per_run=as_int(
                 pick("SYNC_MAX_NOTEBOOKS", sync.get("max_notebooks_per_run")),
                 DEFAULT_MAX_NOTEBOOKS_PER_RUN,
+            ),
+            ocr_concurrency=max(
+                1,
+                as_int(
+                    pick("SYNC_OCR_CONCURRENCY", sync.get("ocr_concurrency")),
+                    DEFAULT_OCR_CONCURRENCY,
+                ),
             ),
             apple_notes_folder=as_str(
                 pick("APPLE_NOTES_FOLDER", notes.get("folder_name")), DEFAULT_APPLE_NOTES_FOLDER

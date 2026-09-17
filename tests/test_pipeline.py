@@ -3,6 +3,8 @@
 import os
 import subprocess
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -376,3 +378,78 @@ class TestRendererDispatch:
     def test_anything_else_renders_as_a_notebook(self):
         assert SyncPipeline._RENDERERS.get("notebook") is None
         assert SyncPipeline._RENDERERS.get("djvu") is None
+
+
+class TestPageConcurrency:
+    """Pages are transcribed several at a time, but always reported in order."""
+
+    def _pipeline(self, concurrency: int) -> SyncPipeline:
+        p = SyncPipeline(destinations=[])
+        p.settings = replace(p.settings, ocr_concurrency=concurrency)
+        return p
+
+    def test_results_stay_in_page_order(self):
+        """A slow first page must not end up after a fast last page."""
+        pipeline_obj = self._pipeline(4)
+        paths = [Path(f"page-{i}.png") for i in range(4)]
+
+        def transcribe(path, use_vision_ocr):
+            # Earlier pages finish last, which reorders anything unordered.
+            time.sleep(0.05 * (len(paths) - int(path.stem.split("-")[1])))
+            return path.name, path.name
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            results = pipeline_obj._transcribe_pages(paths, use_vision_ocr=True)
+
+        assert [cleaned for _, cleaned in results] == [p.name for p in paths]
+
+    def test_pages_are_transcribed_concurrently(self):
+        """Four pages at width four take about one page's time, not four."""
+        pipeline_obj = self._pipeline(4)
+        paths = [Path(f"page-{i}.png") for i in range(4)]
+
+        def transcribe(path, use_vision_ocr):
+            time.sleep(0.1)
+            return "", ""
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            started = time.monotonic()
+            pipeline_obj._transcribe_pages(paths, use_vision_ocr=True)
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 0.3, f"pages appear to have run serially ({elapsed:.2f}s)"
+
+    def test_concurrency_of_one_runs_serially(self):
+        pipeline_obj = self._pipeline(1)
+        paths = [Path("a.png"), Path("b.png")]
+        in_flight = []
+
+        def transcribe(path, use_vision_ocr):
+            in_flight.append(path.name)
+            assert len(in_flight) == 1
+            in_flight.pop()
+            return path.name, path.name
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            results = pipeline_obj._transcribe_pages(paths, use_vision_ocr=False)
+
+        assert results == [("a.png", "a.png"), ("b.png", "b.png")]
+
+    def test_no_pages_needs_no_workers(self):
+        assert self._pipeline(4)._transcribe_pages([], use_vision_ocr=True) == []
+
+    def test_vision_result_is_used_for_both_transcripts(self):
+        pipeline_obj = self._pipeline(1)
+
+        with patch.object(pipeline_obj, "_vision_ocr_page", return_value="clean text"):
+            assert pipeline_obj._transcribe_page(Path("p.png"), True) == (
+                "clean text",
+                "clean text",
+            )
+
+    def test_empty_vision_result_falls_back_to_google(self):
+        pipeline_obj = self._pipeline(1)
+
+        with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
+            with patch.object(pipeline_obj, "_google_ocr_page", return_value=("raw", "clean")):
+                assert pipeline_obj._transcribe_page(Path("p.png"), True) == ("raw", "clean")

@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1530,22 +1531,57 @@ class SyncPipeline:
         else:
             log("Using Google Cloud Vision OCR + AI text cleanup")
 
-        for p in job.pre_paths:
-            if use_vision_ocr:
-                cleaned_text = self._vision_ocr_page(p)
-                if cleaned_text:
-                    # Vision mode produces no separate raw transcript.
-                    job.raw_texts.append(cleaned_text)
-                    job.cleaned_texts.append(cleaned_text)
-                    continue
-
-            raw_text, cleaned_text = self._google_ocr_page(p)
-            job.raw_texts.append(raw_text)
-            job.cleaned_texts.append(cleaned_text)
+        results = self._transcribe_pages(job.pre_paths, use_vision_ocr)
+        job.raw_texts = [raw for raw, _ in results]
+        job.cleaned_texts = [cleaned for _, cleaned in results]
 
         if not any(t.strip() for t in job.cleaned_texts) and job.extracted_doc_text:
             job.raw_texts = [job.extracted_doc_text]
             job.cleaned_texts = [job.extracted_doc_text]
+
+    def _transcribe_pages(self, paths: List[Path], use_vision_ocr: bool) -> List[Tuple[str, str]]:
+        """Transcribe pages, several at a time, and return them in page order.
+
+        A page is one network round trip and nothing else, so running a few
+        concurrently is most of the wall-clock win available in a sync. The
+        ceiling is the AI provider's rate limit, which is why the width is the
+        configurable ``ocr_concurrency`` rather than the page count.
+
+        Args:
+            paths: Prepared page images, in page order.
+            use_vision_ocr: Whether single-step AI vision OCR is available.
+
+        Returns:
+            One (raw text, cleaned text) pair per page, in the order given.
+        """
+        width = min(self.settings.ocr_concurrency, len(paths))
+        if width <= 1:
+            return [self._transcribe_page(p, use_vision_ocr) for p in paths]
+
+        log(f"Transcribing {len(paths)} pages, {width} at a time...")
+        with ThreadPoolExecutor(max_workers=width) as pool:
+            # ``map`` yields in submission order, so pages stay in page order
+            # however the calls happen to finish.
+            return list(pool.map(lambda p: self._transcribe_page(p, use_vision_ocr), paths))
+
+    def _transcribe_page(self, path: Path, use_vision_ocr: bool) -> Tuple[str, str]:
+        """Transcribe one page, preferring vision OCR and falling back to Vision.
+
+        Args:
+            path: The prepared page image.
+            use_vision_ocr: Whether single-step AI vision OCR is available.
+
+        Returns:
+            A (raw text, cleaned text) pair. In vision mode both are the same
+            text: the model reads and cleans in one call, so there is no
+            separate raw transcript.
+        """
+        if use_vision_ocr:
+            cleaned_text = self._vision_ocr_page(path)
+            if cleaned_text:
+                return cleaned_text, cleaned_text
+
+        return self._google_ocr_page(path)
 
     def _vision_ocr_page(self, path: Path) -> str:
         """Read and clean one page in a single AI vision call.
