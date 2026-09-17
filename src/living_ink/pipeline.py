@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
-import argparse
 import datetime
 import importlib.util
 import json
@@ -1612,69 +1611,3 @@ class SyncPipeline:
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
         return all_success
-
-
-def main(argv: Optional[List[str]] = None) -> None:
-    """Main CLI entry point for the sync pipeline."""
-    parser = argparse.ArgumentParser(
-        prog="living-ink-pipeline",
-        description="Sync reMarkable notebooks to Apple Notes and Obsidian.",
-    )
-    parser.add_argument(
-        "--notebook",
-        help="Process a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
-    )
-    parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process per run")
-    parser.add_argument(
-        "--folder",
-        default=os.environ.get("APPLE_NOTES_FOLDER", "Living Ink"),
-        help="Apple Notes folder name",
-    )
-    parser.add_argument("--state-file", help="Ignored (legacy compatibility)")
-    parser.add_argument(
-        "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
-    )
-    parser.add_argument(
-        "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
-    )
-    parser.add_argument(
-        "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
-    )
-    parser.add_argument(
-        "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
-    )
-    parser.add_argument(
-        "--all-types",
-        action="store_true",
-        help="Sync all document types (notebooks, PDFs, and EPUBs)",
-    )
-    parser.add_argument(
-        "--keep-temp",
-        action="store_true",
-        help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
-    )
-    args = parser.parse_args(argv)
-
-    pipeline = SyncPipeline(
-        notebook=args.notebook,
-        limit=args.limit,
-        folder=args.folder,
-        ssh=args.ssh,
-        cloud=args.cloud,
-        sync_pdfs=args.sync_pdfs,
-        sync_epubs=args.sync_epubs,
-        all_types=args.all_types,
-        keep_temp=args.keep_temp,
-    )
-    success = pipeline.run()
-    if not success:
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    import multiprocessing
-
-    multiprocessing.freeze_support()
-
-    log(f"Script started. Working directory: {os.getcwd()}. Log path: {LOG_PATH.resolve()}")
-    main()

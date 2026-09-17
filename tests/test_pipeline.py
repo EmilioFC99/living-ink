@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from living_ink.destinations import AppleNotesDestination, Destination
-from living_ink.pipeline import SyncPipeline, main
+from living_ink.pipeline import SyncPipeline
 
 
 class MockDestination(Destination):
@@ -192,23 +192,3 @@ def test_sync_pipeline_process_notebook_item():
             keep_temp=True,
         )
         assert success is False
-
-
-def test_pipeline_main_cli(monkeypatch):
-    """living_ink.pipeline.main parses CLI args, initializes SyncPipeline, and executes."""
-    monkeypatch.delenv("APPLE_NOTES_FOLDER", raising=False)
-    with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None) as mock_init:
-        with patch("living_ink.pipeline.SyncPipeline.run", return_value=True) as mock_run:
-            main(["--notebook", "SpecialBook", "--limit", "3", "--keep-temp"])
-            mock_init.assert_called_once_with(
-                notebook="SpecialBook",
-                limit=3,
-                folder="Living Ink",
-                ssh=False,
-                cloud=False,
-                sync_pdfs=False,
-                sync_epubs=False,
-                all_types=False,
-                keep_temp=True,
-            )
-            mock_run.assert_called_once_with()
