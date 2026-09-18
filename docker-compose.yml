@@ -40,11 +40,6 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - REMARKABLE_DEVICE_TOKEN=${REMARKABLE_DEVICE_TOKEN:-}
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        echo "Starting Living Ink sync daemon (interval: $${SYNC_INTERVAL}s)..."
-        while true; do
-          living-ink sync || echo "Sync completed with warnings, will retry next cycle..."
-          sleep "$${SYNC_INTERVAL}"
-        done
+    # `watch` owns the loop, so a failed cycle is logged and retried rather
+    # than ending the container, and Ctrl+C / SIGINT stops it cleanly.
+    command: ["watch", "--interval", "${SYNC_INTERVAL:-1800}"]
