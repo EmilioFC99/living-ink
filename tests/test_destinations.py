@@ -656,3 +656,89 @@ class TestObsidianIgnoresIdentityArguments:
         dest = ObsidianDestination(vault_path=str(tmp_path))
         dest.publish("Note", "body", [])
         assert dest.last_external_id is None
+
+
+class TestObsidianNoteIdentity:
+    """The document id is the identity of a note; the filename only labels it."""
+
+    def _dest(self, tmp_path):
+        return ObsidianDestination(vault_path=str(tmp_path))
+
+    def test_the_document_id_is_stamped_into_the_note(self, tmp_path):
+        self._dest(tmp_path).publish("Notes", "body", [], doc_id="doc-1")
+        assert "living_ink_id: doc-1" in (tmp_path / "Notes.md").read_text(encoding="utf-8")
+
+    def test_the_id_survives_a_resync(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "v1", [], doc_id="doc-1")
+        dest.publish("Notes", "v2", [], doc_id="doc-1")
+        written = (tmp_path / "Notes.md").read_text(encoding="utf-8")
+        assert written.count("living_ink_id: doc-1") == 1
+
+    def test_a_note_without_an_id_is_not_stamped(self, tmp_path):
+        """Publishing without an id behaves exactly as it did before."""
+        self._dest(tmp_path).publish("Notes", "body", [])
+        assert "living_ink_id" not in (tmp_path / "Notes.md").read_text(encoding="utf-8")
+
+    def test_a_different_document_with_the_same_title_gets_its_own_note(self, tmp_path):
+        """Two notebooks called 'Notes' used to merge into one file."""
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "first notebook", [], doc_id="doc-1")
+        dest.publish("Notes", "second notebook", [], doc_id="doc-2")
+
+        assert "first notebook" in (tmp_path / "Notes.md").read_text(encoding="utf-8")
+        assert "second notebook" in (tmp_path / "Notes (2).md").read_text(encoding="utf-8")
+
+    def test_the_same_document_keeps_its_note_rather_than_multiplying(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "v1", [], doc_id="doc-1")
+        dest.publish("Notes", "v2", [], doc_id="doc-1")
+        assert not (tmp_path / "Notes (2).md").exists()
+
+    def test_a_third_collision_takes_the_next_free_name(self, tmp_path):
+        dest = self._dest(tmp_path)
+        for index in range(1, 4):
+            dest.publish("Notes", f"notebook {index}", [], doc_id=f"doc-{index}")
+        assert (tmp_path / "Notes (3).md").exists()
+
+    def test_a_note_predating_ids_is_adopted_not_duplicated(self, tmp_path):
+        """Everything synced before this existed carries no id, and is still ours."""
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "v1", [])
+        dest.publish("Notes", "v2", [], doc_id="doc-1")
+
+        assert not (tmp_path / "Notes (2).md").exists()
+        assert "living_ink_id: doc-1" in (tmp_path / "Notes.md").read_text(encoding="utf-8")
+
+    def test_someone_elses_note_is_still_merged_into(self, tmp_path):
+        """A hand-written note has no id; refusing to touch it would orphan the sync."""
+        note = tmp_path / "Notes.md"
+        note.write_text("# Mine\n\nKeep this.\n", encoding="utf-8")
+
+        self._dest(tmp_path).publish("Notes", "Transcript", [], doc_id="doc-1")
+
+        written = note.read_text(encoding="utf-8")
+        assert "Keep this." in written
+        assert "Transcript" in written
+
+    def test_where_the_note_landed_is_reported(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "body", [], sub_folder="Work", doc_id="doc-1")
+        assert dest.last_target == "Work/Notes.md"
+
+    def test_the_reported_target_is_the_name_actually_used(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "first", [], doc_id="doc-1")
+        dest.publish("Notes", "second", [], doc_id="doc-2")
+        assert dest.last_target == "Notes (2).md"
+
+    def test_the_attachments_follow_the_note_that_was_written(self, tmp_path, monkeypatch):
+        """A renamed note must not point its links at the other document's images."""
+        page = tmp_path / "page-1.png"
+        page.write_bytes(b"png")
+
+        dest = ObsidianDestination(vault_path=str(tmp_path), attachments_folder="_attachments")
+        dest.publish("Notes", "first", [], doc_id="doc-1")
+        dest.publish("Notes", "second", [page], doc_id="doc-2")
+
+        assert (tmp_path / "_attachments" / "Notes (2)" / "page-1.png").exists()
