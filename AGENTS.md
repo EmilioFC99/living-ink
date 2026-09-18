@@ -62,6 +62,8 @@ Publish via Destination.publish()
     └── ObsidianDestination (Markdown + frontmatter, full folder tree)
 
 Note identity is the reMarkable document id, never the title. `publish()` receives `doc_id`; Obsidian writes it into the frontmatter as `living_ink_id` and will not merge two different documents into one file; `publications.target` records where each note landed, and is fed back as `existing_target` so a rename or a move relocates the note. A published document missing from the tablet listing is reported as an orphan; `living-ink sync --prune` deletes it via `Destination.unpublish()`, which never removes a note that cannot be proven to be Living Ink's.
+
+Obsidian's frontmatter carries three dates that mean three different things: `created` (preserved from the note if it already has one, else the first time this document was published here, else the tablet's modification date), `updated` (when the notebook was last written on, per the tablet) and `synced` (today). `pipeline.to_datetime()` reconciles the transports, which disagree — the cloud client returns a datetime, SSH returns the device's epoch in milliseconds.
 ```
 
 ### The seams that matter

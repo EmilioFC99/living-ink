@@ -138,6 +138,8 @@ class Destination(abc.ABC):
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
         existing_target: Optional[str] = None,
+        document_modified: Optional[str] = None,
+        first_published: Optional[str] = None,
     ) -> bool:
         """Publish a notebook to the destination.
 
@@ -163,6 +165,12 @@ class Destination(abc.ABC):
                 somewhere else now — the notebook was renamed or moved on the
                 tablet — a destination that can move it should, rather than
                 leaving a copy under the old name.
+            document_modified: ``YYYY-MM-DD`` the user last wrote on this
+                notebook, as the tablet reports it. This is the date worth
+                sorting a library by, and it is not the date of the sync.
+            first_published: ``YYYY-MM-DD`` this document first reached this
+                destination, for a note that has to state when it came into
+                existence and has no other record of it.
 
         Returns:
             True if publication succeeded. On success, implementations set
@@ -448,6 +456,8 @@ end tell
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
         existing_target: Optional[str] = None,
+        document_modified: Optional[str] = None,
+        first_published: Optional[str] = None,
     ) -> bool:
         """Publish a note to Apple Notes via osascript.
 
@@ -473,6 +483,10 @@ end tell
             existing_target: Unused. A rename or a move needs no special
                 handling here, because the note is deleted by id and recreated
                 in the folder it now belongs to.
+            document_modified: Unused. Apple Notes keeps its own creation and
+                modification dates, and they are right as long as the note is
+                updated rather than recreated.
+            first_published: Unused, for the same reason.
 
         Returns:
             True if AppleScript executed successfully.
@@ -945,6 +959,8 @@ class ObsidianDestination(Destination):
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
         existing_target: Optional[str] = None,
+        document_modified: Optional[str] = None,
+        first_published: Optional[str] = None,
     ) -> bool:
         """Publish a note to Obsidian as Markdown with image attachments.
 
@@ -973,6 +989,10 @@ class ObsidianDestination(Destination):
             existing_target: Vault-relative path this note was last written to.
                 When the notebook has since been renamed or moved, the note is
                 moved to match instead of being left behind as a duplicate.
+            document_modified: ``YYYY-MM-DD`` the notebook was last written on,
+                published as ``updated``.
+            first_published: ``YYYY-MM-DD`` this note first reached the vault,
+                used for ``created`` when the note itself does not say.
 
         Returns:
             True if the Markdown file and attachments were written successfully.
@@ -1080,6 +1100,19 @@ class ObsidianDestination(Destination):
 
             # --- YAML Frontmatter ---
             today_str = datetime.date.today().isoformat()
+            # Three dates, three meanings. They used to be one field called
+            # `created` that was regenerated on every sync, so it silently
+            # meant "last synced" — and reported today for a note written in
+            # March.
+            created = (
+                # What the note already says is the best evidence there is.
+                notemerge.frontmatter_value(existing_front, "created")
+                or first_published
+                # Better a date the notebook was demonstrably alive on than
+                # today, which is certainly wrong.
+                or document_modified
+                or today_str
+            )
             doc_type = None
             combined_tags = ["remarkable"]
             if document_path and document_path.exists():
@@ -1099,11 +1132,13 @@ class ObsidianDestination(Destination):
                     # The identity of the note, and the only part of the
                     # frontmatter that is not a description of it.
                     "living_ink_id": doc_id,
-                    # Kept from the note that is already there. Regenerating it
-                    # from today's date is what made `created` silently mean
-                    # "last synced" on every note that had ever been re-synced.
-                    "created": notemerge.frontmatter_value(existing_front, "created") or today_str,
-                    "updated": today_str,
+                    # When this note came into existence.
+                    "created": created,
+                    # When the user last wrote on the tablet. The one worth
+                    # sorting by, and the one that used to be thrown away.
+                    "updated": document_modified or today_str,
+                    # When Living Ink last wrote this file. Bookkeeping.
+                    "synced": today_str,
                     "source": f"Remarkable/{source_path}",
                     "type": doc_type,
                     "document": f'"[[{doc_link_target}]]"' if doc_link_target else None,
