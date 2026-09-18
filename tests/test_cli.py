@@ -905,3 +905,94 @@ class TestStateCommand:
         parser = LivingInkCLI().build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["state", "--dump", "--repair"])
+
+
+class TestCacheCommand:
+    """`cache` is the hand tool for the thing that saves the money."""
+
+    @pytest.fixture
+    def cache(self, tmp_path, monkeypatch):
+        """A real cache in a throwaway directory, wired into the command."""
+        from living_ink import cli as cli_module
+        from living_ink.cache import TranscriptCache
+
+        built = TranscriptCache(tmp_path / "transcripts")
+        monkeypatch.setattr(cli_module, "transcript_cache", lambda: built)
+        return built
+
+    def _run(self, capsys, **flags):
+        """Run the command and return its exit code and output."""
+        from living_ink.cli import CacheCommand
+
+        defaults = {"clear": False, "prune": None, "json": False}
+        code = CacheCommand().run(argparse.Namespace(**{**defaults, **flags}))
+        return code, capsys.readouterr().out
+
+    def test_an_empty_cache_is_not_an_error(self, cache, capsys):
+        code, out = self._run(capsys)
+        assert code == 0
+        assert "0 page(s)" in out
+
+    def test_the_summary_counts_the_entries(self, cache, capsys):
+        cache.put("aa", "raw", "clean")
+        cache.put("bb", "raw", "clean")
+        _, out = self._run(capsys)
+        assert "2 page(s)" in out
+
+    def test_the_summary_says_where_it_lives(self, cache, capsys):
+        _, out = self._run(capsys)
+        assert str(cache.root) in out
+
+    def test_a_disabled_cache_says_so(self, tmp_path, monkeypatch, capsys):
+        from living_ink import cli as cli_module
+        from living_ink.cache import TranscriptCache
+
+        off = TranscriptCache(tmp_path / "t", enabled=False)
+        monkeypatch.setattr(cli_module, "transcript_cache", lambda: off)
+        _, out = self._run(capsys)
+        assert "disabled" in out
+
+    def test_json_reports_the_same_numbers(self, cache, capsys):
+        cache.put("aa", "raw", "clean")
+        _, out = self._run(capsys, json=True)
+        payload = json.loads(out)
+        assert payload["entries"] == 1
+        assert payload["size_bytes"] > 0
+
+    def test_clearing_removes_everything(self, cache, capsys):
+        cache.put("aa", "raw", "clean")
+        code, out = self._run(capsys, clear=True)
+        assert code == 0
+        assert "1 cached page(s)" in out
+        assert cache.stats() == (0, 0)
+
+    def test_clearing_warns_that_the_pages_will_be_paid_for_again(self, cache, capsys):
+        cache.put("aa", "raw", "clean")
+        _, out = self._run(capsys, clear=True)
+        assert "paid for" in out
+
+    def test_pruning_keeps_fresh_entries(self, cache, capsys):
+        cache.put("aa", "raw", "clean")
+        _, out = self._run(capsys, prune=30)
+        assert "0 cached page(s)" in out
+        assert cache.get("aa") is not None
+
+    def test_pruning_drops_stale_entries(self, cache, capsys):
+        import os
+        import time
+
+        cache.put("aa", "raw", "clean")
+        old = time.time() - 200 * 86400
+        os.utime(cache._path_for("aa"), (old, old))
+
+        _, out = self._run(capsys, prune=90)
+        assert "1 cached page(s)" in out
+        assert cache.get("aa") is None
+
+    def test_a_bare_prune_uses_the_configured_age(self, cache, capsys):
+        _, out = self._run(capsys, prune=-1, json=True)
+        assert json.loads(out)["max_age_days"] == cache.max_age_days
+
+    def test_reading_the_cache_does_not_create_it(self, cache, capsys):
+        self._run(capsys)
+        assert not cache.root.exists()
