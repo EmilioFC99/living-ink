@@ -2,7 +2,14 @@
 
 import json
 
-from living_ink.report import FAILED, PUBLISHED, SKIPPED, DocumentOutcome, RunReport
+from living_ink.report import (
+    FAILED,
+    PUBLISHED,
+    SKIPPED,
+    WOULD_PUBLISH,
+    DocumentOutcome,
+    RunReport,
+)
 
 
 def _published(name="Meeting Notes", pages=6, transcribed=4, cached=2, dests=("Obsidian",)):
@@ -139,3 +146,50 @@ class TestJsonSummary:
 
     def test_it_is_valid_json_even_when_nothing_happened(self):
         assert json.loads(RunReport().finish().as_json())["seen"] == 0
+
+
+class TestDryRunSummary:
+    """A rehearsal is not a failed run, and must not read like one."""
+
+    def _rehearsed(self):
+        return DocumentOutcome(
+            name="Test",
+            status=WOULD_PUBLISH,
+            pages=1,
+            transcribed=1,
+            destinations=["ObsidianDestination"],
+        )
+
+    def test_the_headline_says_would_sync_not_synced_zero(self):
+        report = RunReport()
+        report.add(self._rehearsed())
+        assert "Would sync 1 of 1 documents" in report.finish().render()
+
+    def test_the_destination_arrow_is_conditional(self):
+        assert "⇢ ObsidianDestination" in self._rehearsed().describe()
+
+    def test_a_real_publish_still_reads_as_synced(self):
+        report = RunReport()
+        report.add(_published())
+        report.add(self._rehearsed())
+        assert "Synced 1 of 2 documents" in report.finish().render()
+
+    def test_json_reports_the_rehearsal_separately(self):
+        report = RunReport()
+        report.add(self._rehearsed())
+        data = json.loads(report.finish().as_json())
+        assert (data["published"], data["would_publish"]) == (0, 1)
+
+
+class TestNameTruncation:
+    """A clipped title must not read as the notebook's actual name."""
+
+    def test_a_long_name_is_marked_as_clipped(self):
+        outcome = DocumentOutcome(name="Fundamentals of Data Engineering", status=SKIPPED)
+        assert "…" in outcome.describe()
+
+    def test_a_name_that_fits_is_left_alone(self):
+        assert "…" not in DocumentOutcome(name="Test", status=SKIPPED).describe()
+
+    def test_a_name_of_exactly_the_limit_is_not_clipped(self):
+        assert "…" not in DocumentOutcome(name="A" * 24, status=SKIPPED).describe()

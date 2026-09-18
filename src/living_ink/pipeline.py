@@ -42,7 +42,14 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.redact import redact, register_secret
-from living_ink.report import FAILED, PUBLISHED, SKIPPED, DocumentOutcome, RunReport
+from living_ink.report import (
+    FAILED,
+    PUBLISHED,
+    SKIPPED,
+    WOULD_PUBLISH,
+    DocumentOutcome,
+    RunReport,
+)
 from living_ink.safeio import restrict_permissions
 from living_ink.settings import Settings
 
@@ -1076,6 +1083,7 @@ class DocumentJob:
     transcribed_pages: int = 0
     cached_pages: int = 0
     published_to: List[str] = field(default_factory=list)
+    would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
     raw_texts: List[str] = field(default_factory=list)
@@ -1512,12 +1520,16 @@ class SyncPipeline:
         """
         if self.report is None:
             return
-        if success and not job.published_to:
-            # Nothing went wrong and nothing was sent: every destination was
-            # already current, or this is a dry run.
-            status = SKIPPED
+        if not success:
+            status = FAILED
+        elif job.published_to:
+            status = PUBLISHED
+        elif job.would_publish_to:
+            # A dry run did all the work and deliberately sent nothing. That is
+            # a rehearsal, not a document that needed no work.
+            status = WOULD_PUBLISH
         else:
-            status = PUBLISHED if success else FAILED
+            status = SKIPPED
         self.report.add(
             DocumentOutcome(
                 name=job.display_title or job.notebook,
@@ -1526,8 +1538,12 @@ class SyncPipeline:
                 pages=len(job.imgs),
                 transcribed=job.transcribed_pages,
                 cached=job.cached_pages,
-                destinations=list(job.published_to),
-                reason=None if status == PUBLISHED else (reason or "nothing to publish"),
+                destinations=list(job.published_to or job.would_publish_to),
+                reason=(
+                    None
+                    if status in (PUBLISHED, WOULD_PUBLISH)
+                    else (reason or "nothing to publish")
+                ),
             )
         )
 
@@ -2313,6 +2329,7 @@ class SyncPipeline:
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
+        job.would_publish_to = [type(dest).__name__ for dest in targets]
         for dest in targets:
             sub_folder = (
                 job.top_level_subfolder()
@@ -2629,6 +2646,10 @@ class SyncPipeline:
             to_process: The subset this run will work on.
         """
         if self.report is None:
+            return
+        if self.target_notebook:
+            # A targeted run did not consider the rest of the library, so
+            # calling it "unchanged" would be a claim it never checked.
             return
         pending = {id(item) for item in to_process}
         for item in notebooks:

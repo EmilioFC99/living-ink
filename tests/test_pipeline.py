@@ -18,7 +18,14 @@ import pytest
 from living_ink import pipeline
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
-from living_ink.report import FAILED, PUBLISHED, SKIPPED, DocumentOutcome, RunReport
+from living_ink.report import (
+    FAILED,
+    PUBLISHED,
+    SKIPPED,
+    WOULD_PUBLISH,
+    DocumentOutcome,
+    RunReport,
+)
 
 
 class MockDestination(Destination):
@@ -1571,6 +1578,7 @@ class TestProgressIsRecordedPerNotebook:
         pipe.dry_run = False
         pipe.keep_temp = True
         pipe.json_output = False
+        pipe.target_notebook = None
         seen_counts = []
 
         def process(nb_item, **kwargs):
@@ -1690,6 +1698,7 @@ class TestRunSummary:
     def _pipeline(self):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.report = RunReport()
+        pipe.target_notebook = None
         return pipe
 
     def _job(self, **kwargs):
@@ -1758,3 +1767,56 @@ class TestRunSummary:
         pipe._print_summary()
 
         assert json.loads(capsys.readouterr().out)["skipped"] == 1
+
+
+class TestDryRunReporting:
+    """A dry run rehearses; the summary has to say so."""
+
+    def _pipeline(self, target=None):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.report = RunReport()
+        pipe.target_notebook = target
+        return pipe
+
+    def _job(self, **kwargs):
+        defaults = dict(
+            item={},
+            notebook="Test",
+            notebook_id="nb-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Test",
+            folder_path="",
+            display_title="Test",
+            keep_temp=False,
+        )
+        defaults.update(kwargs)
+        return DocumentJob(**defaults)
+
+    def test_a_rehearsed_document_is_not_reported_as_skipped(self):
+        pipe = self._pipeline()
+        job = self._job(imgs=[Path("a.png")], transcribed_pages=1)
+        job.would_publish_to = ["ObsidianDestination"]
+
+        pipe._report_job(job, True, None)
+
+        entry = pipe.report.documents[0]
+        assert entry.status == WOULD_PUBLISH
+        assert entry.destinations == ["ObsidianDestination"]
+        assert entry.reason is None
+
+    def test_a_document_nobody_wanted_is_still_a_skip(self):
+        pipe = self._pipeline()
+        pipe._report_job(self._job(), True, None)
+        assert pipe.report.documents[0].status == SKIPPED
+
+    def test_a_targeted_run_does_not_call_the_rest_unchanged(self):
+        """It never looked at them, so it cannot vouch for them."""
+        pipe = self._pipeline(target="Test")
+        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        assert pipe.report.documents == []
+
+    def test_an_untargeted_run_still_lists_them(self):
+        pipe = self._pipeline()
+        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        assert pipe.report.documents[0].name == "Other"

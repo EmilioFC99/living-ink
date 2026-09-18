@@ -26,8 +26,10 @@ PUBLISHED = "published"
 SKIPPED = "skipped"
 #: A document that was attempted and did not make it.
 FAILED = "failed"
+#: A document a real run would have published: transcribed under ``--dry-run``.
+WOULD_PUBLISH = "would_publish"
 
-_MARKERS = {PUBLISHED: "✓", SKIPPED: "⊘", FAILED: "✗"}
+_MARKERS = {PUBLISHED: "✓", SKIPPED: "⊘", FAILED: "✗", WOULD_PUBLISH: "◦"}
 
 
 @dataclass
@@ -61,7 +63,10 @@ class DocumentOutcome:
             A single line, already padded to line up with its neighbours.
         """
         marker = _MARKERS.get(self.status, "·")
-        line = f"  {marker} {self.name[:24]:<24}"
+        # Truncated names are marked, so a clipped title does not read as a
+        # notebook that is genuinely called "Fundamentals of Data Eng".
+        name = self.name if len(self.name) <= 24 else self.name[:23] + "…"
+        line = f"  {marker} {name:<24}"
         if self.status == SKIPPED:
             return f"{line} {self.reason or 'unchanged'}"
         if self.status == FAILED:
@@ -70,7 +75,8 @@ class DocumentOutcome:
         pages = f"{self.pages} page{'' if self.pages == 1 else 's'}"
         work = f"{self.transcribed} transcribed, {self.cached} cached"
         where = ", ".join(self.destinations) or "nowhere"
-        return f"{line} {pages:<9} {work:<28} → {where}"
+        arrow = "⇢" if self.status == WOULD_PUBLISH else "→"
+        return f"{line} {pages:<9} {work:<28} {arrow} {where}"
 
 
 @dataclass
@@ -129,6 +135,11 @@ class RunReport:
         return len(self._of(PUBLISHED))
 
     @property
+    def would_publish(self) -> int:
+        """Documents a real run would have published, under ``--dry-run``."""
+        return len(self._of(WOULD_PUBLISH))
+
+    @property
     def skipped(self) -> int:
         """Documents that needed no work."""
         return len(self._of(SKIPPED))
@@ -165,6 +176,7 @@ class RunReport:
             "warnings": list(self.warnings),
             "seen": len(self.documents),
             "published": self.published,
+            "would_publish": self.would_publish,
             "skipped": self.skipped,
             "failed": self.failed,
             "pages_transcribed": self.transcribed,
@@ -190,10 +202,13 @@ class RunReport:
         if not self.documents:
             return "Nothing to sync: every document is already up to date."
 
-        lines = [
-            "",
-            f"Synced {self.published} of {len(self.documents)} documents in {self.elapsed:.0f}s",
-        ]
+        # A dry run publishes nothing by design, so reporting "synced 0"
+        # would read as a failed run rather than a successful rehearsal.
+        if self.would_publish and not self.published:
+            headline = f"Would sync {self.would_publish} of {len(self.documents)} documents"
+        else:
+            headline = f"Synced {self.published} of {len(self.documents)} documents"
+        lines = ["", f"{headline} in {self.elapsed:.0f}s"]
         lines.extend(d.describe() for d in self.documents)
 
         read = self.transcribed + self.cached
