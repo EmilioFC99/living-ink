@@ -1,6 +1,7 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
 import datetime
+import json
 import os
 import stat
 import subprocess
@@ -17,6 +18,14 @@ import pytest
 from living_ink import pipeline
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
+from living_ink.report import (
+    FAILED,
+    PUBLISHED,
+    SKIPPED,
+    WOULD_PUBLISH,
+    DocumentOutcome,
+    RunReport,
+)
 
 
 class MockDestination(Destination):
@@ -1032,6 +1041,7 @@ class TestPageHashRecording:
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.dry_run = dry_run
         pipe.run_id = None
+        pipe.report = RunReport()
         return pipe
 
     def _job(self, tmp_path, pages=2) -> DocumentJob:
@@ -1567,6 +1577,8 @@ class TestProgressIsRecordedPerNotebook:
         pipe._counts = (0, 0, 0)
         pipe.dry_run = False
         pipe.keep_temp = True
+        pipe.json_output = False
+        pipe.target_notebook = None
         seen_counts = []
 
         def process(nb_item, **kwargs):
@@ -1587,3 +1599,224 @@ class TestProgressIsRecordedPerNotebook:
         # interrupt in the middle of the second still reports one published.
         assert seen_counts[1] == (3, 1, 0)
         assert seen_counts[2] == (3, 1, 1)
+
+
+class TestRendererRegressionDetection:
+    """The pages table earns its keep: it catches a renderer that moved."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = False
+        pipe.run_id = None
+        pipe.report = RunReport()
+        return pipe
+
+    def _job(self, tmp_path, renders, sources):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        imgs = []
+        for index, content in enumerate(renders):
+            path = tmp_path / f"page-{index}.png"
+            path.write_bytes(content)
+            imgs.append(path)
+        return DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="nb-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+            imgs=imgs,
+            source_hashes=list(sources),
+        )
+
+    def _sync(self, tmp_path, renders, sources):
+        pipe = self._pipeline()
+        pipe._record_page_hashes(self._job(tmp_path, renders, sources))
+        return pipe
+
+    def test_an_unchanged_source_rendering_differently_is_reported(self, tmp_path):
+        sources = ["src-a", "src-b"]
+        self._sync(tmp_path / "run1", [b"page A", b"page B"], sources)
+
+        # Same .rm sources, different pixels out: only the renderer can have moved.
+        second = self._sync(tmp_path / "run2", [b"page A", b"DIFFERENT"], sources)
+
+        assert any("the renderer moved" in w for w in second.report.warnings)
+        assert any("1 page(s)" in w for w in second.report.warnings)
+
+    def test_a_page_the_user_actually_edited_is_not_reported(self, tmp_path):
+        self._sync(tmp_path / "run1", [b"page A", b"page B"], ["src-a", "src-b"])
+
+        # New source and new render: the user wrote on the page. Normal.
+        second = self._sync(tmp_path / "run2", [b"page A", b"EDITED"], ["src-a", "src-b-edited"])
+
+        assert second.report.warnings == []
+
+    def test_a_first_run_reports_nothing(self, tmp_path):
+        first = self._sync(tmp_path, [b"page A", b"page B"], ["src-a", "src-b"])
+        assert first.report.warnings == []
+
+    def test_pages_with_no_recorded_source_are_not_reported(self, tmp_path):
+        """A document synced before source hashes were stored is not evidence."""
+        pipeline.get_state_store().record_page("nb-1", 0, render_hash="old")
+        second = self._sync(tmp_path, [b"page A"], ["src-a"])
+        assert second.report.warnings == []
+
+    def test_pages_that_all_render_identically_are_reported_as_blank(self, tmp_path):
+        blank = [b"blank"] * 4
+        pipe = self._sync(tmp_path, blank, ["a", "b", "c", "d"])
+        assert any("almost certainly blank" in w for w in pipe.report.warnings)
+
+    def test_two_identical_pages_are_a_coincidence_not_a_bug(self, tmp_path):
+        pipe = self._sync(tmp_path, [b"same", b"same"], ["a", "b"])
+        assert pipe.report.warnings == []
+
+    def test_a_notebook_of_real_pages_is_not_reported(self, tmp_path):
+        pipe = self._sync(tmp_path, [b"a", b"b", b"c", b"d"], ["a", "b", "c", "d"])
+        assert pipe.report.warnings == []
+
+    def test_a_pipeline_with_no_report_does_not_crash(self, tmp_path):
+        pipe = self._pipeline()
+        pipe.report = None
+        pipe._record_page_hashes(self._job(tmp_path, [b"a"], ["src-a"]))
+
+
+class TestRunSummary:
+    """Each document reaches the summary with what it cost."""
+
+    def _pipeline(self):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.report = RunReport()
+        pipe.target_notebook = None
+        return pipe
+
+    def _job(self, **kwargs):
+        defaults = dict(
+            item={},
+            notebook="Notes",
+            notebook_id="nb-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Meeting Notes",
+            keep_temp=False,
+        )
+        defaults.update(kwargs)
+        return DocumentJob(**defaults)
+
+    def test_a_published_document_carries_its_page_costs(self):
+        pipe = self._pipeline()
+        job = self._job(imgs=[Path("a.png")] * 6, transcribed_pages=4, cached_pages=2)
+        job.published_to = ["ObsidianDestination"]
+
+        pipe._report_job(job, True, None)
+
+        entry = pipe.report.documents[0]
+        assert (entry.status, entry.pages, entry.transcribed, entry.cached) == (PUBLISHED, 6, 4, 2)
+        assert entry.destinations == ["ObsidianDestination"]
+
+    def test_a_failure_carries_its_reason(self):
+        pipe = self._pipeline()
+        pipe._report_job(self._job(), False, "render failed")
+        entry = pipe.report.documents[0]
+        assert (entry.status, entry.reason) == (FAILED, "render failed")
+
+    def test_a_success_that_published_nowhere_is_a_skip_not_a_win(self):
+        """A dry run, or a notebook every destination already had."""
+        pipe = self._pipeline()
+        pipe._report_job(self._job(), True, None)
+        assert pipe.report.documents[0].status == SKIPPED
+
+    def test_documents_never_processed_are_listed_as_unchanged(self):
+        pipe = self._pipeline()
+        stale = {"ID": "nb-2", "VissibleName": "Journal"}
+        fresh = {"ID": "nb-1", "VissibleName": "Notes"}
+
+        pipe._report_unchanged([stale, fresh], [fresh])
+
+        assert len(pipe.report.documents) == 1
+        assert pipe.report.documents[0].name == "Journal"
+        assert pipe.report.documents[0].status == SKIPPED
+
+    def test_the_summary_is_printed_at_the_end(self, capsys):
+        pipe = self._pipeline()
+        pipe.json_output = False
+        pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
+
+        pipe._print_summary()
+
+        assert "Synced 0 of 1 documents" in capsys.readouterr().out
+
+    def test_json_output_is_machine_readable(self, capsys):
+        pipe = self._pipeline()
+        pipe.json_output = True
+        pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
+
+        pipe._print_summary()
+
+        assert json.loads(capsys.readouterr().out)["skipped"] == 1
+
+
+class TestDryRunReporting:
+    """A dry run rehearses; the summary has to say so."""
+
+    def _pipeline(self, target=None):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.report = RunReport()
+        pipe.target_notebook = target
+        return pipe
+
+    def _job(self, **kwargs):
+        defaults = dict(
+            item={},
+            notebook="Test",
+            notebook_id="nb-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Test",
+            folder_path="",
+            display_title="Test",
+            keep_temp=False,
+        )
+        defaults.update(kwargs)
+        return DocumentJob(**defaults)
+
+    def test_a_rehearsed_document_is_not_reported_as_skipped(self):
+        pipe = self._pipeline()
+        job = self._job(imgs=[Path("a.png")], transcribed_pages=1)
+        job.would_publish_to = ["ObsidianDestination"]
+
+        pipe._report_job(job, True, None)
+
+        entry = pipe.report.documents[0]
+        assert entry.status == WOULD_PUBLISH
+        assert entry.destinations == ["ObsidianDestination"]
+        assert entry.reason is None
+
+    def test_a_document_nobody_wanted_is_still_a_skip(self):
+        pipe = self._pipeline()
+        pipe._report_job(self._job(), True, None)
+        assert pipe.report.documents[0].status == SKIPPED
+
+    def test_a_targeted_run_does_not_call_the_rest_unchanged(self):
+        """It never looked at them, so it cannot vouch for them."""
+        pipe = self._pipeline(target="Test")
+        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        assert pipe.report.documents == []
+
+    def test_an_untargeted_run_still_lists_them(self):
+        pipe = self._pipeline()
+        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        assert pipe.report.documents[0].name == "Other"

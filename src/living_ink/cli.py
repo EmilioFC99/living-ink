@@ -138,6 +138,11 @@ class SyncCommand(BaseCommand):
             action="store_true",
             help="Delete notes whose notebook is gone from the tablet (reported, not deleted, by default)",
         )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print the run summary as JSON instead of a table",
+        )
 
     def run(self, args: argparse.Namespace) -> int:
         """Run the notebook sync pipeline.

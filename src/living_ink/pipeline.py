@@ -42,6 +42,14 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.redact import redact, register_secret
+from living_ink.report import (
+    FAILED,
+    PUBLISHED,
+    SKIPPED,
+    WOULD_PUBLISH,
+    DocumentOutcome,
+    RunReport,
+)
 from living_ink.safeio import restrict_permissions
 from living_ink.settings import Settings
 
@@ -928,6 +936,7 @@ class SyncOptions:
         dry_run: Do everything except publish, so a run can be inspected first.
         prune: Delete notes whose notebook is gone from the tablet, instead of
             only reporting them.
+        json_output: Print the run summary as JSON instead of a table.
     """
 
     notebook: Optional[str] = None
@@ -942,6 +951,7 @@ class SyncOptions:
     keep_temp: bool = False
     dry_run: bool = False
     prune: bool = False
+    json_output: bool = False
 
     @classmethod
     def from_args(cls, args: Any) -> "SyncOptions":
@@ -973,6 +983,7 @@ class SyncOptions:
             keep_temp=getattr(args, "keep_temp", False),
             dry_run=getattr(args, "dry_run", False),
             prune=getattr(args, "prune", False),
+            json_output=getattr(args, "json", False),
         )
 
     def merged_with(self, **overrides: Any) -> "SyncOptions":
@@ -1068,6 +1079,12 @@ class DocumentJob:
     tags: List[str] = field(default_factory=list)
     imgs: List[Path] = field(default_factory=list)
     page_hashes: List[str] = field(default_factory=list)
+    source_hashes: List[str] = field(default_factory=list)
+    transcribed_pages: int = 0
+    cached_pages: int = 0
+    reused_transcript: bool = False
+    published_to: List[str] = field(default_factory=list)
+    would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
     raw_texts: List[str] = field(default_factory=list)
@@ -1159,6 +1176,7 @@ class SyncPipeline:
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = opts.dry_run
         self.prune = opts.prune
+        self.json_output = opts.json_output
         # A dry run's whole output is the transcripts it leaves behind, so it
         # implies --keep-temp; purging them would delete what it points at.
         self.keep_temp = opts.keep_temp or opts.dry_run
@@ -1223,6 +1241,7 @@ class SyncPipeline:
         # Opened by run(); every state row written during that run carries it,
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
+        self.report: Optional[RunReport] = None
 
         # 4. Transcription cache. Pages are transcribed concurrently, so the
         # hit and miss tallies need a lock even though the entries themselves
@@ -1479,6 +1498,7 @@ class SyncPipeline:
             if stop.reason:
                 log(stop.reason)
             self._record_outcome(job, stop.success, stop.reason)
+            self._report_job(job, stop.success, stop.reason)
             return stop.success
 
         if success:
@@ -1488,7 +1508,46 @@ class SyncPipeline:
             log(f"Notebook {job.notebook} processing FAILED.")
 
         self._record_outcome(job, success, None if success else "Processing failed.")
+        self._report_job(job, success, None if success else "processing failed")
         return success
+
+    def _report_job(self, job: DocumentJob, success: bool, reason: Optional[str]) -> None:
+        """Add one finished document to the run summary.
+
+        Args:
+            job: The document that just finished, however it finished.
+            success: Whether it reached its destinations.
+            reason: Why it did not, when it did not.
+        """
+        if self.report is None:
+            return
+        if not success:
+            status = FAILED
+        elif job.published_to:
+            status = PUBLISHED
+        elif job.would_publish_to:
+            # A dry run did all the work and deliberately sent nothing. That is
+            # a rehearsal, not a document that needed no work.
+            status = WOULD_PUBLISH
+        else:
+            status = SKIPPED
+        self.report.add(
+            DocumentOutcome(
+                name=job.display_title or job.notebook,
+                doc_id=job.notebook_id,
+                status=status,
+                pages=len(job.imgs),
+                transcribed=job.transcribed_pages,
+                cached=job.cached_pages,
+                reused_transcript=job.reused_transcript,
+                destinations=list(job.published_to or job.would_publish_to),
+                reason=(
+                    None
+                    if status in (PUBLISHED, WOULD_PUBLISH)
+                    else (reason or "nothing to publish")
+                ),
+            )
+        )
 
     def _record_outcome(self, job: DocumentJob, success: bool, reason: Optional[str]) -> None:
         """Remember whether this document worked, so ``list`` can report it.
@@ -1748,10 +1807,18 @@ class SyncPipeline:
             renderer_fingerprint,
         )
 
-        source_hashes = get_page_source_hashes(tmp_zip) if self.renders.enabled else []
+        # Computed even with the cache off: hashing the .rm entries of a zip
+        # already on disk is cheap, and the source hashes are what let a later
+        # stage tell "this page changed" from "the renderer changed".
+        source_hashes = get_page_source_hashes(tmp_zip)
+        job.source_hashes = source_hashes
         # The background is chosen per run rather than baked into the build,
         # so it belongs in the key rather than in the renderer fingerprint.
-        fingerprint = f"{renderer_fingerprint()}:{get_background_color()}" if source_hashes else ""
+        fingerprint = (
+            f"{renderer_fingerprint()}:{get_background_color()}"
+            if source_hashes and self.renders.enabled
+            else ""
+        )
 
         reused = 0
         for page in range(1, page_count + 1):
@@ -1835,9 +1902,15 @@ class SyncPipeline:
         page has to be read again. It also moves when ``rmc`` is upgraded,
         which is correct — a differently rendered page is a different page.
 
+        The ``.rm`` source hash is recorded alongside it. The pair is what
+        makes :meth:`_check_renderer` possible: a page whose source did not
+        move but whose render did means the renderer changed, not the note.
+
         Best-effort. A page hash that cannot be computed or stored costs a
         later cache miss, nothing more.
         """
+        previous = self._previous_page_hashes(job)
+
         job.page_hashes = []
         for index, page in enumerate(job.imgs):
             try:
@@ -1852,11 +1925,81 @@ class SyncPipeline:
                 get_state_store().record_page(
                     job.notebook_id,
                     index,
+                    source_hash=job.source_hashes[index]
+                    if index < len(job.source_hashes)
+                    else None,
                     render_hash=digest,
                     run_id=self.run_id,
                 )
             except (sqlite3.Error, OSError, RuntimeError) as e:
                 log(f"⚠️ Could not record page {index + 1} of {job.notebook}: {e}")
+
+        self._check_renderer(job, previous)
+
+    def _previous_page_hashes(self, job: DocumentJob) -> Dict[int, Dict[str, Any]]:
+        """Return what the last run recorded about this document's pages.
+
+        Args:
+            job: The document about to be hashed.
+
+        Returns:
+            Page index to that page's stored row, empty when there is nothing
+            recorded or the store cannot be read.
+        """
+        try:
+            return get_state_store().get_pages(job.notebook_id)
+        except (sqlite3.Error, OSError, RuntimeError):
+            logging.debug("Could not read stored page hashes", exc_info=True)
+            return {}
+
+    def _check_renderer(self, job: DocumentJob, previous: Dict[int, Dict[str, Any]]) -> None:
+        """Warn when the pages look wrong rather than merely different.
+
+        Two failures are worth catching before they reach a destination, and
+        both are invisible in the per-page logs:
+
+        A page whose ``.rm`` source is byte-identical to last time but whose
+        rendered PNG is not means the *renderer* changed. Upgrading ``rmc`` or
+        ``rmscene`` is the documented cause of blank or clipped pages, and it
+        arrives silently as a transitive dependency bump.
+
+        A notebook whose pages nearly all render to the *same* bytes is a
+        notebook that rendered blank. Real handwriting does not repeat.
+
+        Args:
+            job: The document just hashed.
+            previous: What the last run recorded, from
+                :meth:`_previous_page_hashes`.
+        """
+        if not self.report or not job.page_hashes:
+            return
+
+        moved = 0
+        for index, digest in enumerate(job.page_hashes):
+            row = previous.get(index)
+            source = job.source_hashes[index] if index < len(job.source_hashes) else None
+            if not row or not source or not row.get("source_hash"):
+                continue
+            if row["source_hash"] == source and row.get("render_hash") not in (None, digest):
+                moved += 1
+
+        if moved:
+            self.report.warn(
+                f"{moved} page(s) of {job.notebook} rendered differently from last time "
+                "even though the page itself did not change — the renderer moved. "
+                "Check the output before trusting it; an rmc/rmscene upgrade is the usual cause."
+            )
+
+        # Three is the smallest count where repetition is not a coincidence:
+        # two identical pages happen, three do not.
+        if len(job.page_hashes) >= 3:
+            commonest = max(set(job.page_hashes), key=job.page_hashes.count)
+            repeats = job.page_hashes.count(commonest)
+            if repeats >= max(3, len(job.page_hashes) // 2):
+                self.report.warn(
+                    f"{repeats} of {len(job.page_hashes)} pages of {job.notebook} rendered "
+                    "to identical images — they are almost certainly blank."
+                )
 
     # ── Stage 5: OCR ─────────────────────────────────────────────────────
 
@@ -1879,6 +2022,9 @@ class SyncPipeline:
         reused = self._cache_hits - before
         if reused:
             log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
+
+        job.transcribed_pages = len(job.pre_paths) - reused
+        job.cached_pages = reused
 
         job.raw_texts = [raw for raw, _ in results]
         job.cleaned_texts = [cleaned for _, cleaned in results]
@@ -2060,6 +2206,7 @@ class SyncPipeline:
 
         log(f"Reusing the existing transcript for {job.notebook}: {existing}")
         job.clean_out_txt = existing
+        job.reused_transcript = True
         return True
 
     # ── Stage 6: transcripts ─────────────────────────────────────────────
@@ -2149,6 +2296,7 @@ class SyncPipeline:
             all_success = True
             for dest in targets:
                 if self._publish_to(dest, job, clean_text):
+                    job.published_to.append(type(dest).__name__)
                     # Update state for THIS destination immediately.
                     add_to_processed_log(
                         type(dest).__name__,
@@ -2184,6 +2332,7 @@ class SyncPipeline:
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
+        job.would_publish_to = [type(dest).__name__ for dest in targets]
         for dest in targets:
             sub_folder = (
                 job.top_level_subfolder()
@@ -2438,6 +2587,7 @@ class SyncPipeline:
             True if sync succeeded or completed gracefully, False on error.
         """
         self._counts = (0, 0, 0)
+        self.report = RunReport()
 
         validate_environment()
         log("Pipeline started.")
@@ -2458,7 +2608,9 @@ class SyncPipeline:
 
         if not should_continue:
             return False
+        self._report_unchanged(notebooks, to_process)
         if not to_process:
+            self._print_summary()
             return True
 
         all_success = True
@@ -2483,4 +2635,51 @@ class SyncPipeline:
 
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
+        self._print_summary()
         return all_success
+
+    def _report_unchanged(self, notebooks: List[Any], to_process: List[Any]) -> None:
+        """Record the documents this run will not touch, and why.
+
+        A summary that lists only what was synced cannot answer "why was my
+        notebook not picked up", which is the question a user actually has.
+
+        Args:
+            notebooks: Everything discovered on the device.
+            to_process: The subset this run will work on.
+        """
+        if self.report is None:
+            return
+        if self.target_notebook:
+            # A targeted run did not consider the rest of the library, so
+            # calling it "unchanged" would be a claim it never checked.
+            return
+        pending = {id(item) for item in to_process}
+        for item in notebooks:
+            if id(item) in pending:
+                continue
+            self.report.add(
+                DocumentOutcome(
+                    name=str(
+                        get_val(item, "VissibleName")
+                        or get_val(item, "VisibleName")
+                        or get_val(item, "ID")
+                        or "(unnamed)"
+                    ),
+                    doc_id=get_val(item, "ID"),
+                    status=SKIPPED,
+                    reason="unchanged",
+                )
+            )
+
+    def _print_summary(self) -> None:
+        """Print the run summary, as a table or as JSON.
+
+        The summary is the last thing on screen on purpose: per-notebook log
+        lines scroll, and the one question left at the end of a sync is what
+        the whole thing added up to.
+        """
+        if self.report is None:
+            return
+        self.report.finish()
+        log(self.report.as_json() if self.json_output else self.report.render())
