@@ -25,6 +25,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from living_ink import safeio
+
 logger = logging.getLogger(__name__)
 
 
@@ -1051,7 +1053,10 @@ def run_wizard(
     )
 
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(yaml_content, encoding="utf-8")
+    # The file holds the AI API key and the reMarkable device token, so it is
+    # written owner-only and in one step: a half-written config would lose the
+    # pairing the user just completed.
+    safeio.write_secret_atomic(config_file, yaml_content)
     print_func(green(f"✓ Configuration saved to {bold(str(config_file))}"))
 
     # Install/update global CLI launcher in ~/.local/bin

@@ -31,6 +31,7 @@ from living_ink.destinations import (
     DestinationError,
     build_destinations,
 )
+from living_ink.safeio import restrict_permissions, write_text_atomic
 from living_ink.settings import Settings
 
 
@@ -119,6 +120,11 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     yaml_config: Dict[str, Any] = {}
 
     if cfg_path.exists():
+        # Configs written before Living Ink set permissions land at the default
+        # umask, leaving the API key and device token readable by every account
+        # on the machine. Repair on the way past rather than only warning.
+        if restrict_permissions(cfg_path):
+            print(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 try:
@@ -284,8 +290,10 @@ def add_to_processed_log(dest_name: str, doc_id, version):
     processed = load_processed_log(dest_name)
     processed[doc_id] = version
     log_path = get_state_file_path(dest_name)
-    with open(log_path, "w") as f:
-        json.dump(processed, f, indent=2, sort_keys=True)
+    # Written in one step because load_processed_log() treats a truncated file
+    # as an empty one: a crash mid-write would silently mark every document
+    # unpublished and re-pay for OCR on all of them on the next run.
+    write_text_atomic(log_path, json.dumps(processed, indent=2, sort_keys=True))
 
 
 def preprocess_image(in_path: Path, out_path: Path):

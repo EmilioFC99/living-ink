@@ -6,6 +6,7 @@ and the interactive wizard workflow.
 """
 
 import json
+import stat
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -549,3 +550,63 @@ class TestRunWizard:
         assert cfg["remarkable"]["preferred_connection"] == "ssh"
         assert cfg["remarkable"]["use_ssh"] is True
         assert cfg["remarkable"]["device_token"] == "existing-token"
+
+
+# =========================================================================
+# Saved Config Permissions
+# =========================================================================
+
+
+class TestSavedConfigPermissions:
+    """The saved config holds an API key and a device token, so it is 0600."""
+
+    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="secret-token")
+    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
+    def test_saved_config_is_owner_only(
+        self,
+        mock_detect_vaults,
+        mock_get_token,
+        mock_verify_ai,
+        mock_verify_rm,
+        tmp_path,
+    ):
+        """A config carrying credentials must not be readable by other accounts."""
+        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
+        (tmp_path / "MyVault").mkdir()
+        (tmp_path / "MyVault" / "Living Ink").mkdir()
+
+        inputs = iter(
+            [
+                "2",  # Cloud connection
+                "y",  # Use existing token
+                "n",  # USB SSH backup -> no
+                "1",  # Gemini
+                "AIzaTestKey",  # API Key
+                "y",  # Enable Obsidian
+                "1",  # Vault 1
+                "1",  # Existing folder 1
+                "y",  # Mirror folders
+                "n",  # Apple notes
+                "n",  # Background sync
+                "n",  # First sync
+            ]
+        )
+
+        run_wizard(
+            input_func=lambda prompt="": next(inputs),
+            print_func=lambda *args: None,
+            repo_dir=tmp_path,
+            bin_dir=tmp_path / "bin",
+        )
+
+        saved_config = tmp_path / "config" / "config.yml"
+        assert saved_config.exists()
+        assert stat.S_IMODE(saved_config.stat().st_mode) == 0o600
+        assert stat.S_IMODE(saved_config.parent.stat().st_mode) == 0o700
+
+        # The credentials still round-trip; tightening must not truncate.
+        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
+        assert cfg["ai"]["api_key"] == "AIzaTestKey"
+        assert cfg["remarkable"]["device_token"] == "secret-token"

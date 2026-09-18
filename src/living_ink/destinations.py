@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from PIL import Image
 
+from living_ink.safeio import write_text_atomic
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -711,8 +712,10 @@ class ObsidianDestination(Destination):
 
             # 6. Write Note File
             note_path = target_dir / f"{safe_name}.md"
-            with open(note_path, "w", encoding="utf-8") as f:
-                f.write(final_md)
+            # Written in one step: a note half-replaced by an interrupted sync
+            # is indistinguishable from a transcription that came back
+            # truncated, so the user would have no reason to suspect a crash.
+            write_text_atomic(note_path, final_md)
 
             logger.info("Obsidian note created at: %s", note_path)
             return True

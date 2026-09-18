@@ -1,6 +1,7 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -8,6 +9,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from living_ink import pipeline
 from living_ink.destinations import AppleNotesDestination, Destination
@@ -578,3 +581,70 @@ class TestTranscriptReuse:
 
         ocr.assert_not_called()
         preprocess.assert_not_called()
+
+
+class TestConfigPermissionRepair:
+    """A config holding credentials is tightened on the way past, not just warned about."""
+
+    def _write_config(self, tmp_path, mode):
+        """Write a minimal config file at the given permission mode."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("ai:\n  provider: gemini\n  api_key: secret\n", encoding="utf-8")
+        cfg.chmod(mode)
+        return cfg
+
+    def test_a_world_readable_config_is_tightened(self, tmp_path, capsys):
+        cfg = self._write_config(tmp_path, 0o644)
+        pipeline.load_yaml_config(cfg)
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert "Tightened permissions" in capsys.readouterr().out
+
+    def test_an_already_private_config_is_left_alone(self, tmp_path, capsys):
+        cfg = self._write_config(tmp_path, 0o600)
+        pipeline.load_yaml_config(cfg)
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert "Tightened permissions" not in capsys.readouterr().out
+
+    def test_the_config_is_still_read(self, tmp_path):
+        cfg = self._write_config(tmp_path, 0o666)
+        loaded = pipeline.load_yaml_config(cfg)
+        assert loaded["ai"]["provider"] == "gemini"
+
+    def test_a_missing_config_is_not_an_error(self, tmp_path):
+        assert pipeline.load_yaml_config(tmp_path / "absent.yml") == {}
+
+
+class TestProcessedLogDurability:
+    """Sync state survives an interrupted write, because losing it re-pays for OCR."""
+
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        return tmp_path
+
+    def test_entries_round_trip(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        pipeline.add_to_processed_log("Obsidian", "doc-2", "v9")
+        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1", "doc-2": "v9"}
+
+    def test_an_interrupted_write_preserves_the_previous_state(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(pipeline.os, "replace", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            pipeline.add_to_processed_log("Obsidian", "doc-2", "v2")
+
+        # Without the atomic write this would parse as {} and re-sync everything.
+        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1"}
+
+    def test_no_temporary_file_is_left_behind(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        assert [p.name for p in tmp_path.iterdir()] == ["processed_notebooks_Obsidian.json"]
