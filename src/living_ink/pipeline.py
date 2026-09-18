@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from PIL import Image, ImageFilter, ImageOps
 
+from living_ink import logs
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
 from living_ink.config import (
@@ -83,6 +84,9 @@ PDF_DIR = DATA_DIR / "remarkable_pdfs"
 DOCS_DIR = DATA_DIR / "remarkable_documents"
 LOGS_DIR = get_logs_dir()
 LOG_PATH = LOGS_DIR / "pipeline.log"
+
+#: Everything log() emits goes through here, alongside the rest of the package.
+_logger = logging.getLogger(__name__)
 
 
 _runtime_dirs_ready = False
@@ -401,10 +405,12 @@ def log(msg):
     # Redacted at the single choke point rather than at each of the ~90 call
     # sites: pipeline.log is the file a user attaches to a bug report.
     msg = redact(str(msg))
-    print(msg)
-    ensure_runtime_dirs()
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
+    # Console and file are separate decisions now: --quiet silences the first,
+    # and the second is a rotating handler shared with every other module's
+    # logger calls, so the file holds more than just these ~90 messages.
+    logs.console(msg)
+    logs.ensure_configured(LOG_PATH)
+    _logger.info(msg)
 
 
 def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
@@ -1869,9 +1875,9 @@ class SyncPipeline:
         Returns:
             True if sync succeeded or completed gracefully, False on error.
         """
-        # At the start of run(), clear the log for a new run
-        with open(LOG_PATH, "w", encoding="utf-8") as f:
-            f.write("")
+        ensure_runtime_dirs()
+        logs.ensure_configured(LOG_PATH)
+        logs.mark_run_start()
 
         validate_environment()
         log("Pipeline started.")

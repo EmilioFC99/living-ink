@@ -578,3 +578,40 @@ class TestWatchCommand:
         args = LivingInkCLI().build_parser().parse_args(["watch"])
 
         assert args.interval == WatchCommand.DEFAULT_INTERVAL
+
+
+class TestVerbosityFlags:
+    """--verbose and --quiet are accepted on either side of the subcommand."""
+
+    def _parse(self, argv):
+        return LivingInkCLI().build_parser().parse_args(argv)
+
+    def test_verbose_after_the_subcommand(self):
+        assert self._parse(["sync", "--verbose"]).verbose is True
+
+    def test_verbose_before_the_subcommand(self):
+        """A subparser default would silently overwrite the flag given here."""
+        assert self._parse(["--verbose", "sync"]).verbose is True
+
+    def test_quiet_after_the_subcommand(self):
+        assert self._parse(["sync", "-q"]).quiet is True
+
+    def test_neither_flag_leaves_both_unset(self):
+        args = self._parse(["sync"])
+        assert getattr(args, "verbose", False) is False
+        assert getattr(args, "quiet", False) is False
+
+    def test_dispatch_configures_logging(self, tmp_path):
+        from living_ink import logs
+
+        args = argparse.Namespace(command="status", config=None, verbose=True, quiet=False)
+        with (
+            patch("living_ink.pipeline.LOG_PATH", tmp_path / "pipeline.log"),
+            patch.object(StatusCommand, "run", return_value=0),
+        ):
+            try:
+                LivingInkCLI().dispatch(args)
+                assert logs.console_mode() is logs.ConsoleMode.VERBOSE
+            finally:
+                logs.reset_handlers()
+                logs._console_mode = logs.ConsoleMode.PLAIN
