@@ -19,7 +19,7 @@
 living-ink/
 ├── src/living_ink/
 │   ├── __main__.py          # `python -m living_ink`
-│   ├── cli.py               # Command Pattern CLI: sync | setup | status
+│   ├── cli.py               # Command Pattern CLI: sync | watch | setup | status
 │   ├── pipeline.py          # SyncPipeline orchestrator + processing stages
 │   ├── settings.py          # Settings: the resolved, typed configuration
 │   ├── config.py            # XDG path resolution, ConfigurationMissing
@@ -70,6 +70,8 @@ Publish via Destination.publish()
 
 **AI providers are presets first, classes second.** Any backend speaking the OpenAI chat API is an entry in `PROVIDER_PRESETS`, not code. One that does not is a `TextRepairProvider` subclass with `from_config()`, decorated `@register_provider("<name>")`; `get_provider()` checks the registry before the presets. Vision OCR and text repair are the same call path with different system prompts.
 
+**A command owns its loop, not its exit code.** `SyncCommand.execute_sync()` returns whether one sync worked; `run()` turns that into an exit code and `WatchCommand` re-runs it on a timer instead. `watch` registers every sync option by delegating to `SyncCommand.register_args`, rides out failed cycles, and stops only on a configuration error or Ctrl+C — the compose daemon service runs it directly rather than wrapping `sync` in a shell loop.
+
 **Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry. `_ocr_pages` transcribes `settings.ocr_concurrency` pages at a time and reassembles them in page order; `--dry-run` short-circuits `_publish` so nothing is sent and nothing is recorded as synced.
 
 ## Things that will bite you
@@ -105,9 +107,10 @@ Publish via Destination.publish()
 
 ```bash
 uv sync --all-extras                                  # install deps (incl. dev)
-uv run living-ink --help                              # CLI: sync | setup | status
+uv run living-ink --help                              # CLI: sync | watch | setup | status
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
 uv run living-ink sync --dry-run                      # transcribe, publish nothing
+uv run living-ink watch --interval 600                # sync every 10 minutes
 uv run living-ink status                              # health check + effective settings
 uv run living-ink status --json                       # machine-readable health check
 
