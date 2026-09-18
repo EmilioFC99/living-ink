@@ -12,8 +12,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from living_ink.providers import (
+    MAX_ATTEMPTS,
+    MAX_RETRY_DELAY,
     PROVIDER_PRESETS,
     PROVIDER_REGISTRY,
+    RETRY_BASE_DELAY,
     NoneProvider,
     TextRepairProvider,
     UniversalChatProvider,
@@ -247,6 +250,13 @@ class TestUniversalChatProviderRepairText:
 # =========================================================================
 # UniversalChatProvider — HTTP _chat method
 # =========================================================================
+
+
+@pytest.fixture(autouse=True)
+def no_retry_sleep():
+    """Keep the retry backoff from making the suite wait for real seconds."""
+    with patch("living_ink.providers.time.sleep"):
+        yield
 
 
 class TestUniversalChatProviderChat:
@@ -905,3 +915,91 @@ class TestProviderRegistry:
     def test_presets_still_resolve_when_nothing_is_registered(self):
         provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
         assert isinstance(provider, UniversalChatProvider)
+
+
+class TestRetries:
+    """Transient API failures are retried; permanent ones are not."""
+
+    def _ok_response(self) -> MagicMock:
+        body = json.dumps({"choices": [{"message": {"content": "transcribed"}}]}).encode()
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = MagicMock(return_value=resp)
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def _http_error(self, code: int, retry_after: str = None) -> urllib.error.HTTPError:
+        headers = {"Retry-After": retry_after} if retry_after else {}
+        return urllib.error.HTTPError(
+            url="https://api.test.com", code=code, msg="nope", hdrs=headers, fp=None
+        )
+
+    def _provider(self) -> UniversalChatProvider:
+        return UniversalChatProvider(
+            base_url="https://api.test.com/v1", api_key="k", model="m", provider_label="test"
+        )
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_rate_limit_is_retried_until_it_succeeds(self, mock_urlopen):
+        mock_urlopen.side_effect = [self._http_error(429), self._ok_response()]
+
+        assert self._provider().repair_text("raw", "clean it") == "transcribed"
+        assert mock_urlopen.call_count == 2
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_server_error_is_retried(self, mock_urlopen):
+        mock_urlopen.side_effect = [self._http_error(503), self._ok_response()]
+
+        assert self._provider().repair_text("raw", "clean it") == "transcribed"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_connection_error_is_retried(self, mock_urlopen):
+        mock_urlopen.side_effect = [urllib.error.URLError("down"), self._ok_response()]
+
+        assert self._provider().repair_text("raw", "clean it") == "transcribed"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_bad_key_is_not_retried(self, mock_urlopen):
+        """A 401 will fail identically every time; retrying only wastes time."""
+        mock_urlopen.side_effect = self._http_error(401)
+
+        assert self._provider().repair_text("raw", "clean it") == "raw"
+        assert mock_urlopen.call_count == 1
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_attempts_are_capped(self, mock_urlopen):
+        mock_urlopen.side_effect = self._http_error(429)
+
+        assert self._provider().repair_text("raw", "clean it") == "raw"
+        assert mock_urlopen.call_count == MAX_ATTEMPTS
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_a_recovered_page_is_not_lost(self, mock_urlopen, tmp_path):
+        """Vision OCR goes through the same retry path, so a 429 is not a blank page."""
+        image = tmp_path / "page-1.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        mock_urlopen.side_effect = [self._http_error(429), self._ok_response()]
+
+        assert self._provider().ocr_image(str(image), "transcribe") == "transcribed"
+
+
+class TestRetryDelay:
+    """The wait between attempts backs off, respects the server, and is capped."""
+
+    def test_backoff_doubles(self):
+        first = UniversalChatProvider._retry_delay(1)
+        third = UniversalChatProvider._retry_delay(3)
+
+        assert RETRY_BASE_DELAY <= first < RETRY_BASE_DELAY * 2
+        assert third >= RETRY_BASE_DELAY * 4
+
+    def test_retry_after_header_wins(self):
+        assert UniversalChatProvider._retry_delay(1, retry_after="7") == 7.0
+
+    def test_unparseable_retry_after_falls_back_to_backoff(self):
+        delay = UniversalChatProvider._retry_delay(1, retry_after="Wed, 21 Oct 2026 07:28:00 GMT")
+        assert delay >= RETRY_BASE_DELAY
+
+    def test_delay_is_capped(self):
+        assert UniversalChatProvider._retry_delay(20) == MAX_RETRY_DELAY
+        assert UniversalChatProvider._retry_delay(1, retry_after="9999") == MAX_RETRY_DELAY
