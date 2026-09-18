@@ -31,6 +31,7 @@ from living_ink.destinations import (
     DestinationError,
     build_destinations,
 )
+from living_ink.safeio import restrict_permissions
 from living_ink.settings import Settings
 
 
@@ -119,6 +120,11 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     yaml_config: Dict[str, Any] = {}
 
     if cfg_path.exists():
+        # Configs written before Living Ink set permissions land at the default
+        # umask, leaving the API key and device token readable by every account
+        # on the machine. Repair on the way past rather than only warning.
+        if restrict_permissions(cfg_path):
+            print(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 try:

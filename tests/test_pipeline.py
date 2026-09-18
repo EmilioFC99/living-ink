@@ -1,6 +1,7 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -578,3 +579,34 @@ class TestTranscriptReuse:
 
         ocr.assert_not_called()
         preprocess.assert_not_called()
+
+
+class TestConfigPermissionRepair:
+    """A config holding credentials is tightened on the way past, not just warned about."""
+
+    def _write_config(self, tmp_path, mode):
+        """Write a minimal config file at the given permission mode."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text("ai:\n  provider: gemini\n  api_key: secret\n", encoding="utf-8")
+        cfg.chmod(mode)
+        return cfg
+
+    def test_a_world_readable_config_is_tightened(self, tmp_path, capsys):
+        cfg = self._write_config(tmp_path, 0o644)
+        pipeline.load_yaml_config(cfg)
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert "Tightened permissions" in capsys.readouterr().out
+
+    def test_an_already_private_config_is_left_alone(self, tmp_path, capsys):
+        cfg = self._write_config(tmp_path, 0o600)
+        pipeline.load_yaml_config(cfg)
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert "Tightened permissions" not in capsys.readouterr().out
+
+    def test_the_config_is_still_read(self, tmp_path):
+        cfg = self._write_config(tmp_path, 0o666)
+        loaded = pipeline.load_yaml_config(cfg)
+        assert loaded["ai"]["provider"] == "gemini"
+
+    def test_a_missing_config_is_not_an_error(self, tmp_path):
+        assert pipeline.load_yaml_config(tmp_path / "absent.yml") == {}
