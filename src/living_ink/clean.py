@@ -22,6 +22,7 @@ Example:
     >>> text = ocr_and_repair("/path/to/page.png")
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -245,6 +246,27 @@ def _read_ocr_instructions() -> str:
     if OCR_PROMPT_FILE.exists():
         return OCR_PROMPT_FILE.read_text(encoding="utf-8").strip()
     return "Transcribe the handwritten text from this notebook page image."
+
+
+def transcription_fingerprint() -> str:
+    """Identify everything, other than the page itself, that shapes a transcription.
+
+    A cached transcription is only reusable while the thing that produced it is
+    unchanged. That is the provider and model (``provider.name`` carries both)
+    and the two prompt files, which ship inside the package and are meant to be
+    edited. Folding them into one digest means an edited prompt or a switched
+    model misses the cache instead of quietly serving the old answer.
+
+    Returns:
+        A short hex digest identifying the current transcription behaviour.
+    """
+    parts = (
+        _get_provider().name,
+        _read_ocr_instructions(),
+        _read_prompt_instructions(),
+    )
+    digest = hashlib.sha256("\0".join(parts).encode("utf-8"))
+    return digest.hexdigest()[:16]
 
 
 def vision_ocr_available() -> bool:

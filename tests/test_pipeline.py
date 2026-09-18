@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -875,3 +876,191 @@ class TestOutcomeRecording:
             pipeline, "get_state_store", MagicMock(side_effect=OSError("disk is gone"))
         )
         self._pipeline()._record_outcome(self._job(), False, "boom")
+
+
+class TestTranscriptionCaching:
+    """A page already paid for is never paid for twice."""
+
+    @pytest.fixture
+    def page(self, tmp_path):
+        """A file standing in for a prepared page image."""
+        path = tmp_path / "page-1.png"
+        path.write_bytes(b"fake png bytes")
+        return path
+
+    def _pipeline(self, tmp_path, enabled=True):
+        """A pipeline whose cache is a throwaway directory."""
+        from living_ink.cache import TranscriptCache
+
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.cache = TranscriptCache(tmp_path / "transcripts", enabled=enabled)
+        pipe._cache_lock = threading.Lock()
+        pipe._cache_hits = 0
+        pipe._cache_misses = 0
+        return pipe
+
+    def test_the_first_read_calls_the_provider(self, tmp_path, page):
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
+            assert pipe._transcribe_page(page, True) == ("text", "text")
+        assert ocr.call_count == 1
+
+    def test_the_second_read_does_not(self, tmp_path, page):
+        """The whole point: an unchanged page costs nothing the next time."""
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_vision_ocr_page", return_value="text"):
+            pipe._transcribe_page(page, True)
+
+        with patch.object(pipe, "_vision_ocr_page") as ocr:
+            assert pipe._transcribe_page(page, True) == ("text", "text")
+        ocr.assert_not_called()
+        assert pipe._cache_hits == 1
+
+    def test_a_cache_survives_a_new_pipeline(self, tmp_path, page):
+        """Entries outlive the run, which is what the temp purge does not."""
+        with patch.object(SyncPipeline, "_vision_ocr_page", return_value="text"):
+            self._pipeline(tmp_path)._transcribe_page(page, True)
+
+        second = self._pipeline(tmp_path)
+        with patch.object(second, "_vision_ocr_page") as ocr:
+            assert second._transcribe_page(page, True) == ("text", "text")
+        ocr.assert_not_called()
+
+    def test_an_edited_page_is_read_again(self, tmp_path, page):
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_vision_ocr_page", return_value="text"):
+            pipe._transcribe_page(page, True)
+
+        page.write_bytes(b"different png bytes")
+        with patch.object(pipe, "_vision_ocr_page", return_value="new text") as ocr:
+            assert pipe._transcribe_page(page, True) == ("new text", "new text")
+        assert ocr.call_count == 1
+
+    def test_the_two_ocr_routes_do_not_share_an_entry(self, tmp_path, page):
+        """Google Vision plus repair is a different answer from vision OCR."""
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_vision_ocr_page", return_value="vision text"):
+            pipe._transcribe_page(page, True)
+
+        with patch.object(pipe, "_google_ocr_page", return_value=("raw", "google text")) as ocr:
+            assert pipe._transcribe_page(page, False) == ("raw", "google text")
+        assert ocr.call_count == 1
+
+    def test_an_empty_transcription_is_not_cached(self, tmp_path, page):
+        """A blank page is usually a rate limit, and must not become permanent."""
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_vision_ocr_page", return_value=""):
+            with patch.object(pipe, "_google_ocr_page", return_value=("", "")):
+                pipe._transcribe_page(page, True)
+
+        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
+            assert pipe._transcribe_page(page, True) == ("text", "text")
+        assert ocr.call_count == 1
+
+    def test_a_disabled_cache_reads_every_time(self, tmp_path, page):
+        pipe = self._pipeline(tmp_path, enabled=False)
+        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
+            pipe._transcribe_page(page, True)
+            pipe._transcribe_page(page, True)
+        assert ocr.call_count == 2
+        assert not pipe.cache.root.exists()
+
+    def test_an_unreadable_page_is_transcribed_uncached(self, tmp_path):
+        """No bytes to hash means no key; transcribe rather than fail."""
+        pipe = self._pipeline(tmp_path)
+        missing = tmp_path / "gone.png"
+        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
+            assert pipe._transcribe_page(missing, True) == ("text", "text")
+        assert ocr.call_count == 1
+        assert not pipe.cache.root.exists()
+
+    def test_the_google_route_is_cached_too(self, tmp_path, page):
+        pipe = self._pipeline(tmp_path)
+        with patch.object(pipe, "_google_ocr_page", return_value=("raw", "clean")):
+            pipe._transcribe_page(page, False)
+
+        with patch.object(pipe, "_google_ocr_page") as ocr:
+            assert pipe._transcribe_page(page, False) == ("raw", "clean")
+        ocr.assert_not_called()
+
+
+class TestPageHashRecording:
+    """Every rendered page is remembered, so a later run can tell what moved."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, dry_run=False):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = dry_run
+        pipe.run_id = None
+        return pipe
+
+    def _job(self, tmp_path, pages=2) -> DocumentJob:
+        imgs = []
+        for index in range(pages):
+            path = tmp_path / f"page-{index}.png"
+            path.write_bytes(f"page {index}".encode())
+            imgs.append(path)
+        return DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+            imgs=imgs,
+        )
+
+    def test_every_page_gets_a_hash(self, tmp_path):
+        job = self._job(tmp_path)
+        self._pipeline()._record_page_hashes(job)
+        assert len(job.page_hashes) == 2
+        assert job.page_hashes[0] != job.page_hashes[1]
+
+    def test_the_hashes_are_stored_against_the_document(self, tmp_path):
+        job = self._job(tmp_path)
+        self._pipeline()._record_page_hashes(job)
+
+        pages = pipeline.get_state_store().get_pages("doc-1")
+        assert [pages[i]["render_hash"] for i in (0, 1)] == job.page_hashes
+
+    def test_an_unchanged_page_hashes_the_same_way(self, tmp_path):
+        job = self._job(tmp_path)
+        pipe = self._pipeline()
+        pipe._record_page_hashes(job)
+        first = list(job.page_hashes)
+
+        pipe._record_page_hashes(job)
+        assert job.page_hashes == first
+
+    def test_rewriting_a_page_changes_its_hash(self, tmp_path):
+        job = self._job(tmp_path)
+        pipe = self._pipeline()
+        pipe._record_page_hashes(job)
+        before = job.page_hashes[0]
+
+        job.imgs[0].write_bytes(b"annotated")
+        pipe._record_page_hashes(job)
+        assert job.page_hashes[0] != before
+
+    def test_a_dry_run_records_nothing(self, tmp_path):
+        job = self._job(tmp_path)
+        self._pipeline(dry_run=True)._record_page_hashes(job)
+
+        assert job.page_hashes
+        assert pipeline.get_state_store().get_pages("doc-1") == {}
+
+    def test_an_unreadable_page_is_skipped(self, tmp_path):
+        job = self._job(tmp_path, pages=1)
+        job.imgs.append(tmp_path / "missing.png")
+        self._pipeline()._record_page_hashes(job)
+        assert len(job.page_hashes) == 1

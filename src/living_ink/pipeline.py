@@ -2,12 +2,14 @@
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
 import datetime
+import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
 import sys
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -18,8 +20,14 @@ import yaml
 from PIL import Image, ImageFilter, ImageOps
 
 from living_ink import logs, state
+from living_ink.cache import CACHE_DIRNAME, TranscriptCache
 from living_ink.clean import configure as configure_ai_provider
-from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
+from living_ink.clean import (
+    ocr_and_repair,
+    repair_text_with_openai,
+    transcription_fingerprint,
+    vision_ocr_available,
+)
 from living_ink.config import (
     ConfigurationMissing,
     find_repo_root,
@@ -85,6 +93,10 @@ VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
 OCR_DIR = DATA_DIR / "output"  # OCR text files
 PDF_DIR = DATA_DIR / "remarkable_pdfs"
 DOCS_DIR = DATA_DIR / "remarkable_documents"
+# Deliberately not one of the temp dirs: the whole value of a cached
+# transcription is that it outlives the purge which removes the page it came
+# from. See living_ink.cache.
+TRANSCRIPT_CACHE_DIR = DATA_DIR / CACHE_DIRNAME
 LOGS_DIR = get_logs_dir()
 LOG_PATH = LOGS_DIR / "pipeline.log"
 
@@ -1002,6 +1014,7 @@ class DocumentJob:
 
     tags: List[str] = field(default_factory=list)
     imgs: List[Path] = field(default_factory=list)
+    page_hashes: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
     raw_texts: List[str] = field(default_factory=list)
@@ -1145,6 +1158,18 @@ class SyncPipeline:
         # Opened by run(); every state row written during that run carries it,
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
+
+        # 4. Transcription cache. Pages are transcribed concurrently, so the
+        # hit and miss tallies need a lock even though the entries themselves
+        # are independent files.
+        self.cache = TranscriptCache(
+            TRANSCRIPT_CACHE_DIR,
+            enabled=self.settings.transcript_cache,
+            max_age_days=self.settings.cache_max_age_days,
+        )
+        self._cache_lock = threading.Lock()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     # The resolved settings are the single source of truth; these read-only
     # views keep the pipeline's long-standing attribute names working.
@@ -1672,6 +1697,39 @@ class SyncPipeline:
             preprocess_image(p, out_p)
             job.pre_paths.append(out_p)
 
+        self._record_page_hashes(job)
+
+    def _record_page_hashes(self, job: DocumentJob) -> None:
+        """Hash every rendered page and remember it against the document.
+
+        The rendered PNG is what gets hashed, not the ``.rm`` source: the PNG
+        is what OCR actually reads, so it is the thing whose change means the
+        page has to be read again. It also moves when ``rmc`` is upgraded,
+        which is correct — a differently rendered page is a different page.
+
+        Best-effort. A page hash that cannot be computed or stored costs a
+        later cache miss, nothing more.
+        """
+        job.page_hashes = []
+        for index, page in enumerate(job.imgs):
+            try:
+                digest = hashlib.sha256(page.read_bytes()).hexdigest()
+            except OSError:
+                logging.debug("Could not hash %s", page, exc_info=True)
+                continue
+            job.page_hashes.append(digest)
+            if self.dry_run:
+                continue
+            try:
+                get_state_store().record_page(
+                    job.notebook_id,
+                    index,
+                    render_hash=digest,
+                    run_id=self.run_id,
+                )
+            except (sqlite3.Error, OSError, RuntimeError) as e:
+                log(f"⚠️ Could not record page {index + 1} of {job.notebook}: {e}")
+
     # ── Stage 5: OCR ─────────────────────────────────────────────────────
 
     def _ocr_pages(self, job: DocumentJob) -> None:
@@ -1688,7 +1746,12 @@ class SyncPipeline:
         else:
             log("Using Google Cloud Vision OCR + AI text cleanup")
 
+        before = self._cache_hits
         results = self._transcribe_pages(job.pre_paths, use_vision_ocr)
+        reused = self._cache_hits - before
+        if reused:
+            log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
+
         job.raw_texts = [raw for raw, _ in results]
         job.cleaned_texts = [cleaned for _, cleaned in results]
 
@@ -1733,12 +1796,68 @@ class SyncPipeline:
             text: the model reads and cleans in one call, so there is no
             separate raw transcript.
         """
+        key = self._cache_key(path, use_vision_ocr)
+        if key:
+            cached = self.cache.get(key)
+            if cached is not None:
+                with self._cache_lock:
+                    self._cache_hits += 1
+                log(f"  Cached: {path.name}")
+                return cached
+            with self._cache_lock:
+                self._cache_misses += 1
+
         if use_vision_ocr:
             cleaned_text = self._vision_ocr_page(path)
             if cleaned_text:
-                return cleaned_text, cleaned_text
+                return self._cached(key, cleaned_text, cleaned_text)
 
-        return self._google_ocr_page(path)
+        raw, cleaned = self._google_ocr_page(path)
+        return self._cached(key, raw, cleaned)
+
+    def _cache_key(self, path: Path, use_vision_ocr: bool) -> Optional[str]:
+        """Return the cache key for one page, or None if it cannot be computed.
+
+        The key covers the page image, the model and prompts behind it, and
+        which of the two OCR routes produced it — the same page read by vision
+        and read by Google Vision are different answers and must not share an
+        entry.
+
+        Args:
+            path: The prepared page image.
+            use_vision_ocr: Which OCR route is about to run.
+
+        Returns:
+            A cache key, or None when caching is off or the page is unreadable.
+        """
+        if not self.cache.enabled:
+            return None
+        try:
+            image_bytes = path.read_bytes()
+        except OSError:
+            # No page to hash means nothing to key on; transcribe uncached.
+            return None
+        route = "vision" if use_vision_ocr else "google"
+        return self.cache.key(image_bytes, f"{route}:{transcription_fingerprint()}")
+
+    def _cached(self, key: Optional[str], raw: str, cleaned: str) -> Tuple[str, str]:
+        """Store a freshly transcribed page and return it unchanged.
+
+        An empty result is not stored. A page that read as nothing is usually a
+        provider hiccup or a rate limit rather than a blank page, and caching
+        it would make one bad minute permanent.
+
+        Args:
+            key: The cache key, or None if this page is not cacheable.
+            raw: The raw OCR text.
+            cleaned: The cleaned text.
+
+        Returns:
+            The ``(raw, cleaned)`` pair it was given.
+        """
+        if key and cleaned.strip():
+            self.cache.put(key, raw, cleaned)
+        return raw, cleaned
 
     def _vision_ocr_page(self, path: Path) -> str:
         """Read and clean one page in a single AI vision call.
