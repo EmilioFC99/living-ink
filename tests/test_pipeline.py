@@ -15,9 +15,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from living_ink import pipeline
+from living_ink import logs, pipeline
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
-from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
+from living_ink.pipeline import (
+    LOG_PATH,
+    DocumentJob,
+    SyncOptions,
+    SyncPipeline,
+    log,
+)
 from living_ink.report import (
     FAILED,
     PUBLISHED,
@@ -1820,3 +1826,40 @@ class TestDryRunReporting:
         pipe = self._pipeline()
         pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
         assert pipe.report.documents[0].name == "Other"
+
+
+class TestJsonSummaryReachesStdout:
+    """``sync --json`` is only useful if its output can be piped into a parser."""
+
+    def _pipeline(self, json_output):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.report = RunReport()
+        pipe.json_output = json_output
+        pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED, reason="unchanged"))
+        return pipe
+
+    def test_the_summary_is_parseable_json_on_stdout(self, capsys):
+        self._pipeline(json_output=True)._print_summary()
+        out = capsys.readouterr().out
+
+        assert json.loads(out)["seen"] == 1
+
+    def test_stdout_holds_the_document_and_nothing_else(self, capsys):
+        """A stray progress line ahead of the JSON is what made this unusable."""
+        pipe = self._pipeline(json_output=True)
+        logs.configure(LOG_PATH, json_output=True)
+        log("Destination added: Obsidian")
+        pipe._print_summary()
+        captured = capsys.readouterr()
+
+        json.loads(captured.out)
+        assert "Destination added" in captured.err
+        logs.configure(LOG_PATH)
+
+    def test_without_the_flag_the_table_is_printed_instead(self, capsys):
+        self._pipeline(json_output=False)._print_summary()
+        out = capsys.readouterr().out
+
+        assert "Synced 0 of 1 documents" in out
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(out)

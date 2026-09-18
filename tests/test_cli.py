@@ -18,6 +18,7 @@ from living_ink.cli import (
     StatusCommand,
     SyncCommand,
     WatchCommand,
+    _describe_connected_device,
     main,
 )
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
@@ -126,9 +127,10 @@ def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     assert pipeline.settings.preferred_connection == "ssh"
 
 
+@patch("living_ink.cli._describe_connected_device", return_value="reMarkable 2 (1404\u00d71872)")
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
+def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_path, capsys):
     """StatusCommand verifies SSH when remarkable.use_ssh is true."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
@@ -140,6 +142,7 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, tmp_path, capsys):
     captured = capsys.readouterr()
     assert "Connected" in captured.out
     assert "USB SSH — Preferred" in captured.out
+    assert "Device:        reMarkable 2 (1404\u00d71872)" in captured.out
     mock_verify_ssh.assert_called_once()
 
 
@@ -1080,3 +1083,43 @@ class TestInterruptExitCode:
                 main([])
 
         assert exit_info.value.code == 130
+
+
+class TestDeviceLineInStatus:
+    """Naming the tablet is useful; failing to name it must not break status."""
+
+    def test_an_unreachable_tablet_degrades_to_silence(self):
+        """A health check that cannot identify the model is still a health check."""
+        with patch("living_ink.ssh.create_ssh_client") as mock_create:
+            mock_create.return_value.get_device_info.side_effect = RuntimeError("no route")
+            assert _describe_connected_device("10.11.99.1", 22, "root") == ""
+
+    def test_a_transport_that_cannot_see_hardware_degrades_too(self):
+        from living_ink.transport import UnsupportedOperation
+
+        with patch("living_ink.ssh.create_ssh_client") as mock_create:
+            mock_create.return_value.get_device_info.side_effect = UnsupportedOperation("no")
+            assert _describe_connected_device("10.11.99.1", 22, "root") == ""
+
+    def test_a_reachable_tablet_is_described_in_one_line(self):
+        from living_ink.transport import DeviceInfo
+
+        with patch("living_ink.ssh.create_ssh_client") as mock_create:
+            mock_create.return_value.get_device_info.return_value = DeviceInfo(
+                "reMarkable 2", "3.5.2", (1404, 1872)
+            )
+            described = _describe_connected_device("10.11.99.1", 22, "root")
+
+        assert described == "reMarkable 2 firmware 3.5.2 (1404×1872)"
+
+    def test_a_cloud_only_setup_prints_no_device_line(self, tmp_path, capsys):
+        """No model is better than a guessed one."""
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.yml").write_text(
+            "remarkable:\n  preferred_connection: 'cloud'\nai:\n  provider: 'none'\n"
+        )
+        with patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK")):
+            StatusCommand(root=tmp_path).run(MagicMock(json=False))
+
+        assert "Device:" not in capsys.readouterr().out

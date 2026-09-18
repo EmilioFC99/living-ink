@@ -10,7 +10,30 @@ directory for every test makes that class of accident impossible rather than
 something each new test has to remember to avoid.
 """
 
+import logging
+
 import pytest
+
+from living_ink import logs
+
+
+@pytest.fixture(autouse=True)
+def pristine_logging():
+    """Undo any logging configuration a test leaves behind.
+
+    ``logs.configure()`` is global: it installs handlers on the package logger
+    and sets ``propagate = False`` so an embedding application's root logger
+    does not get our output. Both outlive the test that called it, which makes
+    a ``caplog`` assertion pass or fail depending on what ran before it — the
+    kind of failure that only shows up on CI, in a different test order.
+
+    Yields:
+        None. The teardown is the point.
+    """
+    yield
+    logs.reset_handlers()
+    logging.getLogger(logs.PACKAGE_LOGGER).propagate = True
+    logs._console_mode = logs.ConsoleMode.PLAIN
 
 
 @pytest.fixture(autouse=True)

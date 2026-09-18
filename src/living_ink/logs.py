@@ -53,6 +53,10 @@ class ConsoleMode(Enum):
     QUIET = "quiet"
     #: Every record from every module, formatted, on stderr.
     VERBOSE = "verbose"
+    #: Progress on stderr, so stdout carries nothing but the JSON document.
+    #: Without this a single "Destination added: ..." line makes the output of
+    #: ``--json`` unparseable, which defeats the point of the flag.
+    JSON = "json"
 
 
 _console_mode = ConsoleMode.PLAIN
@@ -64,6 +68,7 @@ def configure(
     *,
     verbose: bool = False,
     quiet: bool = False,
+    json_output: bool = False,
 ) -> None:
     """Install the file and console handlers for the package logger.
 
@@ -79,6 +84,9 @@ def configure(
         quiet: Suppress ordinary progress output. Ignored when ``verbose``
             is set, since asking for both is a contradiction and the more
             explicit request wins.
+        json_output: Keep stdout free for a JSON document by moving progress
+            lines to stderr. Ranks below ``verbose`` and ``quiet``, both of
+            which already keep stdout clean.
     """
     global _console_mode, _configured_path
 
@@ -86,6 +94,8 @@ def configure(
         _console_mode = ConsoleMode.VERBOSE
     elif quiet:
         _console_mode = ConsoleMode.QUIET
+    elif json_output:
+        _console_mode = ConsoleMode.JSON
     else:
         _console_mode = ConsoleMode.PLAIN
 
@@ -194,10 +204,14 @@ def console(message: str) -> None:
 
     Suppressed under ``--quiet`` because it is noise for a daemon, and under
     ``--verbose`` because the stderr handler already emits the same record with
-    more context — printing both would duplicate every line.
+    more context — printing both would duplicate every line. Under ``--json``
+    it moves to stderr rather than disappearing: the user still wants to watch
+    a long sync, they just need stdout to stay machine-readable.
 
     Args:
         message: The already-redacted line to show.
     """
     if _console_mode is ConsoleMode.PLAIN:
         print(message)
+    elif _console_mode is ConsoleMode.JSON:
+        print(message, file=sys.stderr)
