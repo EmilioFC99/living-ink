@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS device (
     width      INTEGER NOT NULL,
     height     INTEGER NOT NULL,
     color      INTEGER NOT NULL DEFAULT 0,
+    measured   INTEGER NOT NULL DEFAULT 1,
     learned_at TEXT NOT NULL
 );
 
@@ -116,6 +117,9 @@ _ADDED_COLUMNS = {
     },
     "publications": {
         "target": "TEXT",
+    },
+    "device": {
+        "measured": "INTEGER NOT NULL DEFAULT 1",
     },
 }
 
@@ -599,14 +603,16 @@ class StateStore:
         with self._write() as conn:
             conn.execute(
                 """
-                INSERT INTO device (id, model, firmware, width, height, color, learned_at)
-                VALUES (1, ?, ?, ?, ?, ?, ?)
+                INSERT INTO device
+                    (id, model, firmware, width, height, color, measured, learned_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     model = excluded.model,
                     firmware = excluded.firmware,
                     width = excluded.width,
                     height = excluded.height,
                     color = excluded.color,
+                    measured = excluded.measured,
                     learned_at = excluded.learned_at
                 """,
                 (
@@ -615,6 +621,7 @@ class StateStore:
                     info.screen[0],
                     info.screen[1],
                     int(info.color),
+                    int(info.screen_measured),
                     _now(),
                 ),
             )
@@ -640,6 +647,7 @@ class StateStore:
                 firmware=row["firmware"] or "",
                 screen=(row["width"], row["height"]),
                 color=bool(row["color"]),
+                screen_measured=bool(row["measured"]),
             ),
             row["learned_at"],
         )

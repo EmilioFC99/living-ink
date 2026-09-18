@@ -38,9 +38,9 @@ class TestKnownModels:
     def test_matching_ignores_case(self):
         assert profile_for("REMARKABLE 2.0").name == "reMarkable 2"
 
-    def test_colour_is_the_exception_rather_than_the_rule(self):
-        colour = [p.name for p in DEVICE_PROFILES.values() if p.color]
-        assert colour == ["reMarkable Paper Pro"]
+    def test_colour_is_the_pro_line_and_nothing_else(self):
+        colour = sorted(p.name for p in DEVICE_PROFILES.values() if p.color)
+        assert colour == ["reMarkable Paper Pro", "reMarkable Paper Pro Move"]
 
 
 class TestUnknownModels:
@@ -175,3 +175,48 @@ class TestPaperPure:
         """identify() says None so a caller can report the raw string."""
         assert identify("reMarkable Tatsu") is not None
         assert identify("reMarkable Bananaphone") is None
+
+
+class TestOfficialCodeNames:
+    """Every name here is reMarkable's own, from their SDK documentation."""
+
+    @pytest.mark.parametrize(
+        "machine,expected",
+        [
+            ("reMarkable Prototype 1", "reMarkable 1"),
+            ("reMarkable 2.0", "reMarkable 2"),
+            ("reMarkable Ferrari", "reMarkable Paper Pro"),
+            ("reMarkable Chiappa", "reMarkable Paper Pro Move"),
+            ("reMarkable Tatsu", "reMarkable Paper Pure"),
+        ],
+    )
+    def test_each_code_name_maps_to_its_product(self, machine, expected):
+        assert profile_for(machine).name == expected
+
+    def test_the_move_is_not_read_as_a_plain_paper_pro(self):
+        """ "paper pro" is a substring of "paper pro move"; the longer one wins."""
+        assert profile_for("reMarkable Paper Pro Move").name == "reMarkable Paper Pro Move"
+
+    def test_an_unheld_device_admits_its_panel_is_a_stand_in(self):
+        profile = DEVICE_PROFILES["reMarkable Paper Pro Move"]
+        assert profile.measured is False
+
+    def test_a_device_someone_has_held_does_not(self):
+        assert DEVICE_PROFILES["reMarkable Paper Pure"].measured is True
+
+    def test_an_unverified_panel_says_so_in_the_status_line(self):
+        info = DeviceInfo(
+            "reMarkable Paper Pro Move", "3.28.0", (1404, 1872), screen_measured=False
+        )
+        assert "panel unverified" in info.describe()
+
+    def test_the_memory_does_not_launder_an_unverified_panel(self, tmp_path):
+        """A stand-in geometry that came back from the store is still a stand-in."""
+        from living_ink.state import StateStore
+
+        store = StateStore(tmp_path / "state.db")
+        store.remember_device(
+            DeviceInfo("reMarkable Paper Pro Move", "3.28.0", (1404, 1872), screen_measured=False)
+        )
+
+        assert store.recall_device()[0].screen_measured is False

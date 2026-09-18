@@ -26,12 +26,16 @@ class DeviceInfo:
         firmware: The xochitl release version, empty if it could not be read.
         screen: Panel size in pixels, as ``(width, height)``.
         color: Whether the panel can display colour.
+        screen_measured: Whether ``screen`` came from the hardware rather than
+            from a stand-in. A clipped or stretched render is much easier to
+            diagnose when the geometry admits it was never verified.
     """
 
     model: str
     firmware: str
     screen: Tuple[int, int]
     color: bool = False
+    screen_measured: bool = True
 
     def describe(self) -> str:
         """Render the device as one line for status output and bug reports.
@@ -40,7 +44,10 @@ class DeviceInfo:
             A short human-readable description of the device.
         """
         firmware = f" firmware {self.firmware}" if self.firmware else ""
-        return f"{self.model}{firmware} ({self.screen[0]}×{self.screen[1]})"
+        panel = f"{self.screen[0]}×{self.screen[1]}"
+        if not self.screen_measured:
+            panel += ", panel unverified"
+        return f"{self.model}{firmware} ({panel})"
 
 
 class UnsupportedOperation(NotImplementedError):

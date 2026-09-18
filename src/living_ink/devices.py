@@ -31,14 +31,20 @@ class DeviceProfile:
         name: The model name this project uses in messages and reports.
         screen: Panel size in pixels, as ``(width, height)``.
         color: Whether the panel can display colour.
+        measured: Whether ``screen`` came from the hardware itself. False means
+            the model is named correctly but its panel is a stand-in, which is
+            worth saying out loud rather than discovering from a clipped render.
     """
 
     name: str
     screen: Tuple[int, int]
     color: bool = False
+    measured: bool = True
 
 
-#: Known models, keyed by the name this project uses for them.
+#: Known models, keyed by the name this project uses for them. The names are
+#: reMarkable's own, from the code-name table in their SDK documentation:
+#: https://developer.remarkable.com/documentation/sdk#product-code-names
 DEVICE_PROFILES: Dict[str, DeviceProfile] = {
     "reMarkable 1": DeviceProfile("reMarkable 1", (1404, 1872), color=False),
     "reMarkable 2": DeviceProfile("reMarkable 2", (1404, 1872), color=False),
@@ -46,21 +52,34 @@ DEVICE_PROFILES: Dict[str, DeviceProfile] = {
     # Measured on the hardware: the device reports itself as "reMarkable Tatsu"
     # and its own boot splash is 1404×1872, the same panel as the reMarkable 2.
     "reMarkable Paper Pure": DeviceProfile("reMarkable Paper Pure", (1404, 1872), color=False),
+    # Named from the official code-name table, but nobody here has held one.
+    # The panel is the default standing in, not a specification — replace it
+    # (and drop measured=False) the first time one of these is plugged in.
+    "reMarkable Paper Pro Move": DeviceProfile(
+        "reMarkable Paper Pro Move",
+        (1404, 1872),
+        color=True,
+        measured=False,
+    ),
 }
 
 #: What the code assumed before profiles existed, now named rather than implied.
 DEFAULT_PROFILE = DEVICE_PROFILES["reMarkable 2"]
 
 # Matched against the device's own machine string, which is not the name anyone
-# would write by hand: a reMarkable 2 reports "reMarkable 2.0", and the first
-# generation reports "reMarkable Prototype 1". Longest match wins, so "ferrari"
-# is not shadowed by a shorter substring that happens to also appear.
+# would write by hand: a reMarkable 2 reports "reMarkable 2.0", the first
+# generation reports "reMarkable Prototype 1", and everything since the Paper
+# Pro reports an internal code name. The code names are reMarkable's, published
+# in their SDK documentation. Longest match wins, so "paper pro move" is not
+# shadowed by the "paper pro" that is a substring of it.
 _MACHINE_HINTS = {
     "prototype 1": "reMarkable 1",
     "reMarkable 1": "reMarkable 1",
     "reMarkable 2": "reMarkable 2",
     "ferrari": "reMarkable Paper Pro",
     "paper pro": "reMarkable Paper Pro",
+    "chiappa": "reMarkable Paper Pro Move",
+    "paper pro move": "reMarkable Paper Pro Move",
     "tatsu": "reMarkable Paper Pure",
     "paper pure": "reMarkable Paper Pure",
 }

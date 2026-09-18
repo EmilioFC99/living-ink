@@ -444,6 +444,7 @@ class SSHClient:
             firmware=firmware,
             screen=profile.screen,
             color=profile.color,
+            screen_measured=profile.measured,
         )
         return self._device_info
 
