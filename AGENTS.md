@@ -60,6 +60,8 @@ Transcribe:
 Publish via Destination.publish()
     ├── AppleNotesDestination (AppleScript, one folder level)
     └── ObsidianDestination (Markdown + frontmatter, full folder tree)
+
+Note identity is the reMarkable document id, never the title. `publish()` receives `doc_id`; Obsidian writes it into the frontmatter as `living_ink_id` and will not merge two different documents into one file; `publications.target` records where each note landed.
 ```
 
 ### The seams that matter
