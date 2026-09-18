@@ -135,6 +135,31 @@ class SyncCommand(BaseCommand):
         Returns:
             0 on success, or exits with 1 on failure.
         """
+        try:
+            success = self.execute_sync(args)
+        except ConfigurationMissing as e:
+            return self._handle_missing_config(e, args)
+        if not success:
+            sys.exit(1)
+        return 0
+
+    def execute_sync(self, args: argparse.Namespace) -> bool:
+        """Run one sync and report whether it worked.
+
+        Separate from :meth:`run` because turning a failure into a process exit
+        is a decision only the one-shot command gets to make; a caller that
+        syncs repeatedly — :class:`WatchCommand` — needs the verdict, not a
+        dead process.
+
+        Args:
+            args: Parsed arguments for sync.
+
+        Returns:
+            True if the pipeline reported success.
+
+        Raises:
+            ConfigurationMissing: If configuration is absent or unusable.
+        """
         if self.root and str(self.root) not in sys.path:
             sys.path.insert(0, str(self.root))
 
@@ -148,13 +173,7 @@ class SyncCommand(BaseCommand):
             options=SyncOptions.from_args(args),
             config_path=cfg_path if cfg_path.exists() else None,
         )
-        try:
-            success = pipeline.run()
-        except ConfigurationMissing as e:
-            return self._handle_missing_config(e, args)
-        if not success:
-            sys.exit(1)
-        return 0
+        return pipeline.run()
 
     def _handle_missing_config(self, error: "ConfigurationMissing", args) -> int:
         """Report a configuration problem and, if interactive, offer the wizard.
