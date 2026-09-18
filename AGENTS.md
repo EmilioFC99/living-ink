@@ -79,6 +79,7 @@ Publish via Destination.publish()
 - **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
+- **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink cache` shows/prunes/clears it.
 - **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; `--dry-run` implies it.
 - **`extract.py` monkey-patches `rmc`** to control SVG background and bounds. Upgrading `rmc`/`rmscene` is the likely cause of blank or clipped renders.
 
@@ -96,10 +97,14 @@ Publish via Destination.publish()
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
 | `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
 | `config.yml` | `sync.ocr_concurrency` | Pages transcribed at once (default 4; 1 is serial) |
+| `config.yml` | `sync.transcript_cache` | Reuse transcriptions across runs (default `true`) |
+| `config.yml` | `sync.cache_max_age_days` | Prune entries unused this long (default 90) |
 | env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method |
 | env var | `REMARKABLE_USE_SSH` | Override USB SSH toggle |
 | env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH overrides |
 | env var | `SYNC_OCR_CONCURRENCY` | Override page transcription concurrency |
+| env var | `SYNC_TRANSCRIPT_CACHE` | Toggle the transcription cache |
+| env var | `SYNC_CACHE_MAX_AGE_DAYS` | Override the cache prune age |
 | env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
 | env var | `LIVING_INK_CONFIG` / `LIVING_INK_CONFIG_DIR` / `LIVING_INK_DATA_DIR` | Path overrides |
 
@@ -113,6 +118,10 @@ uv run living-ink sync --dry-run                      # transcribe, publish noth
 uv run living-ink watch --interval 600                # sync every 10 minutes
 uv run living-ink status                              # health check + effective settings
 uv run living-ink status --json                       # machine-readable health check
+uv run living-ink list                                # what is pending or failing
+uv run living-ink state                               # what is remembered between runs
+uv run living-ink cache                               # transcription cache size
+uv run living-ink cache --clear                       # drop it; the next sync pays again
 
 uv run ruff check .           # lint
 uv run ruff format --check .  # format check (`ruff format .` to fix)
