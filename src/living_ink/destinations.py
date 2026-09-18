@@ -24,7 +24,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from PIL import Image
 
-from living_ink import notemerge
+from living_ink import logs, notemerge
 from living_ink.safeio import write_text_atomic
 from living_ink.settings import Settings
 
@@ -1247,12 +1247,14 @@ def build_destinations(config: Dict[str, Any], settings: Settings) -> List[Desti
         except Exception as e:
             # Broad by contract: one misconfigured destination skips itself
             # rather than taking the other destinations down with it.
-            print(f"⚠️ Could not set up destination '{key}': {e}")
+            # console(), not print(): under --json stdout must carry the
+            # JSON document and nothing else.
+            logs.console(f"⚠️ Could not set up destination '{key}': {e}")
             logger.warning("Destination '%s' failed to build: %s", key, e, exc_info=True)
             continue
 
         if destination is not None:
             built.append(destination)
-            print(f"Destination added: {destination.describe()}")
+            logs.console(f"Destination added: {destination.describe()}")
 
     return built

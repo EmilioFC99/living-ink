@@ -1476,6 +1476,7 @@ def configure_logging(args: argparse.Namespace) -> None:
         LOG_PATH,
         verbose=getattr(args, "verbose", False),
         quiet=getattr(args, "quiet", False),
+        json_output=getattr(args, "json", False),
     )
 
 

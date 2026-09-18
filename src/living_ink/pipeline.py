@@ -617,10 +617,11 @@ def validate_environment():
                 "   • Add Google Cloud Vision credentials (see SETUP_GUIDE.md)."
             )
 
-    # Print warnings (non-fatal)
+    # Print warnings (non-fatal). log() already reaches the console; the bare
+    # print that used to follow it printed every warning twice and bypassed
+    # --quiet and --json alike.
     for w in warnings:
         log(w)
-        print(w)
 
     if errors:
         msg = "\n".join(errors)
@@ -2682,4 +2683,11 @@ class SyncPipeline:
         if self.report is None:
             return
         self.report.finish()
-        log(self.report.as_json() if self.json_output else self.report.render())
+        if self.json_output:
+            # Straight to stdout, not through log(): under --json every
+            # progress line has been moved to stderr precisely so this
+            # document can be the only thing a caller has to parse.
+            print(self.report.as_json())
+            _logger.info("Run summary: %s", self.report.as_json())
+            return
+        log(self.report.render())

@@ -213,3 +213,33 @@ class TestEnsureConfigured:
         handlers = list(logging.getLogger(logs.PACKAGE_LOGGER).handlers)
         logs.ensure_configured(log_path)
         assert logging.getLogger(logs.PACKAGE_LOGGER).handlers == handlers
+
+
+class TestJsonConsoleMode:
+    """``--json`` promises stdout carries a JSON document and nothing else."""
+
+    def test_progress_moves_to_stderr_rather_than_vanishing(self, tmp_path, capsys):
+        """A long sync is still worth watching; it just must not corrupt stdout."""
+        logs.configure(tmp_path / "log", json_output=True)
+        logs.console("Destination added: Obsidian")
+        captured = capsys.readouterr()
+
+        assert captured.out == ""
+        assert "Destination added: Obsidian" in captured.err
+
+    def test_quiet_still_wins_because_it_asks_for_less(self, tmp_path, capsys):
+        logs.configure(tmp_path / "log", quiet=True, json_output=True)
+        logs.console("progress")
+        captured = capsys.readouterr()
+
+        assert (captured.out, captured.err) == ("", "")
+
+    def test_verbose_still_wins_because_its_handler_already_prints(self, tmp_path):
+        logs.configure(tmp_path / "log", verbose=True, json_output=True)
+        assert logs.console_mode() is logs.ConsoleMode.VERBOSE
+
+    def test_plain_output_is_unaffected(self, tmp_path, capsys):
+        logs.configure(tmp_path / "log")
+        logs.console("progress")
+
+        assert capsys.readouterr().out == "progress\n"
