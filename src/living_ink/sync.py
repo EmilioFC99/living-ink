@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from living_ink.models import Document
-from living_ink.transport import DeviceInfo, UnsupportedOperation
+from living_ink.transport import DeviceInfo, UnsupportedOperation, require_document
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,11 @@ class RemarkableClient:
 
         Returns:
             The extension without a dot, or None for a plain notebook.
+
+        Raises:
+            TypeError: If ``doc`` is a document id rather than a Document.
         """
+        doc = require_document(doc, "get_file_type")
         return self._content_dict(doc).get("fileType") or None
 
     def get_tags(self, doc: Document) -> List[str]:

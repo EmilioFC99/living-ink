@@ -5,9 +5,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from living_ink.api import FallbackClient
+from living_ink.models import Document
 from living_ink.ssh import SSHClient
 from living_ink.sync import RemarkableClient
-from living_ink.transport import DeviceInfo, RemarkableTransport, UnsupportedOperation
+from living_ink.transport import (
+    DeviceInfo,
+    RemarkableTransport,
+    UnsupportedOperation,
+    require_document,
+)
 
 
 @pytest.mark.parametrize("cls", [SSHClient, RemarkableClient, FallbackClient])
@@ -120,3 +126,46 @@ class TestFallbackDeviceInfo:
         cloud, _ = self._pair()
         with pytest.raises(UnsupportedOperation):
             FallbackClient(primary_client=cloud, backup_client=None).get_device_info()
+
+
+class TestDocumentGuard:
+    """A document id is not a document, and the error has to say so."""
+
+    def _doc(self):
+        return Document(id="abc", hash="h", name="Notes", doc_type="DocumentType")
+
+    def test_a_document_passes_straight_through(self):
+        doc = self._doc()
+        assert require_document(doc, "get_file_type") is doc
+
+    def test_an_id_names_the_method_and_the_fix(self):
+        with pytest.raises(TypeError) as excinfo:
+            require_document("c25c3353", "get_file_type")
+
+        message = str(excinfo.value)
+        assert "get_file_type() takes a Document, not str" in message
+        assert "get_doc('c25c3353')" in message
+
+    def test_some_other_type_still_names_the_method(self):
+        with pytest.raises(TypeError, match=r"get_file_type\(\) takes a Document, not int"):
+            require_document(7, "get_file_type")
+
+    @pytest.mark.parametrize("client_cls", [SSHClient, RemarkableClient])
+    def test_every_client_rejects_an_id(self, client_cls):
+        """The guard belongs to the Protocol, so no transport may skip it."""
+        client = client_cls.__new__(client_cls)
+
+        with pytest.raises(TypeError, match="takes a Document"):
+            client.get_file_type("c25c3353-ce5d-48bd-931b-7a9244afe64d")
+
+    def test_a_caller_error_does_not_look_like_a_transport_failure(self):
+        """Failing over would print "the Cloud failed" and hide the mistake."""
+        cloud, ssh = MagicMock(), MagicMock()
+        cloud.get_file_type.side_effect = TypeError("get_file_type() takes a Document, not str")
+        client = FallbackClient(primary_client=cloud, backup_client=ssh)
+
+        with pytest.raises(TypeError):
+            client.get_file_type("c25c3353")
+
+        ssh.get_file_type.assert_not_called()
+        assert client.active is cloud
