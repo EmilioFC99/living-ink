@@ -58,6 +58,11 @@ class FallbackClient:
             return getattr(self.active, method_name)(*args, **kwargs)
         except UnsupportedOperation:
             raise
+        except TypeError:
+            # A caller error, not a transport failure. Failing over would print
+            # a misleading "the Cloud failed" and then raise the same TypeError
+            # from the backup, hiding the real mistake behind a retry.
+            raise
         except Exception as e:
             # Broad on purpose: failover exists precisely for the failures
             # nobody enumerated. UnsupportedOperation is re-raised above,

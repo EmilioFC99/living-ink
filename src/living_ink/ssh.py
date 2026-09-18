@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 from living_ink.devices import DEFAULT_PROFILE, identify
 from living_ink.models import Document
-from living_ink.transport import DeviceInfo
+from living_ink.transport import DeviceInfo, require_document
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +335,11 @@ class SSHClient:
         over USB.
 
         Returns the extension without dot, or None if not a file-based document.
+
+        Raises:
+            TypeError: If ``doc`` is a document id rather than a Document.
         """
+        doc = require_document(doc, "get_file_type")
         if doc.id in self._file_type_cache:
             return self._file_type_cache[doc.id]
 

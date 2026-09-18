@@ -58,6 +58,34 @@ class UnsupportedOperation(NotImplementedError):
     """
 
 
+def require_document(doc: object, operation: str) -> Document:
+    """Reject anything that is not a Document before a transport touches it.
+
+    Every Protocol method that names a document takes the object, never its
+    id. Passing the id is an easy mistake from a shell or a test, and without
+    this guard it surfaces deep inside a client as ``AttributeError: 'str'
+    object has no attribute 'id'``, which names neither the caller's error nor
+    its fix.
+
+    Args:
+        doc: The value the caller supplied.
+        operation: The Protocol method name, for the error message.
+
+    Returns:
+        The same object, once it is known to be a Document.
+
+    Raises:
+        TypeError: If ``doc`` is not a :class:`~living_ink.models.Document`.
+    """
+    if isinstance(doc, Document):
+        return doc
+
+    hint = ""
+    if isinstance(doc, str):
+        hint = f" Looks like a document id — call get_doc({doc!r}) first."
+    raise TypeError(f"{operation}() takes a Document, not {type(doc).__name__}.{hint}")
+
+
 @runtime_checkable
 class RemarkableTransport(Protocol):
     """The operations every reMarkable client supports."""
