@@ -424,6 +424,40 @@ def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
     assert pipeline_obj.keep_temp is True
 
 
+def test_cmd_sync_prune_flag_reaches_the_pipeline(tmp_path):
+    """Deleting notes is opt-in on the run, and off unless it is asked for."""
+    args = argparse.Namespace(
+        notebook=None,
+        limit=0,
+        folder=None,
+        ssh=False,
+        cloud=False,
+        sync_pdfs=False,
+        sync_epubs=False,
+        all_types=False,
+        keep_temp=False,
+        dry_run=False,
+        prune=True,
+    )
+    assert _run_sync_capturing_pipeline(args, tmp_path).prune is True
+
+
+def test_cmd_sync_does_not_prune_by_default(tmp_path):
+    args = argparse.Namespace(
+        notebook=None,
+        limit=0,
+        folder=None,
+        ssh=False,
+        cloud=False,
+        sync_pdfs=False,
+        sync_epubs=False,
+        all_types=False,
+        keep_temp=False,
+        dry_run=False,
+    )
+    assert _run_sync_capturing_pipeline(args, tmp_path).prune is False
+
+
 class TestStatusSettingsReport:
     """`status` reports the effective settings, not just connectivity."""
 

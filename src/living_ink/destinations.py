@@ -137,6 +137,7 @@ class Destination(abc.ABC):
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
+        existing_target: Optional[str] = None,
     ) -> bool:
         """Publish a notebook to the destination.
 
@@ -157,6 +158,11 @@ class Destination(abc.ABC):
             doc_id: The reMarkable document id. This is the note's identity —
                 titles collide and change, document ids do not — so a
                 destination that can record it alongside the note should.
+            existing_target: Where this destination put the note last time, as
+                it reported it in :attr:`last_target`. When the note belongs
+                somewhere else now — the notebook was renamed or moved on the
+                tablet — a destination that can move it should, rather than
+                leaving a copy under the old name.
 
         Returns:
             True if publication succeeded. On success, implementations set
@@ -168,6 +174,33 @@ class Destination(abc.ABC):
             DestinationError: Publication failed for an expected reason. The
                 message is user-facing and names the cause.
         """
+
+    def unpublish(
+        self,
+        target: Optional[str] = None,
+        external_id: Optional[str] = None,
+        doc_id: Optional[str] = None,
+    ) -> bool:
+        """Remove a note whose document no longer exists on the tablet.
+
+        Only ever called for a document Living Ink published itself and can no
+        longer find, and only when the user asked for it with ``--prune``. The
+        default is to refuse: a destination that cannot prove which note is the
+        right one must not delete any.
+
+        Args:
+            target: Where the note was recorded as landing.
+            external_id: Identifier this destination reported for the note.
+            doc_id: The reMarkable document id it was published for.
+
+        Returns:
+            True if the note was removed.
+
+        Raises:
+            DestinationError: Removal failed for an expected reason.
+        """
+        logger.info("%s does not support removing notes.", type(self).__name__)
+        return False
 
 
 @register_destination("apple_notes", enabled_by_default=True)
@@ -347,6 +380,62 @@ class AppleNotesDestination(Destination):
             )
             return img_path
 
+    def unpublish(
+        self,
+        target: Optional[str] = None,
+        external_id: Optional[str] = None,
+        doc_id: Optional[str] = None,
+    ) -> bool:
+        """Delete the note this destination created, by its Apple Notes id.
+
+        By id and only by id. Matching on title here would mean deleting a note
+        on the strength of what it is called, which is exactly the behaviour
+        that used to destroy notes people had written themselves.
+
+        Args:
+            target: Unused; the id is the only thing worth matching on.
+            external_id: Apple Notes id recorded for the note.
+            doc_id: Unused.
+
+        Returns:
+            True if a note was deleted.
+
+        Raises:
+            DestinationUnavailable: osascript is missing or Notes did not
+                respond.
+        """
+        if not external_id:
+            logger.info("No Apple Notes id recorded; leaving the note in place.")
+            return False
+
+        safe_id = json.dumps(external_id, ensure_ascii=False)
+        script = f"""
+tell application "Notes"
+    delete note id {safe_id}
+end tell
+"""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except FileNotFoundError as e:
+            raise DestinationUnavailable(
+                "osascript not found — Apple Notes publishing requires macOS."
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise DestinationUnavailable(f"Apple Notes did not respond within {e.timeout}s.") from e
+
+        if result.returncode != 0:
+            # The usual cause is a note the user already deleted by hand, which
+            # is the outcome we wanted anyway.
+            logger.info("Apple Notes did not delete %s: %s", external_id, result.stderr.strip())
+            return False
+        return True
+
     def publish(
         self,
         notebook_name: str,
@@ -358,6 +447,7 @@ class AppleNotesDestination(Destination):
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
+        existing_target: Optional[str] = None,
     ) -> bool:
         """Publish a note to Apple Notes via osascript.
 
@@ -380,6 +470,9 @@ class AppleNotesDestination(Destination):
             doc_id: Unused. Apple Notes has no place to keep it, and does not
                 need one: the note id it returns is a stabler identity than
                 anything that could be written into the note body.
+            existing_target: Unused. A rename or a move needs no special
+                handling here, because the note is deleted by id and recreated
+                in the folder it now belongs to.
 
         Returns:
             True if AppleScript executed successfully.
@@ -619,6 +712,125 @@ class ObsidianDestination(Destination):
         sanitized = re.sub(r"-+", "-", sanitized).strip(" -")
         return sanitized or "Untitled"
 
+    def _root_dir(self) -> Path:
+        """Return the directory inside the vault that notes are written under.
+
+        Returns:
+            The vault path, or the configured root folder beneath it.
+        """
+        root_dir = self.vault_path
+        if self.root_folder:
+            # Sanitize each segment of the root_folder path if nested
+            for part in self.root_folder.replace("\\", "/").split("/"):
+                if part.strip():
+                    root_dir = root_dir / self._sanitize_filename(part.strip())
+        return root_dir
+
+    def _attachment_dir(self, note_path: Path) -> Path:
+        """Return where a note's images and source document belong.
+
+        Derived from the note's own path rather than from the title it was
+        built from, so the answer is the same whether a note is being written
+        now or was written under a name it no longer has.
+
+        Args:
+            note_path: Full path of the ``.md`` file.
+
+        Returns:
+            The directory holding that note's attachments.
+        """
+        if not self.attachments_folder:
+            return note_path.parent
+
+        root_dir = self._root_dir()
+        attach_dir = root_dir / self._sanitize_filename(self.attachments_folder)
+        try:
+            parts = note_path.parent.relative_to(root_dir).parts
+        except ValueError:
+            # A note outside the root folder entirely; keep its attachments
+            # directly under the attachments root rather than guessing.
+            parts = ()
+        for part in parts:
+            attach_dir = attach_dir / part
+        return attach_dir / note_path.stem
+
+    def _relocate(
+        self, existing_target: Optional[str], note_path: Path, doc_id: Optional[str]
+    ) -> bool:
+        """Move a note that has been renamed or moved on the tablet.
+
+        Without this, renaming a notebook writes a second note under the new
+        name and abandons the first, and moving one between folders leaves a
+        copy in both. With identity recorded in the frontmatter, both are the
+        same operation: the note for this document is already somewhere, and
+        it belongs somewhere else now.
+
+        The move is refused unless the old note is provably this document's and
+        the new path is free. A refused move costs a duplicate; a wrong move
+        costs somebody else's note.
+
+        Args:
+            existing_target: Vault-relative path recorded for this document.
+            note_path: Where the note belongs now.
+            doc_id: The document being published.
+
+        Returns:
+            True if a note was moved.
+        """
+        if not existing_target or not doc_id:
+            return False
+
+        old_path = self.vault_path / existing_target
+        if old_path == note_path or not old_path.is_file():
+            return False
+
+        front, _ = notemerge.split_frontmatter(notemerge.read_existing(old_path) or "")
+        if notemerge.frontmatter_value(front, "living_ink_id") != doc_id:
+            # Either not ours or not this document's. Leave it alone; the note
+            # at the new path is written as usual.
+            return False
+
+        if note_path.exists():
+            logger.warning(
+                "Not moving %s to %s: a note is already there. The old one is now a duplicate.",
+                old_path,
+                note_path,
+            )
+            return False
+
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.replace(note_path)
+        self._relocate_attachments(old_path, note_path)
+        logger.info("Moved %s to %s", old_path, note_path)
+        return True
+
+    def _relocate_attachments(self, old_path: Path, note_path: Path) -> None:
+        """Move a note's attachment folder alongside the note itself.
+
+        Only meaningful when attachments live in a dedicated folder per note;
+        when they sit beside the note, there is nothing to move that is not
+        somebody else's as well.
+
+        Args:
+            old_path: Where the note used to be.
+            note_path: Where the note is now.
+        """
+        if not self.attachments_folder:
+            return
+
+        old_attach = self._attachment_dir(old_path)
+        new_attach = self._attachment_dir(note_path)
+        if old_attach == new_attach or not old_attach.is_dir() or new_attach.exists():
+            return
+
+        try:
+            new_attach.parent.mkdir(parents=True, exist_ok=True)
+            old_attach.replace(new_attach)
+        except OSError:
+            # The images are re-copied on every publish, so a failed move
+            # leaves stale files rather than a broken note.
+            logger.warning("Could not move attachments from %s", old_attach, exc_info=True)
+
     def _claim_name(self, target_dir: Path, safe_name: str, doc_id: Optional[str]) -> str:
         """Return a filename that is either this document's note or a free one.
 
@@ -674,6 +886,53 @@ class ObsidianDestination(Destination):
         clean = re.sub(r"[^\w\-/]", "", clean)
         return clean
 
+    def unpublish(
+        self,
+        target: Optional[str] = None,
+        external_id: Optional[str] = None,
+        doc_id: Optional[str] = None,
+    ) -> bool:
+        """Delete a note whose notebook is gone from the tablet.
+
+        Refused unless the file carries this document's ``living_ink_id``.
+        A note without one may be a user's own, and the cost of being wrong
+        here is a file nobody can get back.
+
+        Args:
+            target: Vault-relative path recorded for the note.
+            external_id: Unused; a note here is identified by its path.
+            doc_id: The document the note was published for.
+
+        Returns:
+            True if the note was deleted.
+
+        Raises:
+            DestinationError: The vault refused the deletion.
+        """
+        if not target or not doc_id:
+            return False
+
+        note_path = self.vault_path / target
+        if not note_path.is_file():
+            # Already gone, which is where this was heading anyway.
+            return False
+
+        front, _ = notemerge.split_frontmatter(notemerge.read_existing(note_path) or "")
+        if notemerge.frontmatter_value(front, "living_ink_id") != doc_id:
+            logger.info("Not deleting %s: it does not carry this document's id.", note_path)
+            return False
+
+        attach_dir = self._attachment_dir(note_path)
+        try:
+            note_path.unlink()
+            if self.attachments_folder and attach_dir.is_dir():
+                shutil.rmtree(attach_dir)
+        except OSError as e:
+            raise DestinationError(f"Could not delete '{note_path}': {e}") from e
+
+        logger.info("Deleted %s", note_path)
+        return True
+
     def publish(
         self,
         notebook_name: str,
@@ -685,6 +944,7 @@ class ObsidianDestination(Destination):
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
         doc_id: Optional[str] = None,
+        existing_target: Optional[str] = None,
     ) -> bool:
         """Publish a note to Obsidian as Markdown with image attachments.
 
@@ -710,6 +970,9 @@ class ObsidianDestination(Destination):
             doc_id: The reMarkable document id, stamped into the frontmatter as
                 the note's identity. When absent, the path is the only identity
                 available and a same-titled note is merged as before.
+            existing_target: Vault-relative path this note was last written to.
+                When the notebook has since been renamed or moved, the note is
+                moved to match instead of being left behind as a duplicate.
 
         Returns:
             True if the Markdown file and attachments were written successfully.
@@ -730,12 +993,7 @@ class ObsidianDestination(Destination):
                 source_path = f"{sub_folder}/{clean_title}" if sub_folder else clean_title
 
             # 2. Determine Target Directory (Notes) and Root Directory
-            root_dir = self.vault_path
-            if self.root_folder:
-                # Sanitize each segment of the root_folder path if nested
-                for part in self.root_folder.replace("\\", "/").split("/"):
-                    if part.strip():
-                        root_dir = root_dir / self._sanitize_filename(part.strip())
+            root_dir = self._root_dir()
 
             subfolder_parts = []
             if self.mirror_folders and sub_folder:
@@ -767,15 +1025,13 @@ class ObsidianDestination(Destination):
             # two notebooks into one file.
             safe_name = self._claim_name(target_dir, safe_name, doc_id)
 
-            # 4. Handle Attachments (centralized _attachments root, mirroring subfolders + dedicated note folder)
-            if self.attachments_folder:
-                attach_dir = root_dir / self._sanitize_filename(self.attachments_folder)
-                for part in subfolder_parts:
-                    attach_dir = attach_dir / part
-                attach_dir = attach_dir / safe_name
-            else:
-                attach_dir = target_dir
+            # A notebook renamed or moved on the tablet keeps its note: bring
+            # the old file here rather than writing a second one.
+            self._relocate(existing_target, target_dir / f"{safe_name}.md", doc_id)
 
+            # 4. Handle Attachments (centralized _attachments root, mirroring subfolders + dedicated note folder)
+            note_path = target_dir / f"{safe_name}.md"
+            attach_dir = self._attachment_dir(note_path)
             attach_dir.mkdir(parents=True, exist_ok=True)
 
             # Path relative to vault root for clean, reliable WikiLinks
@@ -819,7 +1075,6 @@ class ObsidianDestination(Destination):
                     image_links.append(f"- [[{img_link_target}|{label}]]")
 
             # 5. Build Markdown Content
-            note_path = target_dir / f"{safe_name}.md"
             existing = notemerge.read_existing(note_path)
             existing_front, _ = notemerge.split_frontmatter(existing or "")
 
