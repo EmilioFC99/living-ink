@@ -698,3 +698,45 @@ class TestLogRedaction:
 
         assert "AIzaSyExampleKeyForTesting1234" in secrets
         assert "rm-device-token-abcdef123456" in secrets
+
+
+class TestLogPersistence:
+    """The log used to be truncated at the top of every run()."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        from living_ink import logs
+
+        logs.reset_handlers()
+        yield
+        logs.reset_handlers()
+
+    def test_a_new_run_keeps_the_previous_run(self, tmp_path, monkeypatch):
+        """`watch` calls run() every interval; it used to keep only the last."""
+        from living_ink import logs
+
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+
+        pipeline.log("connection refused")
+        logs.mark_run_start()
+        pipeline.log("all good")
+
+        written = log_path.read_text(encoding="utf-8")
+        assert "connection refused" in written
+        assert "all good" in written
+
+    def test_log_is_silent_on_the_console_when_quiet(self, tmp_path, monkeypatch, capsys):
+        from living_ink import logs
+
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        logs.configure(log_path, quiet=True)
+        try:
+            pipeline.log("Publishing Meeting Notes")
+            assert capsys.readouterr().out == ""
+            assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
+        finally:
+            logs._console_mode = logs.ConsoleMode.PLAIN
