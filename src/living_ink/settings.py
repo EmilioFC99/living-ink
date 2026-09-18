@@ -27,6 +27,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
+from living_ink.redact import register_secret
+
 # Defaults for a USB-attached tablet.
 DEFAULT_SSH_HOST = "10.11.99.1"
 DEFAULT_SSH_USER = "root"
@@ -227,6 +229,10 @@ class Settings:
         # ``use_ssh`` is only an independent switch when nothing states it; a
         # stated preference of "cloud" would otherwise be silently re-enabled.
         use_ssh = as_bool(pick("use_ssh"), preferred == "ssh")
+
+        # Registered the moment it is known, so nothing downstream has to
+        # remember that this particular string must not reach a log file.
+        register_secret(as_str(pick("remarkable_token")))
 
         return cls(
             remarkable_token=as_str(pick("remarkable_token")),

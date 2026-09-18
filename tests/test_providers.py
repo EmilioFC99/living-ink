@@ -1003,3 +1003,38 @@ class TestRetryDelay:
     def test_delay_is_capped(self):
         assert UniversalChatProvider._retry_delay(20) == MAX_RETRY_DELAY
         assert UniversalChatProvider._retry_delay(1, retry_after="9999") == MAX_RETRY_DELAY
+
+
+class TestProviderSecretRegistration:
+    """A provider's API key is registered so it cannot leak through logs."""
+
+    def test_the_api_key_is_registered_on_construction(self):
+        from living_ink import redact as redact_mod
+        from living_ink.providers import UniversalChatProvider
+
+        redact_mod.clear_secrets()
+        try:
+            UniversalChatProvider(
+                base_url="https://example.test/v1",
+                api_key="AIzaSyExampleKeyForTesting1234",
+                model="test-model",
+            )
+            assert "AIzaSyExampleKeyForTesting1234" in redact_mod.registered_secrets()
+        finally:
+            redact_mod.clear_secrets()
+
+    def test_an_empty_key_is_not_registered(self):
+        """Local backends such as Ollama pass no key; masking "" would be absurd."""
+        from living_ink import redact as redact_mod
+        from living_ink.providers import UniversalChatProvider
+
+        redact_mod.clear_secrets()
+        try:
+            UniversalChatProvider(
+                base_url="http://localhost:11434/v1",
+                api_key="",
+                model="llama3",
+            )
+            assert redact_mod.registered_secrets() == set()
+        finally:
+            redact_mod.clear_secrets()

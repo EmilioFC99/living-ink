@@ -31,6 +31,7 @@ from living_ink.destinations import (
     DestinationError,
     build_destinations,
 )
+from living_ink.redact import redact, register_secret
 from living_ink.safeio import restrict_permissions, write_text_atomic
 from living_ink.settings import Settings
 
@@ -137,6 +138,16 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                         print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
                     print(f"Details: {ye}\n")
                     yaml_config = {}
+
+                # Register credentials for masking as soon as they are read,
+                # not when a provider is eventually built: a run that fails
+                # during setup still writes a log the user may share.
+                for section in ("ai", "openai"):
+                    if isinstance(yaml_config.get(section), dict):
+                        register_secret(str(yaml_config[section].get("api_key", "")).strip())
+                rm_section = yaml_config.get("remarkable")
+                if isinstance(rm_section, dict):
+                    register_secret(str(rm_section.get("device_token", "")).strip())
 
                 # 1. OpenAI
                 if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
@@ -387,6 +398,9 @@ def sanitize_filename(name: str) -> str:
 
 
 def log(msg):
+    # Redacted at the single choke point rather than at each of the ~90 call
+    # sites: pipeline.log is the file a user attaches to a bug report.
+    msg = redact(str(msg))
     print(msg)
     ensure_runtime_dirs()
     with open(LOG_PATH, "a", encoding="utf-8") as f:
