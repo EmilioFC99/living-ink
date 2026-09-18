@@ -1831,6 +1831,7 @@ class SyncPipeline:
             page_count: How many pages the zip holds.
         """
         from living_ink.extract import (
+            RenderError,
             get_background_color,
             get_page_source_hashes,
             render_page_from_document_zip,
@@ -1856,7 +1857,15 @@ class SyncPipeline:
             png_bytes = self.renders.get(key) if key else None
 
             if png_bytes is None:
-                png_bytes = render_page_from_document_zip(tmp_zip, page)
+                try:
+                    png_bytes = render_page_from_document_zip(tmp_zip, page)
+                except RenderError as e:
+                    # Named rather than counted: a page that renders to nothing
+                    # used to publish as an empty note with no error anywhere.
+                    log(f"Failed to render page {page} of {job.notebook}: {e}")
+                    if self.report:
+                        self.report.warn(f"{job.notebook} page {page}: {e}")
+                    continue
                 if png_bytes is None:
                     log(f"Failed to render page {page} of {job.notebook}.")
                     continue

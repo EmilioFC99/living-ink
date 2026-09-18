@@ -6,7 +6,10 @@ accounting that depends on it.
 
 import hashlib
 import json
+import sys
 import zipfile
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,5 +163,175 @@ class TestRendererFingerprint:
         renderer_fingerprint.cache_clear()
         monkeypatch.setattr(extract, "version", lambda name: "99.0")
         after = renderer_fingerprint()
+        renderer_fingerprint.cache_clear()
+        assert before != after
+
+
+def _rm_bytes(version: int = 6, payload: bytes = b"\x00" * 16) -> bytes:
+    """Build a .rm file's opening bytes for a given declared version.
+
+    Args:
+        version: The format version to declare in the header.
+        payload: Bytes to follow the header.
+
+    Returns:
+        A byte string with a valid 43-byte reMarkable lines header.
+    """
+    header = f"reMarkable .lines file, version={version}".encode("ascii")
+    return header.ljust(43, b" ") + payload
+
+
+class TestRmVersionHeader:
+    """A .rm file says what format it is; nothing used to read it."""
+
+    @pytest.mark.parametrize("version", [3, 5, 6])
+    def test_the_declared_version_is_read(self, tmp_path, version):
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(version))
+
+        assert extract.read_rm_version(path) == version
+
+    def test_a_file_that_is_not_a_page_has_no_version(self, tmp_path):
+        path = tmp_path / "page.rm"
+        path.write_bytes(b"this is not a reMarkable page")
+
+        assert extract.read_rm_version(path) is None
+
+    def test_a_missing_file_has_no_version(self, tmp_path):
+        assert extract.read_rm_version(tmp_path / "absent.rm") is None
+
+    def test_an_unparseable_version_is_not_a_crash(self, tmp_path):
+        path = tmp_path / "page.rm"
+        path.write_bytes(b"reMarkable .lines file, version=x".ljust(43, b" "))
+
+        assert extract.read_rm_version(path) is None
+
+    def test_only_what_the_parser_claims_is_supported(self):
+        """rmscene reads v6 alone; v3 and v5 need a different library."""
+        assert extract.SUPPORTED_RM_VERSIONS == frozenset({6})
+
+
+class TestUnsupportedFormatIsLoud:
+    """An unreadable format used to render blank and publish an empty note."""
+
+    def test_an_old_format_names_the_version_it_found(self, tmp_path):
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(3))
+
+        with pytest.raises(extract.UnsupportedRmFormat) as excinfo:
+            extract.render_rm_file_to_png(path)
+
+        message = str(excinfo.value)
+        assert "version 3" in message
+        assert "version 6" in message
+
+    def test_the_error_tells_the_user_what_to_do(self, tmp_path):
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(9))
+
+        with pytest.raises(extract.UnsupportedRmFormat, match="Upgrade living-ink"):
+            extract.render_rm_file_to_png(path)
+
+    def test_a_headerless_file_is_left_to_the_parser(self, tmp_path, monkeypatch):
+        """No header is not a wrong header: rmc still gets its turn to try."""
+        path = tmp_path / "page.rm"
+        path.write_bytes(b"garbage")
+
+        assert extract.render_rm_file_to_png(path) is None
+
+    def test_it_is_a_render_error(self):
+        assert issubclass(extract.UnsupportedRmFormat, extract.RenderError)
+        assert issubclass(extract.BlankRenderError, extract.RenderError)
+
+
+class TestBlankRenderIsLoud:
+    """A page with strokes that draws nothing is a bug, not an empty page."""
+
+    def _svg(self, tmp_path, markup):
+        path = tmp_path / "page.svg"
+        path.write_text(markup, encoding="utf-8")
+        return path
+
+    def test_ink_is_recognised(self, tmp_path):
+        svg = self._svg(tmp_path, '<svg><path d="M0 0 L1 1"/></svg>')
+        assert extract._svg_has_ink(svg) is True
+
+    def test_an_empty_canvas_has_no_ink(self, tmp_path):
+        svg = self._svg(tmp_path, '<svg height="10" width="10"></svg>')
+        assert extract._svg_has_ink(svg) is False
+
+    def test_an_unreadable_svg_is_never_called_blank(self, tmp_path):
+        """Reading the file failed; that says nothing about the page."""
+        assert extract._svg_has_ink(tmp_path / "absent.svg") is True
+
+    def test_strokes_that_drew_nothing_raise(self, tmp_path, monkeypatch):
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(6))
+
+        def fake_rm_to_svg(source, target):
+            Path(target).write_text('<svg height="10" width="10"></svg>', encoding="utf-8")
+
+        monkeypatch.setattr(extract, "_patch_rmc", lambda: None)
+        monkeypatch.setitem(
+            sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
+        )
+        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: 42)
+
+        with pytest.raises(extract.BlankRenderError, match="42 strokes"):
+            extract.render_rm_file_to_png(path)
+
+    def test_a_genuinely_blank_page_stays_legal(self, tmp_path, monkeypatch):
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(6))
+
+        def fake_rm_to_svg(source, target):
+            Path(target).write_text('<svg height="10" width="10"></svg>', encoding="utf-8")
+
+        monkeypatch.setattr(extract, "_patch_rmc", lambda: None)
+        monkeypatch.setitem(
+            sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
+        )
+        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: 0)
+
+        assert extract.render_rm_file_to_png(path) is not None
+
+    def test_a_count_we_could_not_take_is_not_zero(self, tmp_path, monkeypatch):
+        """Unknown must not be read as "no strokes", nor as "blank render"."""
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(6))
+
+        def fake_rm_to_svg(source, target):
+            Path(target).write_text('<svg height="10" width="10"></svg>', encoding="utf-8")
+
+        monkeypatch.setattr(extract, "_patch_rmc", lambda: None)
+        monkeypatch.setitem(
+            sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
+        )
+        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: None)
+
+        assert extract.render_rm_file_to_png(path) is not None
+
+    def test_counting_a_file_that_is_not_a_page_gives_unknown(self, tmp_path):
+        path = tmp_path / "page.rm"
+        path.write_bytes(b"not a page at all")
+
+        assert extract.count_rm_strokes(path) is None
+
+
+class TestRenderFingerprintCoversTheGuards:
+    """The guards change what a render produces, so cached pages must miss."""
+
+    def test_the_format_version_was_bumped(self):
+        assert extract.RENDER_FORMAT_VERSION >= 2
+
+    def test_the_fingerprint_moves_with_it(self, monkeypatch):
+        """Otherwise the cache serves images the guarded code would refuse."""
+        renderer_fingerprint.cache_clear()
+        before = renderer_fingerprint()
+
+        monkeypatch.setattr(extract, "RENDER_FORMAT_VERSION", 99)
+        renderer_fingerprint.cache_clear()
+        after = renderer_fingerprint()
+
         renderer_fingerprint.cache_clear()
         assert before != after
