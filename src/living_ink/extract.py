@@ -52,6 +52,36 @@ _DOC_ERRORS = (RuntimeError, OSError, ValueError)
 #: has to be named.
 _ZIP_ERRORS = (OSError, zipfile.BadZipFile, RuntimeError)
 
+
+@contextmanager
+def quiet_mupdf() -> Iterator[None]:
+    """Route MuPDF's own complaints into the debug log instead of stderr.
+
+    MuPDF writes from C, straight past Python logging, so a book with sloppy
+    stylesheets prints a wall of ``MuPDF error: syntax error: css syntax
+    error`` in the middle of a sync that is going fine. The messages still
+    matter when a document genuinely will not open, so they are drained and
+    logged rather than dropped.
+
+    Yields:
+        None, with MuPDF's stderr output suppressed for the duration.
+    """
+    tools = fitz.TOOLS
+    prior_errors = tools.mupdf_display_errors()
+    prior_warnings = tools.mupdf_display_warnings()
+    tools.mupdf_display_errors(False)
+    tools.mupdf_display_warnings(False)
+    tools.reset_mupdf_warnings()
+    try:
+        yield
+    finally:
+        messages = tools.mupdf_warnings()
+        tools.mupdf_display_errors(prior_errors)
+        tools.mupdf_display_warnings(prior_warnings)
+        if messages:
+            logger.debug("MuPDF said: %s", messages)
+
+
 #: Parsing a ``.content`` or ``.metadata`` payload. JSONDecodeError and
 #: UnicodeDecodeError are both ValueErrors; TypeError and KeyError cover JSON
 #: that parsed but is not the shape the format promises.
@@ -219,7 +249,7 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         import pymupdf as fitz  # PyMuPDF
 
         text_parts = []
-        with fitz.open(pdf_path) as doc:
+        with quiet_mupdf(), fitz.open(pdf_path) as doc:
             for page_num, page in enumerate(doc, 1):
                 page_text = page.get_text()
                 if page_text.strip():
@@ -392,7 +422,7 @@ def render_composite_pdf_page(
         PNG image bytes of the composite page, or None if rendering failed.
     """
     try:
-        with fitz.open(str(pdf_path)) as doc:
+        with quiet_mupdf(), fitz.open(str(pdf_path)) as doc:
             if page_index < 0 or page_index >= len(doc):
                 return None
             page = doc[page_index]
@@ -451,7 +481,7 @@ def render_pdf_page_preview(
         PNG image bytes, or None on failure.
     """
     try:
-        with fitz.open(str(pdf_path)) as doc:
+        with quiet_mupdf(), fitz.open(str(pdf_path)) as doc:
             if page_index < 0 or page_index >= len(doc):
                 return None
             page = doc[page_index]
@@ -1044,15 +1074,16 @@ def format_page_label(page_num: int, pdf_path: Optional[Path] = None) -> str:
         try:
             import pymupdf as fitz
 
-            doc = fitz.open(pdf_path)
-            try:
-                idx = page_num - 1
-                if 0 <= idx < len(doc):
-                    label = doc[idx].get_label()
-                    if label and label.strip() and label.strip().lower() != str(page_num):
-                        return f"Page {label.strip()} (pdf-{page_num})"
-            finally:
-                doc.close()
+            with quiet_mupdf():
+                doc = fitz.open(pdf_path)
+                try:
+                    idx = page_num - 1
+                    if 0 <= idx < len(doc):
+                        label = doc[idx].get_label()
+                        if label and label.strip() and label.strip().lower() != str(page_num):
+                            return f"Page {label.strip()} (pdf-{page_num})"
+                finally:
+                    doc.close()
         except _DOC_ERRORS as e:
             logger.debug(f"Failed to read page label from {pdf_path}: {e}")
 
@@ -1065,11 +1096,12 @@ def _get_pdf_toc_entries(pdf_path_str: str) -> List[Tuple[int, str, int]]:
     try:
         import pymupdf as fitz
 
-        doc = fitz.open(pdf_path_str)
-        try:
-            return [(int(lvl), str(title).strip(), int(p)) for lvl, title, p in doc.get_toc()]
-        finally:
-            doc.close()
+        with quiet_mupdf():
+            doc = fitz.open(pdf_path_str)
+            try:
+                return [(int(lvl), str(title).strip(), int(p)) for lvl, title, p in doc.get_toc()]
+            finally:
+                doc.close()
     except _DOC_ERRORS as e:
         logger.debug(f"Failed to read TOC from {pdf_path_str}: {e}")
         return []
@@ -1088,7 +1120,10 @@ def get_pdf_toc_breadcrumbs(page_num: int, pdf_path: Optional[Path] = None) -> L
     Returns:
         List of section titles, e.g. ['Part I', 'Chapter 2', 'Data Management'].
     """
-    if not pdf_path or not Path(pdf_path).exists():
+    # Suffix-checked like format_page_label: an EPUB has no PDF outline to
+    # read, and handing one to PyMuPDF only makes MuPDF parse its stylesheets
+    # and complain about them for a result that is empty either way.
+    if not pdf_path or Path(pdf_path).suffix.lower() != ".pdf" or not Path(pdf_path).exists():
         return []
 
     toc = _get_pdf_toc_entries(str(Path(pdf_path).resolve()))
