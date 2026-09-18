@@ -302,3 +302,185 @@ class TestLegacyImport:
 
     def test_a_missing_directory_is_harmless(self, store, tmp_path):
         assert import_legacy_json(store, tmp_path / "nope") == 0
+
+
+class TestUpgradingAnOlderDatabase:
+    """A database written before a column existed has to gain it, not break."""
+
+    def _v1_database(self, path):
+        """Build a database with the version-1 documents table."""
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE documents (
+                id            TEXT PRIMARY KEY,
+                name          TEXT,
+                folder        TEXT,
+                doc_type      TEXT,
+                version       TEXT,
+                last_modified TEXT,
+                seen_at       TEXT NOT NULL,
+                seen_run_id   INTEGER
+            );
+            INSERT INTO documents (id, name, seen_at) VALUES ('doc-1', 'Old', '2020-01-01');
+            PRAGMA user_version=1;
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_the_new_columns_are_added(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._v1_database(path)
+
+        with StateStore(path) as store:
+            columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(documents)")}
+
+        assert {"last_error", "last_error_at"} <= columns
+
+    def test_existing_rows_survive_the_upgrade(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._v1_database(path)
+
+        with StateStore(path) as store:
+            assert store.get_document("doc-1")["name"] == "Old"
+
+    def test_the_version_is_restamped(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._v1_database(path)
+
+        with StateStore(path) as store:
+            assert store._conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+    def test_upgrading_twice_is_harmless(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._v1_database(path)
+
+        with StateStore(path):
+            pass
+        with StateStore(path) as store:
+            store.record_failure("doc-1", "boom")
+            assert store.get_document("doc-1")["last_error"] == "boom"
+
+
+class TestFailures:
+    """A document that broke has to stay visibly broken until it works."""
+
+    def test_a_failure_is_recorded(self, store):
+        store.record_document("doc-1", name="Notes")
+        store.record_failure("doc-1", "Download timed out")
+
+        row = store.get_document("doc-1")
+        assert row["last_error"] == "Download timed out"
+        assert row["last_error_at"]
+
+    def test_a_newer_failure_replaces_the_old_one(self, store):
+        store.record_document("doc-1")
+        store.record_failure("doc-1", "first")
+        store.record_failure("doc-1", "second")
+
+        assert store.get_document("doc-1")["last_error"] == "second"
+
+    def test_success_clears_it(self, store):
+        store.record_document("doc-1")
+        store.record_failure("doc-1", "boom")
+        store.clear_failure("doc-1")
+
+        row = store.get_document("doc-1")
+        assert row["last_error"] is None
+        assert row["last_error_at"] is None
+
+    def test_seeing_the_document_again_does_not_clear_it(self, store):
+        """A new sighting is not evidence the problem went away."""
+        store.record_document("doc-1", version="v1")
+        store.record_failure("doc-1", "boom")
+        store.record_document("doc-1", version="v2")
+
+        assert store.get_document("doc-1")["last_error"] == "boom"
+
+    def test_clearing_an_unknown_document_is_silent(self, store):
+        store.clear_failure("never-seen")
+
+
+class TestSyncOverview:
+    """The join the per-destination JSON files could never do."""
+
+    def test_a_document_published_everywhere_is_synced(self, store):
+        store.record_document("doc-1", name="Notes", version="v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
+        assert row["status"] == "synced"
+        assert row["pending"] == []
+
+    def test_one_lagging_destination_makes_it_pending(self, store):
+        store.record_document("doc-1", version="v2")
+        store.record_publication("doc-1", "ObsidianDestination", "v2")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
+        assert row["status"] == "pending"
+        assert row["pending"] == ["AppleNotesDestination"]
+
+    def test_a_never_published_document_is_pending(self, store):
+        store.record_document("doc-1", version="v1")
+
+        row = store.sync_overview(["ObsidianDestination"])[0]
+        assert row["status"] == "pending"
+        assert row["pending"] == ["ObsidianDestination"]
+
+    def test_a_disabled_destination_is_not_counted_as_missing(self, store):
+        """Turning Apple Notes off must not make the whole library pending."""
+        store.record_document("doc-1", version="v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        row = store.sync_overview(["ObsidianDestination"])[0]
+        assert row["status"] == "synced"
+
+    def test_a_failure_outranks_being_up_to_date(self, store):
+        store.record_document("doc-1", version="v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_failure("doc-1", "boom")
+
+        assert store.sync_overview(["ObsidianDestination"])[0]["status"] == "failing"
+
+    def test_published_versions_are_reported_per_destination(self, store):
+        store.record_document("doc-1", version="v2")
+        store.record_publication("doc-1", "ObsidianDestination", "v2")
+
+        row = store.sync_overview(["ObsidianDestination"])[0]
+        assert row["published"] == {"ObsidianDestination": "v2"}
+
+    def test_document_fields_are_carried_through(self, store):
+        store.record_document("doc-1", name="Standup", folder="Work", doc_type="notebook")
+
+        row = store.sync_overview([])[0]
+        assert (row["name"], row["folder"], row["doc_type"]) == ("Standup", "Work", "notebook")
+
+    def test_an_empty_database_returns_nothing(self, store):
+        assert store.sync_overview(["ObsidianDestination"]) == []
+
+    def test_every_document_appears_once(self, store):
+        for index in range(3):
+            store.record_document(f"doc-{index}", version="v1")
+            store.record_publication(f"doc-{index}", "ObsidianDestination", "v1")
+
+        overview = store.sync_overview(["ObsidianDestination"])
+        assert len({row["id"] for row in overview}) == 3
+
+
+class TestAllPublications:
+    """One query, because the inventory needs all of them at once."""
+
+    def test_rows_are_grouped_by_document(self, store):
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-2", "ObsidianDestination", "v3")
+
+        grouped = store.all_publications()
+        assert set(grouped) == {"doc-1", "doc-2"}
+        assert set(grouped["doc-1"]) == {"ObsidianDestination", "AppleNotesDestination"}
+
+    def test_an_empty_database_returns_nothing(self, store):
+        assert store.all_publications() == {}

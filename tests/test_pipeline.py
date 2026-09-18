@@ -803,3 +803,75 @@ class TestExternalIdRoundTrip:
         record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
         assert record["external_id"] == "x-coredata://p7"
         assert record["version"] == "v2"
+
+
+class TestOutcomeRecording:
+    """A document that failed has to say so until it succeeds."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, dry_run=False):
+        """A pipeline with no config work done, for calling one method on."""
+        pipe = pipeline.SyncPipeline.__new__(pipeline.SyncPipeline)
+        pipe.dry_run = dry_run
+        return pipe
+
+    def _job(self, doc_id="doc-1"):
+        """The minimum of a job that _record_outcome reads."""
+        return SimpleNamespace(notebook_id=doc_id, notebook="Notes")
+
+    def test_a_failure_is_written(self):
+        store = pipeline.get_state_store()
+        store.record_document("doc-1")
+
+        self._pipeline()._record_outcome(self._job(), False, "Download timed out")
+
+        assert store.get_document("doc-1")["last_error"] == "Download timed out"
+
+    def test_a_success_clears_an_earlier_failure(self):
+        store = pipeline.get_state_store()
+        store.record_document("doc-1")
+        pipe = self._pipeline()
+
+        pipe._record_outcome(self._job(), False, "boom")
+        pipe._record_outcome(self._job(), True, None)
+
+        assert store.get_document("doc-1")["last_error"] is None
+
+    def test_a_dry_run_records_nothing(self):
+        store = pipeline.get_state_store()
+        store.record_document("doc-1")
+        pipe = self._pipeline(dry_run=True)
+
+        pipe._record_outcome(self._job(), False, "boom")
+
+        assert store.get_document("doc-1")["last_error"] is None
+
+    def test_secrets_are_redacted_from_the_message(self):
+        """An error quoting a token must not park it in the database."""
+        from living_ink.redact import clear_secrets, register_secret
+
+        store = pipeline.get_state_store()
+        store.record_document("doc-1")
+        register_secret("sk-abcdefghijklmnopqrstuvwx")
+        try:
+            self._pipeline()._record_outcome(
+                self._job(), False, "auth failed for sk-abcdefghijklmnopqrstuvwx"
+            )
+        finally:
+            clear_secrets()
+
+        assert "sk-abcdefghijklmnopqrstuvwx" not in store.get_document("doc-1")["last_error"]
+
+    def test_a_broken_store_does_not_fail_the_sync(self, monkeypatch):
+        monkeypatch.setattr(
+            pipeline, "get_state_store", MagicMock(side_effect=OSError("disk is gone"))
+        )
+        self._pipeline()._record_outcome(self._job(), False, "boom")
