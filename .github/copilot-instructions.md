@@ -52,7 +52,7 @@ The repository is completely stateless:
 
 ## Configuration
 
-Settings are resolved once by `settings.Settings.resolve(config)`, which merges `config.yml` with the environment into one frozen typed object. Precedence is **CLI options > env var > config file > default**. A new setting means one field on `Settings` plus one line in `resolve()`; do not write settings back into `os.environ`.
+Settings are resolved once by `settings.Settings.resolve(config)`, which merges `config.yml` with the environment into one frozen typed object. Precedence is **CLI options > env var > config file > default**. A new setting means one field on `Settings`, one entry in `FIELD_ENV_VARS`, and one line in `resolve()`; do not write settings back into `os.environ`. `living-ink status` prints every resolved setting alongside the layer that supplied it, via `Settings.explain()`.
 
 ## Package Management
 

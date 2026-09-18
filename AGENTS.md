@@ -74,7 +74,7 @@ Publish via Destination.publish()
 
 ## Things that will bite you
 
-- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
+- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
 - **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; `--dry-run` implies it.
@@ -108,6 +108,7 @@ uv sync --all-extras                                  # install deps (incl. dev)
 uv run living-ink --help                              # CLI: sync | setup | status
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
 uv run living-ink sync --dry-run                      # transcribe, publish nothing
+uv run living-ink status                              # health check + effective settings
 uv run living-ink status --json                       # machine-readable health check
 
 uv run ruff check .           # lint
