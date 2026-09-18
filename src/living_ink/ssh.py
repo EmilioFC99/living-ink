@@ -22,7 +22,9 @@ import zipfile
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from living_ink.devices import profile_for
 from living_ink.models import Document
+from living_ink.transport import DeviceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,9 @@ class SSHClient:
         # Populated lazily; see get_file_type().
         self._file_type_cache: Dict[str, Optional[str]] = {}
         self._file_types_loaded = False
+        # Cached because the device does not change mid-run and each SSH call
+        # is a fresh connection.
+        self._device_info: Optional[DeviceInfo] = None
 
     def _ssh_command(self, command: str, timeout: int = 30) -> str:
         """Execute a command on the tablet via SSH."""
@@ -377,6 +382,50 @@ class SSHClient:
         except (*_SSH_ERRORS, *_PARSE_ERRORS) as e:
             logger.debug("Could not read tags for %s: %s", doc.id, e, exc_info=True)
             return []
+
+    def get_device_info(self) -> DeviceInfo:
+        """Ask the tablet what it is, over a single SSH round trip.
+
+        The model comes from the kernel's machine string and the firmware from
+        the release file xochitl ships. Either may be missing on a device this
+        project has not seen, so each is read with a fallback and the result is
+        still returned rather than raising: knowing half of it is useful, and a
+        bug report that says "unknown" is more actionable than one that errored.
+
+        Returns:
+            The device's model, firmware and panel geometry.
+
+        Raises:
+            RuntimeError: If the tablet could not be reached at all.
+        """
+        if self._device_info is not None:
+            return self._device_info
+
+        # One command, because each SSH invocation is a fresh connection and
+        # this runs on the interactive path. '|| true' keeps a missing file
+        # from failing the whole read.
+        command = (
+            "cat /sys/devices/soc0/machine 2>/dev/null || true; echo '===';"
+            " grep -h REMARKABLE_RELEASE_VERSION /usr/share/remarkable/update.conf"
+            " 2>/dev/null || cat /etc/version 2>/dev/null || true"
+        )
+        try:
+            output = self._ssh_command(command, timeout=15)
+        except _SSH_ERRORS as e:
+            raise RuntimeError(f"Could not read device info: {e}") from e
+
+        machine, _, firmware_raw = output.partition("===")
+        machine = machine.strip()
+        firmware = firmware_raw.strip().rpartition("=")[2].strip()
+
+        profile = profile_for(machine)
+        self._device_info = DeviceInfo(
+            model=profile.name if machine else "unknown",
+            firmware=firmware,
+            screen=profile.screen,
+            color=profile.color,
+        )
+        return self._device_info
 
     def get_all_file_types(self) -> dict[str, Optional[str]]:
         """

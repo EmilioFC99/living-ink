@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 from living_ink.models import Document
 from living_ink.settings import Settings
-from living_ink.transport import RemarkableTransport, UnsupportedOperation
+from living_ink.transport import DeviceInfo, RemarkableTransport, UnsupportedOperation
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,30 @@ class FallbackClient:
     def get_tags(self, doc: Document) -> List[str]:
         """Get a document's tags, falling back to the backup client if needed."""
         return self._with_fallback("get_tags", doc)
+
+    def get_device_info(self) -> DeviceInfo:
+        """Describe the tablet, asking whichever transport can actually see it.
+
+        This is the one operation where an :class:`UnsupportedOperation` from
+        the active client is worth retrying on the backup: the capability gap
+        is not uniform across transports. Only USB SSH can see the hardware,
+        so a Cloud-preferred run must still be able to fall through to SSH.
+        Unlike a failover, this does not make the backup the active client —
+        the preference was about fetching documents, and still holds.
+
+        Returns:
+            The device description from whichever transport could produce one.
+
+        Raises:
+            UnsupportedOperation: If neither transport can see the device.
+        """
+        try:
+            return self.active.get_device_info()
+        except UnsupportedOperation:
+            other = self.backup if self.active is self.primary else self.primary
+            if other is None or other is self.active:
+                raise
+            return other.get_device_info()
 
 
 def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:

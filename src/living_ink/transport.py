@@ -10,9 +10,37 @@ every method; one that genuinely cannot serve a call raises
 never have to ask ``hasattr`` at runtime.
 """
 
-from typing import List, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import List, Optional, Protocol, Tuple, runtime_checkable
 
 from living_ink.models import Document
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    """What a transport can say about the tablet on the other end.
+
+    Attributes:
+        model: The model name, e.g. ``"reMarkable 2"``. ``"unknown"`` when the
+            device answered but said nothing recognisable.
+        firmware: The xochitl release version, empty if it could not be read.
+        screen: Panel size in pixels, as ``(width, height)``.
+        color: Whether the panel can display colour.
+    """
+
+    model: str
+    firmware: str
+    screen: Tuple[int, int]
+    color: bool = False
+
+    def describe(self) -> str:
+        """Render the device as one line for status output and bug reports.
+
+        Returns:
+            A short human-readable description of the device.
+        """
+        firmware = f" firmware {self.firmware}" if self.firmware else ""
+        return f"{self.model}{firmware} ({self.screen[0]}×{self.screen[1]})"
 
 
 class UnsupportedOperation(NotImplementedError):
@@ -53,4 +81,13 @@ class RemarkableTransport(Protocol):
 
     def get_tags(self, doc: Document) -> List[str]:
         """Return the document's tags, empty if it has none."""
+        ...
+
+    def get_device_info(self) -> DeviceInfo:
+        """Describe the tablet this transport talks to.
+
+        Raises:
+            UnsupportedOperation: If the transport cannot see the device itself
+                — the Cloud serves documents, not hardware.
+        """
         ...

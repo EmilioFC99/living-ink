@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from living_ink.models import Document
+from living_ink.transport import DeviceInfo, UnsupportedOperation
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,21 @@ class RemarkableClient:
         tags = extract_tags_from_dict(self._content_dict(doc))
         doc.tags = tags
         return list(tags)
+
+    def get_device_info(self) -> DeviceInfo:
+        """Report that the Cloud cannot describe the tablet.
+
+        The sync service serves documents, not hardware: a notebook in the
+        Cloud has no model or firmware attached to it, and the device that
+        wrote it may not even be online.
+
+        Raises:
+            UnsupportedOperation: Always.
+        """
+        raise UnsupportedOperation(
+            "The reMarkable Cloud serves documents, not device details. "
+            "Connect over USB to identify the tablet."
+        )
 
     def download_raw_file(self, doc: Document, extension: str) -> Optional[bytes]:
         """Download the source PDF or EPUB backing an annotated document.

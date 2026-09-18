@@ -380,6 +380,9 @@ class StatusReport:
     ssh_msg: str = ""
     cloud_ok: bool = False
     cloud_msg: str = ""
+    #: One-line device description, empty when no transport could see the
+    #: tablet. Only USB SSH can; the Cloud serves documents, not hardware.
+    device: str = ""
 
     ai_provider: str = "none"
     ai_model: str = "default"
@@ -447,6 +450,7 @@ class StatusReport:
                 "preferred": self.preferred,
                 "ssh": {"connected": self.ssh_ok, "message": self.ssh_msg},
                 "cloud": {"connected": self.cloud_ok, "message": self.cloud_msg},
+                "device": self.device,
             },
             "ai": {
                 "provider": self.ai_provider,
@@ -487,6 +491,30 @@ class StatusReport:
                 for origin in self.settings
             ],
         }
+
+
+def _describe_connected_device(host: str, port: int, user: str) -> str:
+    """Ask a reachable tablet what it is, for the status line.
+
+    Args:
+        host: SSH host the tablet answers on.
+        port: SSH port.
+        user: SSH user.
+
+    Returns:
+        A one-line description, or an empty string if the device could not be
+        identified. A health check that cannot name the model is still a useful
+        health check, so every failure here degrades to silence rather than
+        turning ``status`` itself into an error.
+    """
+    from living_ink.ssh import create_ssh_client
+    from living_ink.transport import UnsupportedOperation
+
+    try:
+        return create_ssh_client(host=host, user=user, port=port).get_device_info().describe()
+    except (UnsupportedOperation, RuntimeError, OSError) as e:
+        logger.debug("Could not identify the device: %s", e, exc_info=True)
+        return ""
 
 
 def collect_status(config_path: Path) -> StatusReport:
@@ -535,6 +563,11 @@ def collect_status(config_path: Path) -> StatusReport:
     if has_ssh or report.preferred == "ssh":
         report.ssh_ok, report.ssh_msg = verify_remarkable_ssh(
             host=report.ssh_host, port=rm_cfg.get("ssh_port", 22)
+        )
+
+    if report.ssh_ok:
+        report.device = _describe_connected_device(
+            report.ssh_host, rm_cfg.get("ssh_port", 22), rm_cfg.get("ssh_user", "root")
         )
 
     # Not rm_cfg["device_token"] alone: registration stores the token in
@@ -1332,6 +1365,11 @@ class StatusCommand(BaseCommand):
                 )
             else:
                 print(f"reMarkable:    {red('Disconnected')} (Cloud: {report.cloud_msg})")
+
+        # Only USB SSH can see the hardware, so this line is absent on a
+        # Cloud-only setup rather than guessing at a model.
+        if report.device:
+            print(f"Device:        {report.device}")
 
         # AI provider
         label = f"{report.ai_provider} ({report.ai_model})"
