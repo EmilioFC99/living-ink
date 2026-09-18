@@ -25,11 +25,22 @@ import abc
 import base64
 import json
 import logging
+import random
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, Optional, Type
 
 logger = logging.getLogger(__name__)
+
+# Transient failures are retried with exponential backoff. Pages are
+# transcribed several at a time, so tripping a per-minute quota is an ordinary
+# event, not an exceptional one — dropping the page instead would leave a
+# silent hole in the note.
+MAX_ATTEMPTS = 4
+RETRY_BASE_DELAY = 1.0
+MAX_RETRY_DELAY = 30.0
+RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 # ---------------------------------------------------------------------------
 # Named presets — users pick a name, we fill in the endpoint details.
@@ -347,24 +358,11 @@ class UniversalChatProvider(TextRepairProvider):
             value = f"{self.auth_prefix} {self.api_key}" if self.auth_prefix else self.api_key
             req.add_header(self.auth_header, value)
 
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            logger.error("%s HTTP Error (%s): %s %s", purpose, self.name, e.code, e.reason)
-            try:
-                logger.error("Details: %s", e.read().decode("utf-8"))
-            except Exception:
-                pass
-            return ""
-        except urllib.error.URLError as e:
-            logger.error("%s Connection Error (%s): %s", purpose, self.name, e.reason)
-            return ""
-        except Exception as e:
-            logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e)
+        body = self._send_with_retries(req, purpose)
+        if body is None:
             return ""
 
-        choices = body.get("choices", [])
+        choices: list = body.get("choices", [])
         if not choices:
             return ""
 
@@ -384,6 +382,78 @@ class UniversalChatProvider(TextRepairProvider):
             return ""
 
         return content.strip()
+
+    def _send_with_retries(self, req: urllib.request.Request, purpose: str) -> Optional[dict]:
+        """Send the request, retrying the failures that are worth retrying.
+
+        Rate limits and 5xx responses are temporary by definition, and pages
+        are transcribed several at a time, so a burst that trips a per-minute
+        quota is expected rather than exceptional. Giving up on the first 429
+        would silently drop a page from the note; backing off recovers it.
+        A 4xx that is not a rate limit is a bad request or a bad key — retrying
+        it just wastes the user's time.
+
+        Args:
+            req: The prepared request. Reused across attempts.
+            purpose: Human-readable label used to prefix log lines.
+
+        Returns:
+            The decoded JSON body, or None if every attempt failed.
+        """
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            retry_after: Optional[str] = None
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                logger.error("%s HTTP Error (%s): %s %s", purpose, self.name, e.code, e.reason)
+                try:
+                    logger.error("Details: %s", e.read().decode("utf-8"))
+                except Exception:
+                    pass
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                retryable = e.code in RETRYABLE_STATUS
+            except urllib.error.URLError as e:
+                logger.error("%s Connection Error (%s): %s", purpose, self.name, e.reason)
+                retryable = True
+            except Exception as e:
+                logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e)
+                retryable = False
+
+            if not retryable or attempt == MAX_ATTEMPTS:
+                return None
+
+            delay = self._retry_delay(attempt, retry_after)
+            logger.warning(
+                "%s retrying in %.1fs (attempt %d of %d)", purpose, delay, attempt + 1, MAX_ATTEMPTS
+            )
+            time.sleep(delay)
+
+        return None
+
+    @staticmethod
+    def _retry_delay(attempt: int, retry_after: Optional[str] = None) -> float:
+        """Return how long to wait before the next attempt.
+
+        The server's ``Retry-After`` wins when it sends one. Otherwise the wait
+        doubles per attempt, with jitter so that concurrent page requests that
+        were rate-limited together do not all come back at the same instant.
+
+        Args:
+            attempt: The attempt that just failed, counting from 1.
+            retry_after: The response's ``Retry-After`` header, if any.
+
+        Returns:
+            Seconds to sleep, capped at ``MAX_RETRY_DELAY``.
+        """
+        if retry_after:
+            try:
+                return min(float(retry_after), MAX_RETRY_DELAY)
+            except (TypeError, ValueError):
+                pass
+
+        backoff = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+        return min(backoff + random.uniform(0, RETRY_BASE_DELAY), MAX_RETRY_DELAY)
 
     def _chat(self, prompt: str) -> str:
         """Send a plain text chat completion request.

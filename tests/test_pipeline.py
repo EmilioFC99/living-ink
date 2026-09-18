@@ -503,3 +503,78 @@ class TestDryRun:
         args = SimpleNamespace(dry_run=True)
         assert SyncOptions.from_args(args).dry_run is True
         assert SyncOptions.from_args(SimpleNamespace()).dry_run is False
+
+
+class TestTranscriptReuse:
+    """Transcribing costs money, so a transcript that is still current is reused."""
+
+    def _pages_and_transcript(self, tmp_path, monkeypatch):
+        """Lay out one page image and a transcript written after it."""
+        white = tmp_path / "white"
+        ocr = tmp_path / "ocr"
+        white.mkdir()
+        ocr.mkdir()
+        monkeypatch.setattr(pipeline, "OCR_DIR", ocr)
+
+        page = white / "Notes.page-1.png"
+        page.write_bytes(b"png")
+        transcript = ocr / "Notes_clean.txt"
+        transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
+        os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
+        return page, transcript
+
+    def test_a_current_transcript_is_adopted(self, tmp_path, monkeypatch):
+        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
+        job = make_job(safe_name="Notes", imgs=[page])
+
+        assert SyncPipeline(destinations=[])._reuse_transcript(job) is True
+        assert job.clean_out_txt == transcript
+
+    def test_redrawn_pages_force_a_new_transcript(self, tmp_path, monkeypatch):
+        """A page rendered after the transcript means the transcript is stale."""
+        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
+        newer = transcript.stat().st_mtime + 10
+        os.utime(page, (newer, newer))
+        job = make_job(safe_name="Notes", imgs=[page])
+
+        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
+        assert job.clean_out_txt is None
+
+    def test_no_transcript_means_no_reuse(self, tmp_path, monkeypatch):
+        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
+        transcript.unlink()
+        job = make_job(safe_name="Notes", imgs=[page])
+
+        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
+
+    def test_an_empty_transcript_is_not_reused(self, tmp_path, monkeypatch):
+        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
+        transcript.write_text("")
+        os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
+        job = make_job(safe_name="Notes", imgs=[page])
+
+        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
+
+    def test_reuse_skips_ocr_entirely(self, tmp_path, monkeypatch):
+        """The expensive stages are not merely fast on reuse — they do not run."""
+        page, _ = self._pages_and_transcript(tmp_path, monkeypatch)
+        pipeline_obj = SyncPipeline(destinations=[])
+        nb_item = {"ID": "nb-1", "VissibleName": "Notes", "hash": "h"}
+
+        with (
+            patch("living_ink.pipeline.get_document_type", return_value="notebook"),
+            patch.object(
+                pipeline_obj, "_acquire_pages", side_effect=lambda job, c: job.imgs.append(page)
+            ),
+            patch.object(pipeline_obj, "_collect_tags"),
+            patch.object(pipeline_obj, "_publish", return_value=True),
+            patch.object(pipeline_obj, "_ocr_pages") as ocr,
+            patch.object(pipeline_obj, "_preprocess_images") as preprocess,
+        ):
+            assert (
+                pipeline_obj.process_notebook_item(nb_item, MagicMock(), {}, {}, keep_temp=True)
+                is True
+            )
+
+        ocr.assert_not_called()
+        preprocess.assert_not_called()
