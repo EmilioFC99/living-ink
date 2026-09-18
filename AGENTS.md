@@ -61,7 +61,7 @@ Publish via Destination.publish()
     ├── AppleNotesDestination (AppleScript, one folder level)
     └── ObsidianDestination (Markdown + frontmatter, full folder tree)
 
-Note identity is the reMarkable document id, never the title. `publish()` receives `doc_id`; Obsidian writes it into the frontmatter as `living_ink_id` and will not merge two different documents into one file; `publications.target` records where each note landed.
+Note identity is the reMarkable document id, never the title. `publish()` receives `doc_id`; Obsidian writes it into the frontmatter as `living_ink_id` and will not merge two different documents into one file; `publications.target` records where each note landed, and is fed back as `existing_target` so a rename or a move relocates the note. A published document missing from the tablet listing is reported as an orphan; `living-ink sync --prune` deletes it via `Destination.unpublish()`, which never removes a note that cannot be proven to be Living Ink's.
 ```
 
 ### The seams that matter
@@ -125,6 +125,7 @@ uv run living-ink status                              # health check + effective
 uv run living-ink status --json                       # machine-readable health check
 uv run living-ink list                                # what is pending or failing
 uv run living-ink state                               # what is remembered between runs
+uv run living-ink sync --prune                        # also delete notes whose notebook is gone
 uv run living-ink cache                               # transcription and render cache sizes
 uv run living-ink cache --clear                       # drop them; the next sync pays again
 

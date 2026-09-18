@@ -881,6 +881,8 @@ class SyncOptions:
         all_types: Include every document type; overrides sync_pdfs/sync_epubs.
         keep_temp: Preserve rendered PNGs and OCR transcripts for debugging.
         dry_run: Do everything except publish, so a run can be inspected first.
+        prune: Delete notes whose notebook is gone from the tablet, instead of
+            only reporting them.
     """
 
     notebook: Optional[str] = None
@@ -894,6 +896,7 @@ class SyncOptions:
     all_types: bool = False
     keep_temp: bool = False
     dry_run: bool = False
+    prune: bool = False
 
     @classmethod
     def from_args(cls, args: Any) -> "SyncOptions":
@@ -924,6 +927,7 @@ class SyncOptions:
             all_types=getattr(args, "all_types", False),
             keep_temp=getattr(args, "keep_temp", False),
             dry_run=getattr(args, "dry_run", False),
+            prune=getattr(args, "prune", False),
         )
 
     def merged_with(self, **overrides: Any) -> "SyncOptions":
@@ -1098,6 +1102,7 @@ class SyncPipeline:
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = opts.dry_run
+        self.prune = opts.prune
         # A dry run's whole output is the transcripts it leaves behind, so it
         # implies --keep-temp; purging them would delete what it points at.
         self.keep_temp = opts.keep_temp or opts.dry_run
@@ -2168,6 +2173,9 @@ class SyncPipeline:
         # exactly that one instead of deleting whatever shares the title.
         previous = get_state_store().get_publication(job.notebook_id, dest_name)
         existing_id = previous["external_id"] if previous else None
+        # Where it landed last time. A notebook renamed or moved on the tablet
+        # is the same note in a new place, not a second note.
+        existing_target = previous["target"] if previous else None
 
         try:
             published = dest.publish(
@@ -2182,6 +2190,7 @@ class SyncPipeline:
                 # note carrying this title is one we created.
                 adopt_by_name=bool(previous) and not existing_id,
                 doc_id=job.notebook_id,
+                existing_target=existing_target,
             )
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")
@@ -2198,6 +2207,99 @@ class SyncPipeline:
             return False
 
         return published
+
+    def _handle_orphans(self, id_map: Dict[str, Any]) -> None:
+        """Report, and optionally delete, notes whose notebook is gone.
+
+        A document that was published once and is no longer in the tablet's
+        listing has usually been deleted there — but it can also mean the
+        listing came back short, and acting on that would destroy notes for a
+        transport hiccup. So the default is to say so and do nothing;
+        ``--prune`` is the user taking responsibility for the difference.
+
+        The whole listing is used, not the sync candidates, so a notebook in
+        the trash or of a type this run skipped is not mistaken for a deletion.
+
+        Args:
+            id_map: Every document the tablet listed, keyed by id.
+        """
+        if not id_map or self.dry_run:
+            # An empty listing means the transport told us nothing, which is
+            # not the same as the tablet being empty.
+            return
+
+        try:
+            publications = get_state_store().all_publications()
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            log(f"⚠️ Could not check for deleted notebooks: {e}")
+            return
+
+        orphans = {doc_id: rows for doc_id, rows in publications.items() if doc_id not in id_map}
+        if not orphans:
+            return
+
+        if not self.prune:
+            log(f"{len(orphans)} published notebook(s) are no longer on the tablet:")
+            for doc_id, rows in orphans.items():
+                where = ", ".join(sorted(rows))
+                log(f"  {self._orphan_label(doc_id)} — still in {where}")
+            log("Their notes were left alone. Run with --prune to delete them.")
+            return
+
+        for doc_id, rows in orphans.items():
+            self._prune_orphan(doc_id, rows)
+
+    def _orphan_label(self, doc_id: str) -> str:
+        """Return the friendliest name known for a document that is gone.
+
+        Args:
+            doc_id: reMarkable document id.
+
+        Returns:
+            The recorded name, falling back to the id.
+        """
+        try:
+            document = get_state_store().get_document(doc_id)
+        except (sqlite3.Error, OSError, RuntimeError):
+            return doc_id
+        name = (document or {}).get("name")
+        return f"{name} ({doc_id})" if name else doc_id
+
+    def _prune_orphan(self, doc_id: str, rows: Dict[str, Any]) -> None:
+        """Delete one deleted notebook's notes and forget it.
+
+        The state row is dropped whatever the destination says. A destination
+        that refuses — because the note is already gone, or carries no proof of
+        ownership — has still told us everything it is going to, and keeping
+        the row would only report the same orphan on every run.
+
+        Args:
+            doc_id: reMarkable document id.
+            rows: Its publication rows, keyed by destination class name.
+        """
+        by_name = {type(d).__name__: d for d in (self.destinations or get_default_destinations())}
+        label = self._orphan_label(doc_id)
+
+        for dest_name, row in rows.items():
+            dest = by_name.get(dest_name)
+            if dest is None:
+                log(f"  {label}: {dest_name} is not configured; its note was left alone.")
+                continue
+            try:
+                removed = dest.unpublish(
+                    target=row.get("target"),
+                    external_id=row.get("external_id"),
+                    doc_id=doc_id,
+                )
+            except DestinationError as e:
+                log(f"  ⚠️ {dest_name}: {e}")
+                continue
+            log(f"  {label}: {'deleted from' if removed else 'left alone in'} {dest_name}.")
+
+        try:
+            get_state_store().forget(doc_id)
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            log(f"  ⚠️ Could not forget {label}: {e}")
 
     def run(self) -> bool:
         """Execute the sync pipeline.
@@ -2265,6 +2367,7 @@ class SyncPipeline:
         client = self.connect()
         notebooks, id_map = self.discover_documents(client)
         self._counts = (len(notebooks), 0, 0)
+        self._handle_orphans(id_map)
         to_process, needs_update, should_continue = self.filter_pending_documents(notebooks, id_map)
 
         if not should_continue:

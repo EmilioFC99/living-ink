@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from living_ink import pipeline
-from living_ink.destinations import AppleNotesDestination, Destination
+from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
 
 
@@ -24,6 +24,15 @@ class MockDestination(Destination):
     def __init__(self, name: str = "Mock"):
         self.name = name
         self.published = []
+        self.unpublished = []
+        self.unpublish_result = True
+        self.unpublish_error = None
+
+    def unpublish(self, target=None, external_id=None, doc_id=None) -> bool:
+        if self.unpublish_error:
+            raise self.unpublish_error
+        self.unpublished.append((target, external_id, doc_id))
+        return self.unpublish_result
 
     def publish(
         self,
@@ -36,6 +45,7 @@ class MockDestination(Destination):
         existing_id: str = None,
         adopt_by_name: bool = False,
         doc_id: str = None,
+        existing_target: str = None,
     ) -> bool:
         self.published.append(
             {
@@ -48,6 +58,7 @@ class MockDestination(Destination):
                 "existing_id": existing_id,
                 "adopt_by_name": adopt_by_name,
                 "doc_id": doc_id,
+                "existing_target": existing_target,
             }
         )
         return True
@@ -1250,3 +1261,99 @@ class TestPublicationIdentity:
             pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
 
         assert recorded.call_args.kwargs["target"] == "Work/Notes.md"
+
+
+class TestOrphanedNotebooks:
+    """A notebook deleted on the tablet is reported, and pruned only when asked."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _published(self, doc_id="nb-1", name="Old Notes", dest="MockDestination"):
+        store = pipeline.get_state_store()
+        store.record_document(doc_id, name=name)
+        store.record_publication(doc_id, dest, "v1", target=f"{name}.md")
+
+    def _pipeline(self, dest, prune=False, dry_run=False):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = dry_run
+        pipe.prune = prune
+        pipe.destinations = [dest]
+        return pipe
+
+    def test_a_missing_notebook_is_reported(self, capsys):
+        self._published()
+        self._pipeline(MockDestination())._handle_orphans({"nb-2": object()})
+        out = capsys.readouterr().out
+        assert "no longer on the tablet" in out
+        assert "Old Notes" in out
+
+    def test_reporting_deletes_nothing(self, capsys):
+        self._published()
+        dest = MockDestination()
+        self._pipeline(dest)._handle_orphans({"nb-2": object()})
+
+        assert dest.unpublished == []
+        assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is not None
+
+    def test_a_notebook_still_on_the_tablet_is_not_an_orphan(self, capsys):
+        self._published()
+        self._pipeline(MockDestination())._handle_orphans({"nb-1": object()})
+        assert "no longer on the tablet" not in capsys.readouterr().out
+
+    def test_an_empty_listing_is_never_treated_as_a_deletion(self, capsys):
+        """A transport that returned nothing has not told us the tablet is empty."""
+        self._published()
+        self._pipeline(MockDestination())._handle_orphans({})
+        assert capsys.readouterr().out == ""
+
+    def test_a_dry_run_says_nothing_and_does_nothing(self, capsys):
+        self._published()
+        dest = MockDestination()
+        self._pipeline(dest, prune=True, dry_run=True)._handle_orphans({"nb-2": object()})
+
+        assert capsys.readouterr().out == ""
+        assert dest.unpublished == []
+
+    def test_pruning_deletes_the_note(self, capsys):
+        self._published()
+        dest = MockDestination()
+        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+
+        assert dest.unpublished == [("Old Notes.md", None, "nb-1")]
+
+    def test_pruning_forgets_the_document(self, capsys):
+        self._published()
+        self._pipeline(MockDestination(), prune=True)._handle_orphans({"nb-2": object()})
+        assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is None
+
+    def test_a_destination_that_refuses_is_still_forgotten(self, capsys):
+        """Otherwise the same orphan is reported again on every single run."""
+        self._published()
+        dest = MockDestination()
+        dest.unpublish_result = False
+        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+
+        assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is None
+        assert "left alone" in capsys.readouterr().out
+
+    def test_a_destination_error_does_not_stop_the_run(self, capsys):
+        self._published()
+        dest = MockDestination()
+        dest.unpublish_error = DestinationError("vault is gone")
+        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+
+        assert "vault is gone" in capsys.readouterr().out
+
+    def test_a_destination_no_longer_configured_is_left_alone(self, capsys):
+        self._published(dest="SomethingElse")
+        dest = MockDestination()
+        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+
+        assert dest.unpublished == []
+        assert "not configured" in capsys.readouterr().out

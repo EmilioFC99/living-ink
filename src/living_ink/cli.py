@@ -133,6 +133,11 @@ class SyncCommand(BaseCommand):
             action="store_true",
             help="Transcribe as usual but publish nothing; prints where each transcript was written",
         )
+        parser.add_argument(
+            "--prune",
+            action="store_true",
+            help="Delete notes whose notebook is gone from the tablet (reported, not deleted, by default)",
+        )
 
     def run(self, args: argparse.Namespace) -> int:
         """Run the notebook sync pipeline.
