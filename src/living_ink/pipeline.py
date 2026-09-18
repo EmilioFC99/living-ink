@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from PIL import Image, ImageFilter, ImageOps
 
-from living_ink import logs
+from living_ink import logs, state
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import ocr_and_repair, repair_text_with_openai, vision_ocr_available
 from living_ink.config import (
@@ -33,7 +33,7 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.redact import redact, register_secret
-from living_ink.safeio import restrict_permissions, write_text_atomic
+from living_ink.safeio import restrict_permissions
 from living_ink.settings import Settings
 
 
@@ -90,6 +90,7 @@ _logger = logging.getLogger(__name__)
 
 
 _runtime_dirs_ready = False
+_state_store = None
 
 
 def ensure_runtime_dirs() -> None:
@@ -271,44 +272,71 @@ def get_default_destinations() -> List[Destination]:
     return _default_destinations
 
 
-def get_state_file_path(dest_name: str) -> Path:
-    """Get the path to the state file for a specific destination."""
+def get_state_db_path() -> Path:
+    """Get the path to the sync state database."""
     ensure_runtime_dirs()
-    new_path = DATA_DIR / f"processed_notebooks_{dest_name}.json"
-    legacy_path = ROOT / f"processed_notebooks_{dest_name}.json"
-    # Automatically migrate legacy state file from root to data directory if present
-    if not new_path.exists() and legacy_path.exists() and new_path != legacy_path:
-        try:
-            legacy_path.rename(new_path)
-        except Exception:
-            return legacy_path
-    return new_path
+    return DATA_DIR / state.DB_FILENAME
+
+
+def get_state_store() -> "state.StateStore":
+    """Return the shared state store, opening it on first use.
+
+    Cached rather than built at import time, so importing this module still
+    touches no disk. The one-time import of the old per-destination JSON files
+    happens here, on the first open after an upgrade.
+
+    Returns:
+        The process-wide open StateStore.
+    """
+    global _state_store
+    if _state_store is None:
+        # Legacy state lived beside the checkout before it moved under the
+        # data directory; sweep both so an upgrade from either layout keeps
+        # its history instead of re-OCRing every notebook.
+        db_path = get_state_db_path()
+        store = state.StateStore(db_path)
+        for source in (DATA_DIR, ROOT):
+            imported = state.import_legacy_json(store, source)
+            if imported:
+                log(f"📦 Imported {imported} sync records from {source} into {db_path.name}.")
+        _state_store = store
+    return _state_store
+
+
+def reset_state_store() -> None:
+    """Close and drop the cached state store.
+
+    Exists for tests and for the setup wizard, both of which can move the data
+    directory out from under an already-open connection.
+    """
+    global _state_store
+    if _state_store is not None:
+        _state_store.close()
+        _state_store = None
 
 
 def load_processed_log(dest_name: str):
-    log_path = get_state_file_path(dest_name)
-    if log_path.exists():
-        try:
-            with open(log_path, "r") as f:
-                data = json.load(f)
-                # Handle legacy format (list of IDs) - backward compatibility
-                if isinstance(data, list):
-                    return {doc_id: 0 for doc_id in data}
-                # Handle new format (dict of ID -> Version)
-                return data
-        except Exception:
-            return {}
-    return {}
+    """Return the published version of every document for one destination.
+
+    Args:
+        dest_name: Destination class name, e.g. ``ObsidianDestination``.
+
+    Returns:
+        Mapping of document id to the version last published there.
+    """
+    return get_state_store().published_versions(dest_name)
 
 
-def add_to_processed_log(dest_name: str, doc_id, version):
-    processed = load_processed_log(dest_name)
-    processed[doc_id] = version
-    log_path = get_state_file_path(dest_name)
-    # Written in one step because load_processed_log() treats a truncated file
-    # as an empty one: a crash mid-write would silently mark every document
-    # unpublished and re-pay for OCR on all of them on the next run.
-    write_text_atomic(log_path, json.dumps(processed, indent=2, sort_keys=True))
+def add_to_processed_log(dest_name: str, doc_id, version, run_id=None):
+    """Record that a document reached a destination.
+
+    Args:
+        dest_name: Destination class name.
+        doc_id: reMarkable document id.
+        version: Device version or content hash that was published.
+        run_id: Run that published it, when one is in progress.
+    """
+    get_state_store().record_publication(doc_id, dest_name, version, run_id=run_id)
 
 
 def preprocess_image(in_path: Path, out_path: Path):
@@ -1090,6 +1118,10 @@ class SyncPipeline:
             if isinstance(dest, AppleNotesDestination):
                 dest.folder_name = self.settings.apple_notes_folder
 
+        # Opened by run(); every state row written during that run carries it,
+        # so "what did the 03:00 sync touch" has an answer.
+        self.run_id: Optional[int] = None
+
     # The resolved settings are the single source of truth; these read-only
     # views keep the pipeline's long-standing attribute names working.
 
@@ -1175,6 +1207,36 @@ class SyncPipeline:
 
         return notebooks, id_map
 
+    def _record_seen_document(
+        self, item: Any, doc_id: str, version: Any, id_map: Dict[str, Any]
+    ) -> None:
+        """Note in the state database that a document exists on the device.
+
+        Best-effort: a sync that cannot write its inventory should still sync.
+        The publication record, which is what prevents re-paying for OCR, is
+        written on a path that does report failure.
+
+        Args:
+            item: Raw document item from the transport.
+            doc_id: reMarkable document id.
+            version: Device version or content hash.
+            id_map: Map of id to document, for resolving the folder path.
+        """
+        try:
+            name = str(get_val(item, "VissibleName") or get_val(item, "VisibleName") or "").strip()
+            mod = get_val(item, "ModifiedClient") or getattr(item, "last_modified", None)
+            get_state_store().record_document(
+                doc_id,
+                name=name or None,
+                folder=get_notebook_path(item, id_map) or None,
+                doc_type=get_document_type(item),
+                version=version,
+                last_modified=None if mod is None else str(mod),
+                run_id=self.run_id,
+            )
+        except Exception as e:
+            log(f"⚠️ Could not record {doc_id} in the state database: {e}")
+
     def filter_pending_documents(
         self, notebooks: List[Any], id_map: Dict[str, Any]
     ) -> Tuple[List[Any], Dict[str, List[Destination]], bool]:
@@ -1198,6 +1260,11 @@ class SyncPipeline:
                     curr_val = int(get_val(item, "Version"))
                 except (ValueError, TypeError):
                     curr_val = 1
+
+            # Recorded whether or not it needs publishing: an inventory of what
+            # is on the device is what makes "what is pending" answerable
+            # without talking to the tablet again.
+            self._record_seen_document(item, doc_id, curr_val, id_map)
 
             for dest in active_dests:
                 dest_name = type(dest).__name__
@@ -1781,7 +1848,9 @@ class SyncPipeline:
             for dest in targets:
                 if self._publish_to(dest, job, clean_text):
                     # Update state for THIS destination immediately.
-                    add_to_processed_log(type(dest).__name__, job.notebook_id, job.version)
+                    add_to_processed_log(
+                        type(dest).__name__, job.notebook_id, job.version, run_id=self.run_id
+                    )
                 else:
                     all_success = False
                     log(f"⚠️ Failed to publish to {type(dest).__name__}")
@@ -1878,6 +1947,44 @@ class SyncPipeline:
         ensure_runtime_dirs()
         logs.ensure_configured(LOG_PATH)
         logs.mark_run_start()
+        try:
+            return self._run_recorded()
+        finally:
+            self.run_id = None
+
+    def _run_recorded(self) -> bool:
+        """Run the pipeline inside an open state-database run record.
+
+        Returns:
+            True if sync succeeded or completed gracefully, False on error.
+        """
+        store = get_state_store()
+        # A dry run must leave no trace, and a run row is a trace.
+        self.run_id = None if self.dry_run else store.start_run()
+        seen = published = failed = 0
+        outcome = "error"
+        try:
+            result = self._execute()
+            seen, published, failed = self._counts
+            outcome = "success" if result else "partial"
+            return result
+        finally:
+            if self.run_id is not None:
+                store.finish_run(
+                    self.run_id,
+                    outcome=outcome,
+                    seen=seen,
+                    published=published,
+                    failed=failed,
+                )
+
+    def _execute(self) -> bool:
+        """Do the actual sync work.
+
+        Returns:
+            True if sync succeeded or completed gracefully, False on error.
+        """
+        self._counts = (0, 0, 0)
 
         validate_environment()
         log("Pipeline started.")
@@ -1892,6 +1999,7 @@ class SyncPipeline:
 
         client = self.connect()
         notebooks, id_map = self.discover_documents(client)
+        self._counts = (len(notebooks), 0, 0)
         to_process, needs_update, should_continue = self.filter_pending_documents(notebooks, id_map)
 
         if not should_continue:
@@ -1900,6 +2008,7 @@ class SyncPipeline:
             return True
 
         all_success = True
+        published = failed = 0
         for nb_item in to_process:
             item_success = self.process_notebook_item(
                 nb_item=nb_item,
@@ -1908,8 +2017,12 @@ class SyncPipeline:
                 needs_update=needs_update,
                 keep_temp=self.keep_temp,
             )
-            if not item_success:
+            if item_success:
+                published += 1
+            else:
+                failed += 1
                 all_success = False
+        self._counts = (len(notebooks), published, failed)
 
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
