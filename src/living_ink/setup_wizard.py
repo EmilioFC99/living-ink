@@ -146,8 +146,10 @@ def detect_obsidian_vaults() -> List[Dict[str, str]]:
         # Sort alphabetically by vault name
         vaults.sort(key=lambda x: x["name"].lower())
         return vaults
-    except Exception as e:
-        logger.debug("Failed to parse obsidian.json: %s", e)
+    except (OSError, ValueError, TypeError) as e:
+        # An unreadable, malformed, or unexpectedly shaped obsidian.json. The
+        # wizard falls back to asking for the path, so this stays quiet.
+        logger.debug("Failed to parse obsidian.json: %s", e, exc_info=True)
         return []
 
 
@@ -169,8 +171,8 @@ def list_vault_folders(vault_path: Path) -> List[str]:
             if item.is_dir() and not item.name.startswith("."):
                 folders.append(item.name)
         folders.sort(key=lambda x: x.lower())
-    except Exception as e:
-        logger.debug("Error listing vault folders: %s", e)
+    except OSError as e:
+        logger.debug("Error listing vault folders: %s", e, exc_info=True)
 
     return folders
 
@@ -192,8 +194,9 @@ def get_existing_remarkable_token() -> Optional[str]:
             token = rmapi_file.read_text(encoding="utf-8").strip()
             if token and "YOUR" not in token:
                 return token
-        except Exception:
-            pass
+        except (OSError, UnicodeDecodeError) as e:
+            # No readable token file is the same answer as no token file.
+            logger.debug("Could not read %s: %s", rmapi_file, e, exc_info=True)
 
     return None
 
@@ -218,6 +221,10 @@ def verify_remarkable_token(token: str) -> Tuple[bool, str]:
         docs = [it for it in items if getattr(it, "Type", "") == "DocumentType"]
         return True, f"Connected to reMarkable Cloud ({len(docs)} notebooks found)"
     except Exception as e:
+        # Broad by design: this function exists to turn any failure into one
+        # sentence a person can act on. A wizard that raises is worse than a
+        # wizard that reports.
+        logger.debug("Token verification failed", exc_info=True)
         return False, f"Could not connect with token: {e}"
 
 
@@ -240,6 +247,8 @@ def pair_remarkable_device(one_time_code: str) -> Tuple[bool, str, str]:
         token = register_and_get_token(code)
         return True, token, "Successfully paired with reMarkable Cloud!"
     except Exception as e:
+        # Same contract as verify_remarkable_token: report, never raise.
+        logger.debug("Pairing failed", exc_info=True)
         return False, "", f"Pairing failed: {e}"
 
 
@@ -276,13 +285,14 @@ def verify_remarkable_ssh(
         try:
             with socket.create_connection((host, 80), timeout=0.6):
                 web_interface_active = True
-        except Exception:
+        except OSError:
+            # A closed port is one of the answers this probe is looking for.
             pass
 
         try:
             with socket.create_connection((host, port), timeout=0.6):
                 ssh_port_open = True
-        except Exception:
+        except OSError:
             pass
 
         if web_interface_active and not ssh_port_open:
@@ -301,6 +311,9 @@ def verify_remarkable_ssh(
                 "Could not establish passwordless SSH connection. Is the tablet connected via USB, awake, and 'USB web interface' toggled ON under Settings → Storage?",
             )
     except Exception as e:
+        # Broad: the diagnosis above is best-effort, and a failure to diagnose
+        # must still leave the user with a message rather than a traceback.
+        logger.debug("SSH verification failed", exc_info=True)
         return False, f"SSH connection failed: {e}"
 
 
@@ -349,6 +362,9 @@ def verify_ai_provider(
             return True, f"Verified {provider.name} — connection successful!"
         return False, f"Provider {provider.name} returned an empty response. Check your API key."
     except Exception as e:
+        # Broad: nine providers, each with its own idea of an error, and the
+        # caller wants one line of prose either way.
+        logger.debug("Provider verification failed", exc_info=True)
         return False, f"Verification failed: {e}"
 
 
@@ -458,7 +474,7 @@ def install_launch_agent(
             return False, f"Failed to load LaunchAgent: {res.stderr.strip()}"
 
         return True, f"Installed background sync (runs every {interval_seconds // 60} minutes)"
-    except Exception as e:
+    except OSError as e:
         return False, f"Could not create LaunchAgent: {e}"
 
 
@@ -479,7 +495,7 @@ def uninstall_launch_agent() -> Tuple[bool, str]:
         )
         LAUNCH_AGENT_PLIST.unlink(missing_ok=True)
         return True, "Background sync LaunchAgent removed."
-    except Exception as e:
+    except OSError as e:
         return False, f"Failed to uninstall LaunchAgent: {e}"
 
 
@@ -523,7 +539,7 @@ fi
         wrapper.write_text(script, encoding="utf-8")
         wrapper.chmod(0o755)
         return True, f"Global command 'living-ink' installed to {wrapper}"
-    except Exception as e:
+    except OSError as e:
         return False, f"Could not create global command wrapper: {e}"
 
 
