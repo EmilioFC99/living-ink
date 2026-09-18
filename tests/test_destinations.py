@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+from living_ink import safeio
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -461,3 +462,33 @@ class TestStateFilePath:
         assert migrated_path == data_dir / "processed_notebooks_Obsidian.json"
         assert migrated_path.exists()
         assert not legacy.exists()
+
+
+# =========================================================================
+# ObsidianDestination — durability of the note write
+# =========================================================================
+
+
+class TestObsidianWriteDurability:
+    """An interrupted publish must not leave a half-written note in the vault."""
+
+    def test_an_interrupted_write_preserves_the_previous_note(self, tmp_path, monkeypatch):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        assert dest.publish("Meeting Notes", "first version", []) is True
+        note = tmp_path / "Meeting Notes.md"
+        original = note.read_text(encoding="utf-8")
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(safeio.os, "replace", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            dest.publish("Meeting Notes", "second version", [])
+
+        assert note.read_text(encoding="utf-8") == original
+
+    def test_no_temporary_file_is_left_in_the_vault(self, tmp_path):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        dest.publish("Meeting Notes", "content", [])
+        # The attachments folder is expected; a leftover ".tmp" would not be.
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["Meeting Notes.md", "_attachments"]
