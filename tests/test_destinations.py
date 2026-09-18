@@ -432,36 +432,37 @@ class TestObsidianFailureReporting:
 # =========================================================================
 
 
-class TestStateFilePath:
-    """Tests for state file storage under data/ and legacy migration."""
+class TestStateLocation:
+    """Sync state lives in the data directory, and older layouts are absorbed."""
 
-    def test_state_file_in_data_dir(self, tmp_path, monkeypatch):
-        """get_state_file_path returns path inside DATA_DIR."""
-        from living_ink.pipeline import get_state_file_path
+    def _at(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory and drop any cached store."""
+        from living_ink import pipeline
 
-        monkeypatch.setattr("living_ink.pipeline.DATA_DIR", tmp_path / "data")
-        monkeypatch.setattr("living_ink.pipeline.ROOT", tmp_path)
         (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        return pipeline
 
-        path = get_state_file_path("Obsidian")
-        assert path == tmp_path / "data" / "processed_notebooks_Obsidian.json"
+    def test_the_database_lives_in_the_data_dir(self, tmp_path, monkeypatch):
+        pipeline = self._at(tmp_path, monkeypatch)
+        try:
+            assert pipeline.get_state_db_path() == tmp_path / "data" / "state.db"
+        finally:
+            pipeline.reset_state_store()
 
-    def test_legacy_state_file_auto_migration(self, tmp_path, monkeypatch):
-        """Legacy state file in ROOT is automatically moved into DATA_DIR."""
-        from living_ink.pipeline import get_state_file_path
-
+    def test_legacy_state_beside_the_checkout_is_imported(self, tmp_path, monkeypatch):
+        """State written before it moved under the data directory still counts."""
+        pipeline = self._at(tmp_path, monkeypatch)
         legacy = tmp_path / "processed_notebooks_Obsidian.json"
         legacy.write_text('{"doc1": 1}', encoding="utf-8")
-
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        monkeypatch.setattr("living_ink.pipeline.DATA_DIR", data_dir)
-        monkeypatch.setattr("living_ink.pipeline.ROOT", tmp_path)
-
-        migrated_path = get_state_file_path("Obsidian")
-        assert migrated_path == data_dir / "processed_notebooks_Obsidian.json"
-        assert migrated_path.exists()
-        assert not legacy.exists()
+        try:
+            assert pipeline.load_processed_log("Obsidian") == {"doc1": "1"}
+            assert not legacy.exists()
+        finally:
+            pipeline.reset_state_store()
 
 
 # =========================================================================
