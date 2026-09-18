@@ -325,11 +325,15 @@ class AppleNotesDestination(Destination):
                 bg.paste(pil_img)
             bg.save(opaque_path, "PNG")
             return opaque_path
-        except Exception as e:
+        except (OSError, ValueError) as e:
+            # Pillow reports an unreadable file, an unsupported mode and a
+            # failed write all as one of these. Any of them means the original
+            # is still the best thing to hand over.
             logger.warning(
                 "Failed to create opaque PNG for %s: %s. Using original.",
                 img_path.name,
                 e,
+                exc_info=True,
             )
             return img_path
 
@@ -871,8 +875,10 @@ def build_destinations(config: Dict[str, Any], settings: Settings) -> List[Desti
         try:
             destination = cls.from_config(section, settings)
         except Exception as e:
+            # Broad by contract: one misconfigured destination skips itself
+            # rather than taking the other destinations down with it.
             print(f"⚠️ Could not set up destination '{key}': {e}")
-            logger.warning("Destination '%s' failed to build: %s", key, e)
+            logger.warning("Destination '%s' failed to build: %s", key, e, exc_info=True)
             continue
 
         if destination is not None:

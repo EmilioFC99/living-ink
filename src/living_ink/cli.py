@@ -14,6 +14,7 @@ Commands:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -24,6 +25,8 @@ from typing import Any, Optional, Type
 
 from living_ink.config import ConfigurationMissing, get_config_path
 from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
+
+logger = logging.getLogger(__name__)
 
 
 class BaseCommand(ABC):
@@ -280,6 +283,10 @@ class WatchCommand(BaseCommand):
             except KeyboardInterrupt:
                 return self._stopped()
             except Exception as e:
+                # Deliberately broad. A daemon that exits on the first
+                # unexpected error is a daemon that is not running when the
+                # user needs it; the traceback goes to the log file instead.
+                logger.warning("Sync cycle failed", exc_info=True)
                 print(f"Sync failed: {e}; retrying next cycle.")
 
             try:
@@ -494,7 +501,7 @@ def collect_status(config_path: Path) -> StatusReport:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-    except Exception as e:
+    except (OSError, yaml.YAMLError) as e:
         report.config_error = str(e)
         return report
 
@@ -560,6 +567,9 @@ def collect_status(config_path: Path) -> StatusReport:
     try:
         inventory = collect_inventory()
     except Exception:
+        # Broad on purpose: whatever is wrong with the state database, the
+        # rest of the report is what the user is here to read.
+        logger.debug("Could not read the sync inventory", exc_info=True)
         inventory = []
     if inventory:
         from living_ink.state import STATUS_FAILING, STATUS_PENDING, STATUS_SYNCED

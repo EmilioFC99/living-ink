@@ -18,6 +18,14 @@ from living_ink.models import Document
 
 logger = logging.getLogger(__name__)
 
+#: Everything that can go wrong fetching and parsing one blob: the request
+#: itself, a token that could not be renewed (:meth:`renew_token` reports that
+#: as a RuntimeError), a body that is not the JSON or index format it claims to
+#: be, and an index entry missing the fields the format requires. A document
+#: made of many blobs stays usable when one of them is any of these, so they
+#: are caught where a single blob is read — and nowhere wider.
+_BLOB_ERRORS = (requests.RequestException, RuntimeError, ValueError, KeyError, IndexError)
+
 # API endpoints
 # Note: my.remarkable.com endpoints redirect to doesnotexist.remarkable.com
 # So we use webapp-prod.cloud.remarkable.engineering for auth
@@ -160,7 +168,8 @@ class RemarkableClient:
             try:
                 blob_content = self._get_file(doc_hash, f"{doc_id}.docSchema")
                 blob_entries = self._parse_index(blob_content)
-            except Exception:
+            except _BLOB_ERRORS as e:
+                logger.debug("Skipping document %s: %s", doc_id, e, exc_info=True)
                 continue
 
             # Find and fetch the metadata file
@@ -173,8 +182,8 @@ class RemarkableClient:
                     try:
                         meta_content = self._get_file(blob_entry["hash"], blob_entry["id"])
                         metadata = json.loads(meta_content.decode("utf-8"))
-                    except Exception:
-                        pass
+                    except _BLOB_ERRORS as e:
+                        logger.debug("Could not read metadata for %s: %s", doc_id, e, exc_info=True)
 
             # Skip deleted documents
             if metadata.get("deleted", False):
@@ -239,7 +248,8 @@ class RemarkableClient:
                 try:
                     file_content = self._get_file(file_hash, file_id)
                     zf.writestr(file_id, file_content)
-                except Exception:
+                except _BLOB_ERRORS as e:
+                    logger.debug("Skipping blob %s: %s", file_id, e, exc_info=True)
                     continue
 
         zip_buffer.seek(0)
@@ -254,7 +264,7 @@ class RemarkableClient:
         try:
             response = self._request(ROOT_URL)
             return response.status_code == 200
-        except Exception as e:
+        except (requests.RequestException, RuntimeError) as e:
             logger.debug(f"Cloud connection check failed: {e}")
             return False
 
@@ -286,7 +296,7 @@ class RemarkableClient:
                 try:
                     raw = self._get_file(entry["hash"], entry["id"])
                     return json.loads(raw.decode("utf-8"))
-                except Exception as e:
+                except _BLOB_ERRORS as e:
                     logger.debug(f"Could not read .content for {doc.id}: {e}")
                     return {}
         return {}
@@ -335,7 +345,7 @@ class RemarkableClient:
             if entry["id"].endswith(suffix):
                 try:
                     return self._get_file(entry["hash"], entry["id"])
-                except Exception as e:
+                except _BLOB_ERRORS as e:
                     logger.debug(f"Could not download {entry['id']}: {e}")
                     return None
         return None

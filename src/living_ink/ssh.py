@@ -26,6 +26,16 @@ from living_ink.models import Document
 
 logger = logging.getLogger(__name__)
 
+#: How this client reports a failed round trip to the tablet.
+#: :meth:`RemarkableSSHClient._ssh_command` and ``_scp_download`` turn every
+#: subprocess outcome — non-zero exit, timeout, no ``ssh`` on PATH — into a
+#: RuntimeError, and OSError covers the process failing to start at all.
+_SSH_ERRORS = (RuntimeError, OSError)
+
+#: What a metadata or content file that is not the JSON it claims to be looks
+#: like. ``json.JSONDecodeError`` and ``UnicodeDecodeError`` are both ValueError.
+_PARSE_ERRORS = (ValueError, TypeError, KeyError)
+
 # Default SSH settings for USB connection
 DEFAULT_SSH_HOST = "10.11.99.1"
 DEFAULT_SSH_USER = "root"
@@ -120,7 +130,7 @@ class SSHClient:
         try:
             self._ssh_command("echo ok", timeout=5)
             return True
-        except Exception as e:
+        except _SSH_ERRORS as e:
             logger.debug(f"SSH connection check failed: {e}")
             return False
 
@@ -152,8 +162,8 @@ class SSHClient:
                 f"done",
                 timeout=60,
             )
-        except Exception as e:
-            raise RuntimeError(f"Failed to read metadata: {e}")
+        except _SSH_ERRORS as e:
+            raise RuntimeError(f"Failed to read metadata: {e}") from e
 
         documents = []
 
@@ -222,8 +232,9 @@ class SSHClient:
 
             documents.append(doc)
 
-        except Exception as e:
-            logger.debug(f"Failed to parse metadata for {doc_id}: {e}")
+        except _PARSE_ERRORS as e:
+            # One unreadable metadata file costs one document, not the library.
+            logger.debug("Failed to parse metadata for %s: %s", doc_id, e, exc_info=True)
 
     def get_doc(self, doc_id: str) -> Optional[Document]:
         """Get a document by ID."""
@@ -242,7 +253,8 @@ class SSHClient:
         # List files in the document folder
         try:
             output = self._ssh_command(f"find '{doc_path}' -type f 2>/dev/null || true")
-        except Exception:
+        except _SSH_ERRORS as e:
+            logger.debug("Could not list %s: %s", doc_path, e, exc_info=True)
             output = ""
 
         file_list = [f.strip() for f in output.strip().split("\n") if f.strip()]
@@ -252,7 +264,9 @@ class SSHClient:
         try:
             self._ssh_command(f"test -f '{content_file}' && echo exists")
             file_list.append(content_file)
-        except Exception:
+        except _SSH_ERRORS:
+            # `test -f` exits non-zero when the file is absent, which is the
+            # ordinary case for a notebook with no content descriptor.
             pass
 
         # Also include raw PDF or EPUB files if they exist
@@ -261,7 +275,8 @@ class SSHClient:
             try:
                 self._ssh_command(f"test -f '{raw_file}' && echo exists")
                 file_list.append(raw_file)
-            except Exception:
+            except _SSH_ERRORS:
+                # Absent is the normal answer: most documents are not a PDF.
                 pass
 
         # Create zip archive
@@ -276,8 +291,8 @@ class SSHClient:
                         # Preserve subdirectory structure
                         rel_path = remote_path.replace(f"{XOCHITL_PATH}/{doc.id}/", "")
                     zf.writestr(rel_path, content)
-                except Exception as e:
-                    logger.debug(f"Failed to download {remote_path}: {e}")
+                except _SSH_ERRORS as e:
+                    logger.debug("Failed to download %s: %s", remote_path, e, exc_info=True)
                     continue
 
         zip_buffer.seek(0)
@@ -301,8 +316,8 @@ class SSHClient:
             self._ssh_command(f"test -f '{file_path}'", timeout=5)
             # Download the file
             return self._scp_download(file_path, timeout=120)
-        except Exception as e:
-            logger.debug(f"Raw file not found: {file_path}: {e}")
+        except _SSH_ERRORS as e:
+            logger.debug("Raw file not found: %s: %s", file_path, e, exc_info=True)
             return None
 
     def get_file_type(self, doc: Document) -> Optional[str]:
@@ -331,7 +346,8 @@ class SSHClient:
             content = self._scp_download(content_file, timeout=10)
             data = json.loads(content.decode("utf-8"))
             file_type = data.get("fileType")
-        except Exception:
+        except (*_SSH_ERRORS, *_PARSE_ERRORS) as e:
+            logger.debug("Could not read the file type for %s: %s", doc.id, e, exc_info=True)
             file_type = None
 
         self._file_type_cache[doc.id] = file_type
@@ -358,7 +374,8 @@ class SSHClient:
             tags = extract_tags_from_dict(data)
             doc.tags = tags
             return list(tags)
-        except Exception:
+        except (*_SSH_ERRORS, *_PARSE_ERRORS) as e:
+            logger.debug("Could not read tags for %s: %s", doc.id, e, exc_info=True)
             return []
 
     def get_all_file_types(self) -> dict[str, Optional[str]]:
@@ -410,8 +427,10 @@ class SSHClient:
                 except json.JSONDecodeError:
                     self._file_type_cache[current_id] = None
 
-        except Exception as e:
-            logger.warning(f"Failed to batch-load file types: {e}")
+        except (*_SSH_ERRORS, *_PARSE_ERRORS) as e:
+            # The caller falls back to a per-document probe, so a failed batch
+            # is slow rather than fatal.
+            logger.warning("Failed to batch-load file types: %s", e, exc_info=True)
 
         return self._file_type_cache
 
