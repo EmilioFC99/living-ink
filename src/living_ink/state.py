@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 #: Bumped whenever the schema changes; drives the migration ladder in _migrate.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Name of the database inside the data directory.
 DB_FILENAME = "state.db"
@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS documents (
     version        TEXT,
     last_modified  TEXT,
     seen_at        TEXT NOT NULL,
-    seen_run_id    INTEGER REFERENCES runs(id)
+    seen_run_id    INTEGER REFERENCES runs(id),
+    last_error     TEXT,
+    last_error_at  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS publications (
@@ -85,6 +87,28 @@ CREATE TABLE IF NOT EXISTS pages (
     PRIMARY KEY (doc_id, page_index)
 );
 """
+
+#: Columns added to a table after its first release. ``CREATE TABLE IF NOT
+#: EXISTS`` cannot add a column to a database that already has the table, so
+#: every column introduced later has to be listed here as well as in
+#: :data:`_SCHEMA`, and is applied with an ALTER on open.
+_ADDED_COLUMNS = {
+    "documents": {
+        "last_error": "TEXT",
+        "last_error_at": "TEXT",
+    },
+}
+
+#: A document has been published to every destination that wants it, at its
+#: current version.
+STATUS_SYNCED = "synced"
+
+#: A document is new, or has changed since it was last published somewhere.
+STATUS_PENDING = "pending"
+
+#: The last attempt at this document ended in an error that was never followed
+#: by a success.
+STATUS_FAILING = "failing"
 
 
 def _now() -> str:
@@ -152,7 +176,21 @@ class StateStore:
                     f"(schema {current}, this build understands {SCHEMA_VERSION})."
                 )
             self._conn.executescript(_SCHEMA)
+            self._add_missing_columns()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    def _add_missing_columns(self) -> None:
+        """Bring an older database's tables up to the current column list.
+
+        Additive only. A column that is already there is left alone, so this
+        is safe to run against a fresh database and against one written by any
+        earlier version.
+        """
+        for table, columns in _ADDED_COLUMNS.items():
+            present = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns.items():
+                if name not in present:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -308,6 +346,35 @@ class StateStore:
         rows = self._conn.execute("SELECT * FROM documents ORDER BY seen_at DESC").fetchall()
         return [dict(row) for row in rows]
 
+    def record_failure(self, doc_id: str, message: str) -> None:
+        """Remember that the last attempt at a document did not work.
+
+        Kept on the document rather than in a log table because the only
+        question anyone asks is "what is broken right now", and the previous
+        failure stops mattering the moment a newer one replaces it.
+
+        Args:
+            doc_id: reMarkable document id.
+            message: Short description of what went wrong.
+        """
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE documents SET last_error = ?, last_error_at = ? WHERE id = ?",
+                (message, _now(), doc_id),
+            )
+
+    def clear_failure(self, doc_id: str) -> None:
+        """Forget a document's recorded failure after it succeeds.
+
+        Args:
+            doc_id: reMarkable document id.
+        """
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE documents SET last_error = NULL, last_error_at = NULL WHERE id = ?",
+                (doc_id,),
+            )
+
     # --- publications -----------------------------------------------------
 
     def published_versions(self, destination: str) -> Dict[str, str]:
@@ -419,6 +486,62 @@ class StateStore:
             else:
                 cursor = conn.execute("DELETE FROM publications WHERE doc_id = ?", (doc_id,))
             return cursor.rowcount
+
+    def all_publications(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Return every publication row, grouped by document.
+
+        One query instead of one per document, because the caller building an
+        inventory needs all of them at once.
+
+        Returns:
+            Mapping of document id to {destination: publication columns}.
+        """
+        grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for row in self._conn.execute("SELECT * FROM publications"):
+            record = dict(row)
+            grouped.setdefault(record["doc_id"], {})[record["destination"]] = record
+        return grouped
+
+    def sync_overview(self, destinations: List[str]) -> List[Dict[str, Any]]:
+        """Describe where every known document stands against each destination.
+
+        This is the join the old per-destination JSON files could not do: a
+        document is only ``synced`` once every destination that wants it holds
+        its current version, and one destination lagging is enough to make it
+        ``pending``.
+
+        Args:
+            destinations: Destination class names that are currently enabled.
+                A destination that was disabled since the last sync is ignored
+                rather than counted as missing.
+
+        Returns:
+            One dict per document — its columns plus ``status``, ``pending``
+            (the destinations still owing it) and ``published`` (destination
+            to the version it holds) — in the order
+            :meth:`all_documents` returns them.
+        """
+        publications = self.all_publications()
+        overview: List[Dict[str, Any]] = []
+
+        for document in self.all_documents():
+            published = {
+                name: row["version"] for name, row in publications.get(document["id"], {}).items()
+            }
+            pending = [name for name in destinations if published.get(name) != document["version"]]
+
+            if document.get("last_error"):
+                status = STATUS_FAILING
+            elif pending:
+                status = STATUS_PENDING
+            else:
+                status = STATUS_SYNCED
+
+            overview.append(
+                {**document, "status": status, "pending": pending, "published": published}
+            )
+
+        return overview
 
     # --- pages ------------------------------------------------------------
 

@@ -1357,6 +1357,7 @@ class SyncPipeline:
         except _StopProcessing as stop:
             if stop.reason:
                 log(stop.reason)
+            self._record_outcome(job, stop.success, stop.reason)
             return stop.success
 
         if success:
@@ -1365,7 +1366,34 @@ class SyncPipeline:
         else:
             log(f"Notebook {job.notebook} processing FAILED.")
 
+        self._record_outcome(job, success, None if success else "Processing failed.")
         return success
+
+    def _record_outcome(self, job: DocumentJob, success: bool, reason: Optional[str]) -> None:
+        """Remember whether this document worked, so ``list`` can report it.
+
+        A success clears any earlier failure: the document is no longer broken
+        and saying otherwise would send the user chasing a problem that fixed
+        itself.
+
+        Best-effort and never fatal — a sync that cannot write a note about a
+        failure has still done the sync.
+
+        Args:
+            job: The document just attempted.
+            success: Whether it finished cleanly.
+            reason: What went wrong, when it did not.
+        """
+        if self.dry_run:
+            return
+        try:
+            store = get_state_store()
+            if success:
+                store.clear_failure(job.notebook_id)
+            else:
+                store.record_failure(job.notebook_id, redact(reason or "Processing failed."))
+        except Exception as e:
+            log(f"⚠️ Could not record the outcome for {job.notebook_id}: {e}")
 
     # ── Stage 1: identify ────────────────────────────────────────────────
 
