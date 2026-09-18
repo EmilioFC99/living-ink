@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Type
 
 from PIL import Image
 
+from living_ink import notemerge
 from living_ink.safeio import write_text_atomic
 from living_ink.settings import Settings
 
@@ -664,20 +665,16 @@ class ObsidianDestination(Destination):
                     image_links.append(f"- [[{img_link_target}|{label}]]")
 
             # 5. Build Markdown Content
-            md_lines = []
+            note_path = target_dir / f"{safe_name}.md"
+            existing = notemerge.read_existing(note_path)
+            existing_front, _ = notemerge.split_frontmatter(existing or "")
 
             # --- YAML Frontmatter ---
             today_str = datetime.date.today().isoformat()
-            md_lines.append("---")
-            md_lines.append(f"created: {today_str}")
-            md_lines.append(f"source: Remarkable/{source_path}")
-
+            doc_type = None
             combined_tags = ["remarkable"]
             if document_path and document_path.exists():
                 doc_type = document_path.suffix.lstrip(".").lower()
-                md_lines.append(f"type: {doc_type}")
-                if doc_link_target:
-                    md_lines.append(f'document: "[[{doc_link_target}]]"')
                 combined_tags.append(doc_type)
             else:
                 combined_tags.append("handwritten")
@@ -688,18 +685,26 @@ class ObsidianDestination(Destination):
                     if clean_t and clean_t.lower() not in [ct.lower() for ct in combined_tags]:
                         combined_tags.append(clean_t)
 
-            md_lines.append("tags:")
-            for t in combined_tags:
-                md_lines.append(f"  - {t}")
-            md_lines.append("---")
-            md_lines.append("")
+            owned = notemerge.owned_frontmatter_lines(
+                {
+                    # Kept from the note that is already there. Regenerating it
+                    # from today's date is what made `created` silently mean
+                    # "last synced" on every note that had ever been re-synced.
+                    "created": notemerge.frontmatter_value(existing_front, "created") or today_str,
+                    "updated": today_str,
+                    "source": f"Remarkable/{source_path}",
+                    "type": doc_type,
+                    "document": f'"[[{doc_link_target}]]"' if doc_link_target else None,
+                    "tags": combined_tags,
+                }
+            )
 
-            # --- Text Content ---
+            # --- Generated body ---
+            md_lines = []
             if text_content.strip():
                 md_lines.append(text_content.strip())
                 md_lines.append("")
 
-            # --- Attachments ---
             if image_links:
                 md_lines.append("---")
                 md_lines.append("")
@@ -708,16 +713,14 @@ class ObsidianDestination(Destination):
                     md_lines.append(link)
                 md_lines.append("")
 
-            final_md = "\n".join(md_lines)
-
             # 6. Write Note File
-            note_path = target_dir / f"{safe_name}.md"
+            final_md = notemerge.render(owned, "\n".join(md_lines), existing)
             # Written in one step: a note half-replaced by an interrupted sync
             # is indistinguishable from a transcription that came back
             # truncated, so the user would have no reason to suspect a crash.
             write_text_atomic(note_path, final_md)
 
-            logger.info("Obsidian note created at: %s", note_path)
+            logger.info("Obsidian note written at: %s", note_path)
             return True
 
         except (OSError, shutil.Error) as e:
