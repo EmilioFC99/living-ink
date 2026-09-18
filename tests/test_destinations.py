@@ -742,3 +742,146 @@ class TestObsidianNoteIdentity:
         dest.publish("Notes", "second", [page], doc_id="doc-2")
 
         assert (tmp_path / "_attachments" / "Notes (2)" / "page-1.png").exists()
+
+
+class TestObsidianRenamesAndMoves:
+    """A notebook renamed on the tablet keeps its note instead of growing a second."""
+
+    def _dest(self, tmp_path, **kwargs):
+        return ObsidianDestination(vault_path=str(tmp_path), **kwargs)
+
+    def test_a_renamed_notebook_moves_its_note(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Old Name", "body", [], doc_id="doc-1")
+
+        dest.publish("New Name", "body", [], doc_id="doc-1", existing_target="Old Name.md")
+
+        assert (tmp_path / "New Name.md").exists()
+        assert not (tmp_path / "Old Name.md").exists()
+
+    def test_the_moved_note_keeps_what_the_user_added(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Old Name", "v1", [], doc_id="doc-1")
+        old = tmp_path / "Old Name.md"
+        old.write_text(
+            old.read_text(encoding="utf-8") + "\n## Mine\n\n- Keep me\n", encoding="utf-8"
+        )
+
+        dest.publish("New Name", "v2", [], doc_id="doc-1", existing_target="Old Name.md")
+
+        assert "- Keep me" in (tmp_path / "New Name.md").read_text(encoding="utf-8")
+
+    def test_a_moved_notebook_follows_its_folder(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "body", [], sub_folder="Work", doc_id="doc-1")
+
+        dest.publish(
+            "Notes",
+            "body",
+            [],
+            sub_folder="Archive",
+            doc_id="doc-1",
+            existing_target="Work/Notes.md",
+        )
+
+        assert (tmp_path / "Archive" / "Notes.md").exists()
+        assert not (tmp_path / "Work" / "Notes.md").exists()
+
+    def test_the_attachments_move_with_the_note(self, tmp_path):
+        page = tmp_path / "page-1.png"
+        page.write_bytes(b"png")
+        dest = self._dest(tmp_path, attachments_folder="_attachments")
+        dest.publish("Old Name", "body", [page], doc_id="doc-1")
+
+        dest.publish("New Name", "body", [page], doc_id="doc-1", existing_target="Old Name.md")
+
+        assert (tmp_path / "_attachments" / "New Name" / "page-1.png").exists()
+        assert not (tmp_path / "_attachments" / "Old Name").exists()
+
+    def test_another_documents_note_is_not_dragged_along(self, tmp_path):
+        """A stale recorded path must never move a note that is not ours."""
+        dest = self._dest(tmp_path)
+        dest.publish("Theirs", "their body", [], doc_id="doc-2")
+
+        dest.publish("Mine", "my body", [], doc_id="doc-1", existing_target="Theirs.md")
+
+        assert "their body" in (tmp_path / "Theirs.md").read_text(encoding="utf-8")
+        assert (tmp_path / "Mine.md").exists()
+
+    def test_a_note_already_at_the_new_path_is_not_overwritten(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Old Name", "mine", [], doc_id="doc-1")
+        (tmp_path / "New Name.md").write_text("# Somebody else\n", encoding="utf-8")
+
+        dest.publish("New Name", "mine", [], doc_id="doc-1", existing_target="Old Name.md")
+
+        assert "Somebody else" in (tmp_path / "New Name.md").read_text(encoding="utf-8")
+
+    def test_a_recorded_path_that_no_longer_exists_is_harmless(self, tmp_path):
+        dest = self._dest(tmp_path)
+        assert dest.publish("Notes", "body", [], doc_id="doc-1", existing_target="Gone.md") is True
+        assert (tmp_path / "Notes.md").exists()
+
+    def test_the_new_location_is_reported(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Old Name", "body", [], doc_id="doc-1")
+        dest.publish("New Name", "body", [], doc_id="doc-1", existing_target="Old Name.md")
+        assert dest.last_target == "New Name.md"
+
+
+class TestObsidianUnpublish:
+    """Deleting a note is refused unless the note is provably ours."""
+
+    def _dest(self, tmp_path, **kwargs):
+        return ObsidianDestination(vault_path=str(tmp_path), **kwargs)
+
+    def test_our_own_note_is_deleted(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "body", [], doc_id="doc-1")
+
+        assert dest.unpublish(target="Notes.md", doc_id="doc-1") is True
+        assert not (tmp_path / "Notes.md").exists()
+
+    def test_the_attachments_go_too(self, tmp_path):
+        page = tmp_path / "page-1.png"
+        page.write_bytes(b"png")
+        dest = self._dest(tmp_path, attachments_folder="_attachments")
+        dest.publish("Notes", "body", [page], doc_id="doc-1")
+
+        dest.unpublish(target="Notes.md", doc_id="doc-1")
+        assert not (tmp_path / "_attachments" / "Notes").exists()
+
+    def test_another_documents_note_is_left_alone(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "body", [], doc_id="doc-2")
+
+        assert dest.unpublish(target="Notes.md", doc_id="doc-1") is False
+        assert (tmp_path / "Notes.md").exists()
+
+    def test_a_note_with_no_id_is_left_alone(self, tmp_path):
+        """A hand-written note is unrecoverable; never delete on a path alone."""
+        (tmp_path / "Notes.md").write_text("# Mine\n", encoding="utf-8")
+
+        assert self._dest(tmp_path).unpublish(target="Notes.md", doc_id="doc-1") is False
+        assert (tmp_path / "Notes.md").exists()
+
+    def test_a_note_that_is_already_gone_is_not_an_error(self, tmp_path):
+        assert self._dest(tmp_path).unpublish(target="Gone.md", doc_id="doc-1") is False
+
+    def test_nothing_happens_without_a_target(self, tmp_path):
+        assert self._dest(tmp_path).unpublish(doc_id="doc-1") is False
+
+
+class TestUnpublishDefault:
+    """A destination that cannot prove which note is which deletes none."""
+
+    def test_the_base_class_refuses(self):
+        class Bare(Destination):
+            @classmethod
+            def from_config(cls, section, settings):
+                return cls()
+
+            def publish(self, notebook_name, text_content, image_paths, **kwargs):
+                return True
+
+        assert Bare().unpublish(target="x", external_id="y", doc_id="z") is False
