@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover - only needed for annotations
+    from living_ink.state import StateStore
+    from living_ink.transport import DeviceInfo, RemarkableTransport
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +90,115 @@ def profile_for(machine: str) -> DeviceProfile:
         DEFAULT_PROFILE.name,
     )
     return DEFAULT_PROFILE
+
+
+#: A reading taken live from the tablet over USB. Authoritative.
+SOURCE_USB = "usb"
+
+#: A reading a past USB session took and the state store kept.
+SOURCE_REMEMBERED = "remembered"
+
+#: No reading has ever been taken; :data:`DEFAULT_PROFILE` is standing in.
+SOURCE_DEFAULT = "default"
+
+
+@dataclass(frozen=True)
+class DeviceReading:
+    """What Living Ink believes it is syncing with, and how sure it is.
+
+    Attributes:
+        info: The device itself.
+        source: One of :data:`SOURCE_USB`, :data:`SOURCE_REMEMBERED` or
+            :data:`SOURCE_DEFAULT`.
+        learned_at: ISO timestamp of the USB session that produced a
+            remembered reading. Empty for the other two sources.
+    """
+
+    info: DeviceInfo
+    source: str
+    learned_at: str = ""
+
+    def describe(self) -> str:
+        """Render the reading as one line for ``status``.
+
+        Returns:
+            The device description, followed by where the belief came from. A
+            remembered reading says so, and carries its date, because claiming
+            a live reading for a tablet that is not plugged in would make a
+            stale geometry impossible to spot.
+        """
+        base = self.info.describe()
+        if self.source == SOURCE_USB:
+            return base
+        if self.source == SOURCE_REMEMBERED:
+            when = f", {self.learned_at[:10]}" if self.learned_at else ""
+            return f"{base} (remembered from USB{when})"
+        return f"{base} (assumed — connect over USB to confirm)"
+
+
+def default_reading() -> DeviceReading:
+    """Return the reading used when nothing has ever been learned.
+
+    Returns:
+        :data:`DEFAULT_PROFILE`, marked :data:`SOURCE_DEFAULT` so every caller
+        can tell a guess from a measurement.
+    """
+    from living_ink.transport import DeviceInfo
+
+    return DeviceReading(
+        info=DeviceInfo(
+            model=DEFAULT_PROFILE.name,
+            firmware="",
+            screen=DEFAULT_PROFILE.screen,
+            color=DEFAULT_PROFILE.color,
+        ),
+        source=SOURCE_DEFAULT,
+    )
+
+
+def resolve_device(
+    transport: Optional["RemarkableTransport"] = None,
+    store: Optional["StateStore"] = None,
+) -> DeviceReading:
+    """Work out which tablet this is, preferring evidence over assumption.
+
+    Only USB SSH can see the hardware, and most runs are Cloud-only, so the
+    order is: ask the tablet if it can answer, otherwise use what a past USB
+    session taught us, otherwise fall back to the named default. A live reading
+    is written back to the store, which is the whole point — one USB session is
+    enough to make every later Cloud-only run right.
+
+    Args:
+        transport: Transport to ask. May be None, or may not support the call.
+        store: State store to read the memory from and write a live reading to.
+            May be None, in which case nothing is remembered.
+
+    Returns:
+        The best available reading, never None.
+    """
+    from living_ink.transport import DeviceInfo, UnsupportedOperation
+
+    if transport is not None:
+        try:
+            info = transport.get_device_info()
+        except (UnsupportedOperation, RuntimeError, OSError) as e:
+            # Not an error: a Cloud-only setup is a supported setup. The
+            # memory below is exactly what covers it.
+            logger.debug("No live device reading: %s", e)
+        else:
+            # Checked rather than trusted: this value is about to be written to
+            # a durable store and used as render geometry, and a transport that
+            # answers with something else should not poison either.
+            if isinstance(info, DeviceInfo):
+                if store is not None:
+                    store.remember_device(info)
+                return DeviceReading(info=info, source=SOURCE_USB)
+            logger.debug("Transport returned %r rather than a DeviceInfo.", type(info))
+
+    if store is not None:
+        remembered = store.recall_device()
+        if remembered is not None:
+            info, learned_at = remembered
+            return DeviceReading(info=info, source=SOURCE_REMEMBERED, learned_at=learned_at)
+
+    return default_reading()

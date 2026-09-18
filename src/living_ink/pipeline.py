@@ -41,6 +41,7 @@ from living_ink.destinations import (
     DestinationError,
     build_destinations,
 )
+from living_ink.devices import default_reading
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
     FAILED,
@@ -1173,6 +1174,10 @@ class SyncPipeline:
         self.options = options or SyncOptions()
         opts = self.options
 
+        # Filled in by _learn_device once the transport is up. Until then the
+        # named default stands in, so nothing downstream has to handle None.
+        self.device = default_reading()
+
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = opts.dry_run
@@ -1302,6 +1307,30 @@ class SyncPipeline:
         from living_ink.api import get_rmapi
 
         return get_rmapi(self.settings)
+
+    def _learn_device(self, client: Any) -> None:
+        """Identify the tablet once per run, and remember a USB reading.
+
+        Runs for its side effect: a run that reaches the hardware banks what it
+        saw, so every later Cloud-only run knows the model and geometry without
+        the cable. Never fatal — a sync that cannot name the tablet still syncs.
+
+        Args:
+            client: The connected transport.
+        """
+        from living_ink.devices import SOURCE_USB, resolve_device
+
+        try:
+            reading = resolve_device(client, get_state_store())
+        except (RuntimeError, OSError) as e:
+            _logger.debug("Could not identify the device: %s", e, exc_info=True)
+            return
+
+        self.device = reading
+        if reading.source == SOURCE_USB:
+            log(f"📱 {reading.describe()}")
+        else:
+            _logger.info("Device: %s", reading.describe())
 
     def discover_documents(self, client: Any) -> Tuple[List[Any], Dict[str, Any]]:
         """Discover documents in the tablet library matching configured document types.
@@ -2602,6 +2631,7 @@ class SyncPipeline:
         atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
 
         client = self.connect()
+        self._learn_device(client)
         notebooks, id_map = self.discover_documents(client)
         self._counts = (len(notebooks), 0, 0)
         self._handle_orphans(id_map)

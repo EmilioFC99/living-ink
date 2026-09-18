@@ -1088,20 +1088,58 @@ class TestInterruptExitCode:
 class TestDeviceLineInStatus:
     """Naming the tablet is useful; failing to name it must not break status."""
 
-    def test_an_unreachable_tablet_degrades_to_silence(self):
-        """A health check that cannot identify the model is still a health check."""
+    @pytest.fixture
+    def empty_store(self, tmp_path):
+        """Point the device memory at a throwaway database.
+
+        Without this the status probe would read — and a USB reading would
+        write — the developer's own ``state.db``.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+
+        Yields:
+            The open StateStore backing the memory for this test.
+        """
+        from living_ink.state import StateStore
+
+        store = StateStore(tmp_path / "state.db")
+        with patch("living_ink.pipeline.get_state_store", return_value=store):
+            yield store
+
+    def test_an_unreachable_tablet_falls_back_to_the_named_default(self, empty_store):
+        """A guess is fine as long as it says it is one."""
         with patch("living_ink.ssh.create_ssh_client") as mock_create:
             mock_create.return_value.get_device_info.side_effect = RuntimeError("no route")
-            assert _describe_connected_device("10.11.99.1", 22, "root") == ""
+            described = _describe_connected_device("10.11.99.1", 22, "root")
 
-    def test_a_transport_that_cannot_see_hardware_degrades_too(self):
+        assert described == "reMarkable 2 (1404×1872) (assumed — connect over USB to confirm)"
+
+    def test_a_transport_that_cannot_see_hardware_falls_back_too(self, empty_store):
         from living_ink.transport import UnsupportedOperation
 
         with patch("living_ink.ssh.create_ssh_client") as mock_create:
             mock_create.return_value.get_device_info.side_effect = UnsupportedOperation("no")
-            assert _describe_connected_device("10.11.99.1", 22, "root") == ""
+            described = _describe_connected_device("10.11.99.1", 22, "root")
 
-    def test_a_reachable_tablet_is_described_in_one_line(self):
+        assert "assumed" in described
+
+    def test_a_usb_reading_is_remembered_for_the_next_cloud_only_run(self, empty_store):
+        """The whole point: one USB session teaches every later run."""
+        from living_ink.transport import DeviceInfo
+
+        with patch("living_ink.ssh.create_ssh_client") as mock_create:
+            mock_create.return_value.get_device_info.return_value = DeviceInfo(
+                "reMarkable Paper Pro", "3.20.0", (1620, 2160), color=True
+            )
+            _describe_connected_device("10.11.99.1", 22, "root")
+
+        # Second call, no cable: the answer survives, and says where it is from.
+        described = _describe_connected_device("10.11.99.1", 22, "root", live=False)
+        assert described.startswith("reMarkable Paper Pro firmware 3.20.0 (1620×2160)")
+        assert "remembered from USB" in described
+
+    def test_a_reachable_tablet_is_described_in_one_line(self, empty_store):
         from living_ink.transport import DeviceInfo
 
         with patch("living_ink.ssh.create_ssh_client") as mock_create:
@@ -1112,8 +1150,8 @@ class TestDeviceLineInStatus:
 
         assert described == "reMarkable 2 firmware 3.5.2 (1404×1872)"
 
-    def test_a_cloud_only_setup_prints_no_device_line(self, tmp_path, capsys):
-        """No model is better than a guessed one."""
+    def test_a_cloud_only_setup_names_the_assumption(self, tmp_path, capsys, empty_store):
+        """A guessed model is fine on screen; an unlabelled guess is not."""
         cfg_dir = tmp_path / "config"
         cfg_dir.mkdir()
         (cfg_dir / "config.yml").write_text(
@@ -1122,4 +1160,6 @@ class TestDeviceLineInStatus:
         with patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK")):
             StatusCommand(root=tmp_path).run(MagicMock(json=False))
 
-        assert "Device:" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "Device:" in out
+        assert "assumed" in out

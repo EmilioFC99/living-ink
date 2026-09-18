@@ -1593,6 +1593,7 @@ class TestProgressIsRecordedPerNotebook:
 
         monkeypatch.setattr(pipe, "process_notebook_item", process)
         monkeypatch.setattr(pipe, "connect", lambda: object())
+        monkeypatch.setattr(pipe, "_learn_device", lambda client: None)
         monkeypatch.setattr(pipe, "discover_documents", lambda c: (["a", "bad", "c"], {}))
         monkeypatch.setattr(pipe, "_handle_orphans", lambda id_map: None)
         monkeypatch.setattr(pipe, "filter_pending_documents", lambda nbs, id_map: (nbs, {}, True))
