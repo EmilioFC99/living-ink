@@ -359,3 +359,69 @@ class TestRenderFingerprintCoversTheGuards:
 
         renderer_fingerprint.cache_clear()
         assert before != after
+
+
+class TestBreadcrumbsOnlyReadPdfs:
+    """An EPUB has no PDF outline; opening it only produces MuPDF noise."""
+
+    def test_an_epub_is_never_opened(self, tmp_path, monkeypatch):
+        epub = tmp_path / "book.epub"
+        epub.write_bytes(b"not really an epub")
+
+        opened = []
+        monkeypatch.setattr(
+            extract, "_get_pdf_toc_entries", lambda p: opened.append(p) or [(1, "Ch", 1)]
+        )
+
+        assert extract.get_pdf_toc_breadcrumbs(1, epub) == []
+        assert opened == []
+
+    def test_a_missing_pdf_is_never_opened(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            extract, "_get_pdf_toc_entries", lambda p: pytest.fail("should not open")
+        )
+        assert extract.get_pdf_toc_breadcrumbs(1, tmp_path / "gone.pdf") == []
+
+    def test_a_pdf_is_still_read(self, tmp_path, monkeypatch):
+        pdf = tmp_path / "book.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        monkeypatch.setattr(extract, "_get_pdf_toc_entries", lambda p: [(1, "Chapter 1", 1)])
+
+        assert extract.get_pdf_toc_breadcrumbs(1, pdf) == ["Chapter 1"]
+
+
+class TestQuietMupdf:
+    """MuPDF writes from C, past logging; its chatter belongs in the debug log."""
+
+    def test_display_is_off_inside_and_restored_after(self):
+        import pymupdf as fitz
+
+        before = fitz.TOOLS.mupdf_display_errors()
+        with extract.quiet_mupdf():
+            assert fitz.TOOLS.mupdf_display_errors() is False
+            assert fitz.TOOLS.mupdf_display_warnings() is False
+        assert fitz.TOOLS.mupdf_display_errors() == before
+
+    def test_display_is_restored_even_when_the_body_raises(self):
+        import pymupdf as fitz
+
+        before = fitz.TOOLS.mupdf_display_errors()
+        with pytest.raises(ValueError):
+            with extract.quiet_mupdf():
+                raise ValueError("boom")
+        assert fitz.TOOLS.mupdf_display_errors() == before
+
+    def test_what_mupdf_said_is_logged_not_dropped(self, tmp_path, caplog):
+        import pymupdf as fitz
+
+        broken = tmp_path / "broken.pdf"
+        broken.write_bytes(b"%PDF-1.4\nnot a real pdf at all\n")
+
+        with caplog.at_level("DEBUG", logger="living_ink.extract"):
+            with extract.quiet_mupdf():
+                try:
+                    fitz.open(str(broken)).close()
+                except Exception:
+                    pass
+
+        assert any("MuPDF said" in record.message for record in caplog.records)
