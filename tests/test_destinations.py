@@ -5,12 +5,14 @@ and ObsidianDestination including full folder mirroring, root folder
 configuration, attachment handling, and filename sanitization.
 """
 
+import datetime
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
 
-from living_ink import safeio
+from living_ink import notemerge, safeio
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -493,3 +495,76 @@ class TestObsidianWriteDurability:
         dest.publish("Meeting Notes", "content", [])
         # The attachments folder is expected; a leftover ".tmp" would not be.
         assert sorted(p.name for p in tmp_path.iterdir()) == ["Meeting Notes.md", "_attachments"]
+
+
+class TestObsidianPreservesUserEdits:
+    """A sync used to replace the whole note, discarding anything you added."""
+
+    def _publish(self, tmp_path, text="Transcript v1"):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        assert dest.publish("Meeting Notes", text, []) is True
+        return dest, tmp_path / "Meeting Notes.md"
+
+    def test_notes_below_the_transcript_survive_a_resync(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        note.write_text(
+            note.read_text(encoding="utf-8") + "\n## My action items\n\n- Email Dana\n",
+            encoding="utf-8",
+        )
+
+        dest.publish("Meeting Notes", "Transcript v2", [])
+
+        written = note.read_text(encoding="utf-8")
+        assert "- Email Dana" in written
+        assert "Transcript v2" in written
+        assert "Transcript v1" not in written
+
+    def test_a_user_frontmatter_key_survives_a_resync(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        note.write_text(
+            note.read_text(encoding="utf-8").replace("---\n", "---\naliases:\n  - Standup\n", 1),
+            encoding="utf-8",
+        )
+
+        dest.publish("Meeting Notes", "Transcript v2", [])
+        assert "  - Standup" in note.read_text(encoding="utf-8")
+
+    def test_a_note_written_by_someone_else_is_not_destroyed(self, tmp_path):
+        """A title collision used to silently delete an unrelated note."""
+        note = tmp_path / "Meeting Notes.md"
+        note.write_text("# My own note\n\nDo not delete this.\n", encoding="utf-8")
+
+        ObsidianDestination(vault_path=str(tmp_path)).publish("Meeting Notes", "Transcript", [])
+
+        written = note.read_text(encoding="utf-8")
+        assert "Do not delete this." in written
+        assert "Transcript" in written
+
+    def test_the_creation_date_stops_meaning_last_synced(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        note.write_text(
+            re.sub(r"created: .*", "created: 2020-01-01", note.read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+
+        dest.publish("Meeting Notes", "Transcript v2", [])
+
+        written = note.read_text(encoding="utf-8")
+        assert "created: 2020-01-01" in written
+        assert f"updated: {datetime.date.today().isoformat()}" in written
+
+    def test_a_new_note_gets_both_dates(self, tmp_path):
+        _, note = self._publish(tmp_path)
+        today = datetime.date.today().isoformat()
+        written = note.read_text(encoding="utf-8")
+        assert f"created: {today}" in written
+        assert f"updated: {today}" in written
+
+    def test_resyncing_does_not_stack_transcripts(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        for version in range(2, 5):
+            dest.publish("Meeting Notes", f"Transcript v{version}", [])
+
+        written = note.read_text(encoding="utf-8")
+        assert written.count(notemerge.MANAGED_BEGIN) == 1
+        assert written.count("Transcript v") == 1
