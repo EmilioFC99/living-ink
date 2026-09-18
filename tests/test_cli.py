@@ -912,12 +912,18 @@ class TestCacheCommand:
 
     @pytest.fixture
     def cache(self, tmp_path, monkeypatch):
-        """A real cache in a throwaway directory, wired into the command."""
+        """A real transcript cache in a throwaway directory, wired into the command.
+
+        The render cache is redirected alongside it so the command never reads
+        the developer's own.
+        """
         from living_ink import cli as cli_module
-        from living_ink.cache import TranscriptCache
+        from living_ink.cache import RenderCache, TranscriptCache
 
         built = TranscriptCache(tmp_path / "transcripts")
+        renders = RenderCache(tmp_path / "renders")
         monkeypatch.setattr(cli_module, "transcript_cache", lambda: built)
+        monkeypatch.setattr(cli_module, "render_cache", lambda: renders)
         return built
 
     def _run(self, capsys, **flags):
@@ -943,7 +949,7 @@ class TestCacheCommand:
         _, out = self._run(capsys)
         assert str(cache.root) in out
 
-    def test_a_disabled_cache_says_so(self, tmp_path, monkeypatch, capsys):
+    def test_a_disabled_cache_says_so(self, cache, tmp_path, monkeypatch, capsys):
         from living_ink import cli as cli_module
         from living_ink.cache import TranscriptCache
 
@@ -952,10 +958,15 @@ class TestCacheCommand:
         _, out = self._run(capsys)
         assert "disabled" in out
 
+    def test_both_caches_are_reported(self, cache, capsys):
+        _, out = self._run(capsys)
+        assert "transcribed page" in out
+        assert "rendered page" in out
+
     def test_json_reports_the_same_numbers(self, cache, capsys):
         cache.put("aa", "raw", "clean")
         _, out = self._run(capsys, json=True)
-        payload = json.loads(out)
+        payload = json.loads(out)["transcribed page"]
         assert payload["entries"] == 1
         assert payload["size_bytes"] > 0
 
@@ -963,7 +974,7 @@ class TestCacheCommand:
         cache.put("aa", "raw", "clean")
         code, out = self._run(capsys, clear=True)
         assert code == 0
-        assert "1 cached page(s)" in out
+        assert "1 cached transcribed page(s)" in out
         assert cache.stats() == (0, 0)
 
     def test_clearing_warns_that_the_pages_will_be_paid_for_again(self, cache, capsys):
@@ -974,7 +985,7 @@ class TestCacheCommand:
     def test_pruning_keeps_fresh_entries(self, cache, capsys):
         cache.put("aa", "raw", "clean")
         _, out = self._run(capsys, prune=30)
-        assert "0 cached page(s)" in out
+        assert "0 cached transcribed page(s)" in out
         assert cache.get("aa") is not None
 
     def test_pruning_drops_stale_entries(self, cache, capsys):
@@ -986,7 +997,7 @@ class TestCacheCommand:
         os.utime(cache._path_for("aa"), (old, old))
 
         _, out = self._run(capsys, prune=90)
-        assert "1 cached page(s)" in out
+        assert "1 cached transcribed page(s)" in out
         assert cache.get("aa") is None
 
     def test_a_bare_prune_uses_the_configured_age(self, cache, capsys):
@@ -996,3 +1007,7 @@ class TestCacheCommand:
     def test_reading_the_cache_does_not_create_it(self, cache, capsys):
         self._run(capsys)
         assert not cache.root.exists()
+
+    def test_clearing_reports_the_render_cache_too(self, cache, capsys):
+        _, out = self._run(capsys, clear=True)
+        assert "0 cached rendered page(s)" in out

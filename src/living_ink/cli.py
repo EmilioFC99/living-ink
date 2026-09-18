@@ -10,7 +10,7 @@ Commands:
     living-ink status        Display connection, vault, and sync service status
     living-ink list          Show which documents are synced, pending, or failing
     living-ink state         Inspect, reset, or check the sync state database
-    living-ink cache         Show, prune, or clear the transcription cache
+    living-ink cache         Show, prune, or clear the transcription and render caches
 """
 
 import argparse
@@ -589,9 +589,12 @@ def collect_status(config_path: Path) -> StatusReport:
         report.documents_failing = counts[STATUS_FAILING]
 
     try:
-        report.cache_entries, report.cache_bytes = transcript_cache().stats()
+        for cache in all_caches():
+            entries, total = cache.stats()
+            report.cache_entries += entries
+            report.cache_bytes += total
     except OSError:
-        logger.debug("Could not measure the transcription cache", exc_info=True)
+        logger.debug("Could not measure the caches", exc_info=True)
 
     return report
 
@@ -687,6 +690,34 @@ def transcript_cache():
         enabled=settings.transcript_cache,
         max_age_days=settings.cache_max_age_days,
     )
+
+
+def render_cache():
+    """Return the render cache the configured settings describe.
+
+    Returns:
+        A :class:`living_ink.cache.RenderCache`, whose directory may not exist
+        yet. Reading the cache must not create it.
+    """
+    from living_ink.cache import RenderCache
+    from living_ink.pipeline import RENDER_CACHE_DIR, get_default_config
+    from living_ink.settings import Settings
+
+    settings = Settings.resolve(get_default_config())
+    return RenderCache(
+        RENDER_CACHE_DIR,
+        enabled=settings.render_cache,
+        max_age_days=settings.cache_max_age_days,
+    )
+
+
+def all_caches():
+    """Return every cache ``living-ink cache`` reports on, in printing order.
+
+    Returns:
+        A list of :class:`living_ink.cache.FileCache` instances.
+    """
+    return [transcript_cache(), render_cache()]
 
 
 class StateCommand(BaseCommand):
@@ -932,17 +963,18 @@ class StateCommand(BaseCommand):
 
 
 class CacheCommand(BaseCommand):
-    """Inspect and maintain the transcription cache.
+    """Inspect and maintain the caches.
 
-    The cache is what makes re-syncing an unchanged notebook free, so the only
-    things worth doing to it by hand are seeing how big it has grown, dropping
-    entries nobody has used in months, and — when a transcription is wrong and
-    a prompt edit is not the fix — throwing it all away.
+    Two of them: transcribed pages, which cost money, and rendered pages, which
+    cost time. Together they are what make re-syncing an unchanged notebook
+    free, so the only things worth doing by hand are seeing how big they have
+    grown, dropping what nobody has used in months, and — when the output is
+    wrong and a prompt edit is not the fix — throwing it all away.
     """
 
     name = "cache"
-    help = "Show, prune, or clear the transcription cache"
-    description = "Show how much transcribed text is cached. With no options, prints a summary."
+    help = "Show, prune, or clear the caches"
+    description = "Show how much is cached. With no options, prints a summary."
 
     @classmethod
     def register_args(cls, parser: argparse.ArgumentParser) -> None:
@@ -955,7 +987,7 @@ class CacheCommand(BaseCommand):
         action.add_argument(
             "--clear",
             action="store_true",
-            help="Delete every cached transcription",
+            help="Delete every cached page",
         )
         action.add_argument(
             "--prune",
@@ -980,25 +1012,29 @@ class CacheCommand(BaseCommand):
         Returns:
             0. An empty cache is a normal state, not an error.
         """
-        cache = transcript_cache()
+        caches = all_caches()
         as_json = getattr(args, "json", False)
 
         if getattr(args, "clear", False):
-            return self._report_removal(cache, cache.clear(), "cleared", as_json)
+            removed = {c.noun: c.clear() for c in caches}
+            return self._report_removal(removed, "cleared", as_json)
 
         days = getattr(args, "prune", None)
         if days is not None:
-            limit = cache.max_age_days if days < 0 else days
-            return self._report_removal(cache, cache.prune(limit), "pruned", as_json, days=limit)
+            # A bare --prune means "the configured age", which each cache
+            # carries for itself.
+            removed = {c.noun: c.prune(None if days < 0 else days) for c in caches}
+            limit = days if days >= 0 else caches[0].max_age_days
+            return self._report_removal(removed, "pruned", as_json, days=limit)
 
-        return self._summary(cache, as_json)
+        return self._summary(caches, as_json)
 
     @staticmethod
-    def _summary(cache, as_json: bool) -> int:
-        """Print what the cache is holding and what it is keyed on.
+    def _summary(caches, as_json: bool) -> int:
+        """Print what each cache is holding.
 
         Args:
-            cache: The transcript cache.
+            caches: The caches to report on.
             as_json: Whether to print JSON instead of a console summary.
 
         Returns:
@@ -1006,14 +1042,16 @@ class CacheCommand(BaseCommand):
         """
         from living_ink.cache import format_size
 
-        entries, total = cache.stats()
-        payload = {
-            "path": str(cache.root),
-            "enabled": cache.enabled,
-            "entries": entries,
-            "size_bytes": total,
-            "max_age_days": cache.max_age_days,
-        }
+        payload = {}
+        for cache in caches:
+            entries, total = cache.stats()
+            payload[cache.noun] = {
+                "path": str(cache.root),
+                "enabled": cache.enabled,
+                "entries": entries,
+                "size_bytes": total,
+                "max_age_days": cache.max_age_days,
+            }
 
         if as_json:
             print(json.dumps(payload, indent=2))
@@ -1022,22 +1060,24 @@ class CacheCommand(BaseCommand):
         from living_ink.setup_wizard import bold, cyan, dim
 
         print()
-        print(bold(cyan("Transcription cache")))
-        print(f"  {dim(str(cache.root))}")
-        if not cache.enabled:
-            print("  disabled — every page is transcribed afresh")
-        print(f"  {entries} page(s), {format_size(total)}")
-        print(f"  pruned after {cache.max_age_days} day(s) unused")
+        print(bold(cyan("Caches")))
+        for cache in caches:
+            entry = payload[cache.noun]
+            print(f"  {cache.noun}s")
+            print(f"    {dim(entry['path'])}")
+            if not entry["enabled"]:
+                print("    disabled — every page is done afresh")
+            print(f"    {entry['entries']} page(s), {format_size(entry['size_bytes'])}")
+            print(f"    pruned after {entry['max_age_days']} day(s) unused")
         print()
         return 0
 
     @staticmethod
-    def _report_removal(cache, removed: int, verb: str, as_json: bool, days: int = 0) -> int:
-        """Report how many entries an operation removed.
+    def _report_removal(removed: dict, verb: str, as_json: bool, days: int = 0) -> int:
+        """Report how many entries an operation removed from each cache.
 
         Args:
-            cache: The transcript cache.
-            removed: How many entries were deleted.
+            removed: How many entries went, keyed by what the cache calls one.
             verb: Past-tense description of what happened.
             as_json: Whether to print JSON instead of a console message.
             days: The age limit used, for a prune.
@@ -1049,8 +1089,9 @@ class CacheCommand(BaseCommand):
             print(json.dumps({"action": verb, "removed": removed, "max_age_days": days}))
             return 0
 
-        print(f"{verb.capitalize()} {removed} cached page(s).")
-        if removed:
+        for noun, count in removed.items():
+            print(f"{verb.capitalize()} {count} cached {noun}(s).")
+        if removed.get("transcribed page"):
             print("Those pages will be transcribed again, and paid for, on the next sync.")
         return 0
 
@@ -1324,7 +1365,7 @@ class StatusCommand(BaseCommand):
         else:
             print(f"Documents:     {dim('None synced yet')}")
 
-        # Cache — how much of the next sync is already paid for.
+        # Caches — how much of the next sync is already paid for.
         if report.cache_entries:
             from living_ink.cache import format_size
 

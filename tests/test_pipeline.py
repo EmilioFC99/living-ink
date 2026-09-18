@@ -1064,3 +1064,148 @@ class TestPageHashRecording:
         job.imgs.append(tmp_path / "missing.png")
         self._pipeline()._record_page_hashes(job)
         assert len(job.page_hashes) == 1
+
+
+class TestRenderCaching:
+    """A page whose strokes have not changed is never rendered twice."""
+
+    @pytest.fixture
+    def rendered(self, tmp_path, monkeypatch):
+        """Record every page the real renderer is asked for."""
+        calls = []
+
+        def fake_render(zip_path, page, **kwargs):
+            calls.append(page)
+            return f"png-{page}".encode()
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", fake_render, raising=True
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes",
+            lambda zip_path: ["hash-1", "hash-2"],
+            raising=True,
+        )
+        monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
+        monkeypatch.setattr(
+            "living_ink.extract.get_background_color", lambda: "white", raising=True
+        )
+        return calls
+
+    def _pipeline(self, tmp_path, enabled=True):
+        from living_ink.cache import RenderCache
+
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
+        pipe.saved = []
+        pipe._save_page = lambda job, page, data, label="Saved": pipe.saved.append((page, data))
+        return pipe
+
+    def _job(self) -> DocumentJob:
+        return DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+        )
+
+    def test_the_first_run_renders_every_page(self, tmp_path, rendered):
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
+
+    def test_the_second_run_renders_nothing(self, tmp_path, rendered):
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        rendered.clear()
+
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == []
+
+    def test_a_cached_page_is_still_saved(self, tmp_path, rendered):
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert again.saved == [(1, b"png-1"), (2, b"png-2")]
+
+    def test_only_the_changed_page_is_re_rendered(self, tmp_path, rendered, monkeypatch):
+        """This is the whole point: an edited notebook costs one page, not all."""
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        rendered.clear()
+
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes",
+            lambda zip_path: ["hash-1", "hash-2-edited"],
+            raising=True,
+        )
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [2]
+
+    def test_a_renderer_upgrade_re_renders_everything(self, tmp_path, rendered, monkeypatch):
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        rendered.clear()
+
+        monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp2")
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
+
+    def test_a_new_background_re_renders_everything(self, tmp_path, rendered, monkeypatch):
+        """The background is baked into the PNG, so it belongs in the key."""
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        rendered.clear()
+
+        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "yellow")
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
+
+    def test_a_disabled_cache_renders_every_time(self, tmp_path, rendered):
+        pipe = self._pipeline(tmp_path, enabled=False)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        rendered.clear()
+
+        again = self._pipeline(tmp_path, enabled=False)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
+
+    def test_a_page_that_fails_to_render_is_skipped_not_cached(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip",
+            lambda zip_path, page, **kwargs: None if page == 2 else b"png",
+            raising=True,
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes",
+            lambda zip_path: ["hash-1", "hash-2"],
+            raising=True,
+        )
+        monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp")
+        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "white")
+
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert [page for page, _ in pipe.saved] == [1]
+        assert pipe.renders.stats()[0] == 1
+
+    def test_a_page_with_no_source_hash_is_rendered_anyway(self, tmp_path, rendered, monkeypatch):
+        """An unhashable page loses the cache, not the render."""
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes", lambda zip_path: ["", "hash-2"]
+        )
+        pipe = self._pipeline(tmp_path)
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
+        assert pipe.renders.stats()[0] == 1

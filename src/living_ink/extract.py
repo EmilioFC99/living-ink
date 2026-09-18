@@ -2,6 +2,7 @@
 Text extraction helpers for reMarkable documents.
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -11,6 +12,7 @@ import tempfile
 import zipfile
 from contextlib import contextmanager
 from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -53,6 +55,12 @@ _ZIP_ERRORS = (OSError, zipfile.BadZipFile, RuntimeError)
 #: UnicodeDecodeError are both ValueErrors; TypeError and KeyError cover JSON
 #: that parsed but is not the shape the format promises.
 _JSON_ERRORS = (ValueError, TypeError, KeyError)
+
+#: Bumped whenever this module's own rendering behaviour changes — the rmc
+#: monkey-patching, the background compositing, the bounds calculation. It is
+#: part of the render cache key, so a bump correctly invalidates every cached
+#: page image rather than serving output the current code would not produce.
+RENDER_FORMAT_VERSION = 1
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
@@ -662,6 +670,65 @@ def render_page_from_document_zip(
         # Render the requested page
         target_rm_file = rm_files[page - 1]
         return render_rm_file_to_png(target_rm_file, background_color=background_color)
+
+
+def get_page_source_hashes(zip_path: Path) -> List[str]:
+    """Hash each page's ``.rm`` source, in the same order pages are rendered.
+
+    The hash identifies what the user drew, before any rendering happened, so
+    it answers "has this page changed since last time" without paying for the
+    render that would answer it by comparing PNGs.
+
+    Args:
+        zip_path: Path to the reMarkable document zip.
+
+    Returns:
+        One hex digest per page, in page order; empty when the zip cannot be
+        read. An unreadable page yields an empty string in its slot, so the
+        list always lines up with the page numbers.
+    """
+    hashes: List[str] = []
+    try:
+        with _open_document_zip(zip_path) as tmpdir_path:
+            for rm_file in _get_ordered_rm_files(tmpdir_path):
+                try:
+                    hashes.append(hashlib.sha256(rm_file.read_bytes()).hexdigest())
+                except OSError:
+                    logger.debug("Could not hash %s", rm_file, exc_info=True)
+                    hashes.append("")
+    except (*_ZIP_ERRORS, ValueError):
+        logger.debug("Could not read page sources from %s", zip_path, exc_info=True)
+        return []
+    return hashes
+
+
+@lru_cache(maxsize=1)
+def renderer_fingerprint() -> str:
+    """Identify everything, other than the page source, that shapes a render.
+
+    A cached PNG is only reusable while the code that produced it is
+    unchanged. ``rmc`` and ``rmscene`` are the two libraries that turn a ``.rm``
+    file into an image, and :data:`RENDER_FORMAT_VERSION` covers the parts this
+    module does itself — the monkey-patching in :func:`_patch_rmc`, the
+    background handling, the bounds. Bump it when any of those change.
+
+    The background colour is deliberately *not* in here: it is per-render
+    rather than per-build, so the caller folds it into the key instead.
+
+    Returns:
+        A short hex digest identifying the current rendering behaviour.
+    """
+    versions = []
+    for module in ("rmc", "rmscene"):
+        try:
+            versions.append(f"{module}={version(module)}")
+        except PackageNotFoundError:
+            # Not installed, which is itself a rendering behaviour worth
+            # distinguishing from any installed version.
+            versions.append(f"{module}=absent")
+
+    parts = [f"format={RENDER_FORMAT_VERSION}", *versions]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def get_document_page_count(zip_path: Path) -> int:

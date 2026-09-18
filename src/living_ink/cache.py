@@ -1,19 +1,28 @@
-"""Content-addressed cache for page transcriptions.
+"""Content-addressed caches for the two expensive steps of a sync.
 
-Transcribing a page is the only step of a sync that costs money, and it is a
-pure function: the same page image, read by the same model under the same
-prompt, produces the same text. Anything pure is cacheable, and the cache key
-is simply everything the answer depends on — the image bytes and a fingerprint
-of the model and prompts (:func:`living_ink.clean.transcription_fingerprint`).
+Transcribing a page costs money and rendering one costs CPU, and both are pure
+functions: the same input, processed by the same code under the same settings,
+produces the same output. Anything pure is cacheable, and the key is simply
+everything the answer depends on.
 
-That the key contains the prompt is the point rather than an implementation
-detail. Editing ``ocr_prompt.txt`` is supposed to change the transcription, so
-it has to miss the cache; a cache keyed on the image alone would silently serve
-the old prompt's answers forever.
+Two caches, one shape:
 
-Entries live under ``DATA_DIR/transcripts/`` and therefore survive the temp
-purge that removes page images and transcripts after every run — which is what
-makes a repeat sync of an unchanged notebook free rather than merely fast.
+* :class:`TranscriptCache` keys a page's text on the page image plus a
+  fingerprint of the model and prompts
+  (:func:`living_ink.clean.transcription_fingerprint`).
+* :class:`RenderCache` keys a page's PNG on the ``.rm`` source plus a
+  fingerprint of the renderer
+  (:func:`living_ink.extract.renderer_fingerprint`).
+
+That the key contains the fingerprint is the point rather than an
+implementation detail. Editing ``ocr_prompt.txt`` is supposed to change the
+transcription, and upgrading ``rmc`` is supposed to change the render; both
+have to miss. A cache keyed on the input alone would silently serve the old
+code's answers forever.
+
+Entries live under the data directory and therefore survive the temp purge that
+removes page images and transcripts after every run — which is what makes a
+repeat sync of an unchanged notebook free rather than merely fast.
 """
 
 import hashlib
@@ -22,34 +31,44 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 #: Directory under the data dir that holds the cached transcriptions.
 CACHE_DIRNAME = "transcripts"
 
-#: An entry unused for this long is dropped by :meth:`TranscriptCache.prune`.
-#: Long enough that a notebook revisited next season is still free, short
-#: enough that the directory does not grow without bound.
+#: Directory under the data dir that holds the cached page renders.
+RENDER_CACHE_DIRNAME = "renders"
+
+#: An entry unused for this long is dropped by :meth:`FileCache.prune`. Long
+#: enough that a notebook revisited next season is still free, short enough
+#: that the directory does not grow without bound.
 DEFAULT_MAX_AGE_DAYS = 90
 
 _SECONDS_PER_DAY = 86400
 
 
-class TranscriptCache:
-    """A durable, content-addressed store of page transcriptions.
+class FileCache:
+    """A durable, content-addressed store of one kind of artifact.
 
-    Entries are plain JSON files named after their key and sharded one level
-    deep, so a library of thousands of pages does not land in a single
-    directory. Every operation is best-effort: a cache that cannot be read or
-    written degrades to transcribing again, never to a failed run.
+    Entries are files named after their key and sharded one level deep, so a
+    library of thousands of pages does not land in a single directory. Every
+    operation is best-effort: a cache that cannot be read or written degrades
+    to doing the work again, never to a failed run.
 
     Attributes:
         root: Directory holding the entries.
         enabled: When False, every lookup misses and nothing is written.
         max_age_days: Idle age at which :meth:`prune` drops an entry.
+        suffix: File extension entries are stored under.
     """
+
+    #: Extension for this cache's entries; subclasses override it.
+    suffix = ".bin"
+
+    #: What one entry is called in a message to the user.
+    noun = "entry"
 
     def __init__(
         self,
@@ -71,88 +90,78 @@ class TranscriptCache:
     # --- keys -------------------------------------------------------------
 
     @staticmethod
-    def key(image_bytes: bytes, fingerprint: str) -> str:
-        """Return the cache key for one page image read under one fingerprint.
+    def key(payload: bytes, fingerprint: str) -> str:
+        """Return the cache key for one input processed under one fingerprint.
 
         Args:
-            image_bytes: The prepared page image, exactly as it is sent.
-            fingerprint: Identifies the model and prompts that will read it;
-                see :func:`living_ink.clean.transcription_fingerprint`.
+            payload: The input bytes, exactly as they will be processed.
+            fingerprint: Identifies the code and settings that will process
+                them, so a change in either misses rather than lies.
 
         Returns:
             A hex digest usable as a filename.
         """
         digest = hashlib.sha256()
-        digest.update(image_bytes)
+        digest.update(payload)
         digest.update(b"\0")
         digest.update(fingerprint.encode("utf-8"))
         return digest.hexdigest()
 
     def _path_for(self, key: str) -> Path:
         """Return the file that holds ``key``, sharded by its first two chars."""
-        return self.root / key[:2] / f"{key}.json"
+        return self.root / key[:2] / f"{key}{self.suffix}"
 
     # --- entries ----------------------------------------------------------
 
-    def get(self, key: str) -> Optional[Tuple[str, str]]:
-        """Return the cached (raw, cleaned) pair for ``key``, if there is one.
-
-        A hit refreshes the entry's modification time, so :meth:`prune`
-        measures how long an entry has gone *unused* rather than how long ago
-        it was written.
+    def _read(self, key: str) -> Optional[bytes]:
+        """Return the raw bytes stored under ``key``, refreshing its last use.
 
         Args:
             key: A key from :meth:`key`.
 
         Returns:
-            The cached pair, or None on a miss or an unreadable entry.
+            The stored bytes, or None on a miss or an unreadable entry.
         """
         if not self.enabled:
             return None
 
         path = self._path_for(key)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            raw = str(payload["raw"])
-            cleaned = str(payload["clean"])
+            data = path.read_bytes()
         except FileNotFoundError:
             return None
-        except (OSError, ValueError, TypeError, KeyError):
-            # A truncated or hand-edited entry is indistinguishable from a
-            # miss, and treating it as one repairs it on the way past.
+        except OSError:
             logger.debug("Discarding an unreadable cache entry: %s", path, exc_info=True)
             self._discard(path)
             return None
 
         self._touch(path)
-        return raw, cleaned
+        return data
 
-    def put(self, key: str, raw: str, cleaned: str) -> None:
-        """Store one page's transcription.
+    def _write(self, key: str, data: bytes) -> None:
+        """Store raw bytes under ``key``.
 
         Writing through a temporary file keeps a half-written entry from ever
-        being visible: pages are transcribed concurrently, and an interrupted
-        run must not leave a valid-looking filename holding nothing.
+        being visible: pages are processed concurrently, and an interrupted run
+        must not leave a valid-looking filename holding nothing.
 
         Args:
             key: A key from :meth:`key`.
-            raw: The raw OCR text.
-            cleaned: The cleaned text, as published.
+            data: The bytes to store.
         """
         if not self.enabled:
             return
 
         path = self._path_for(key)
-        payload = json.dumps({"raw": raw, "clean": cleaned}, ensure_ascii=False)
         # Unique per writer: two threads storing the same key at once must not
         # write the same temporary file.
-        tmp = path.with_suffix(f".{os.getpid()}.{id(payload)}.tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.{id(data)}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(payload, encoding="utf-8")
+            tmp.write_bytes(data)
             os.replace(tmp, path)
         except OSError:
-            logger.debug("Could not cache the transcription at %s", path, exc_info=True)
+            logger.debug("Could not write the cache entry at %s", path, exc_info=True)
             self._discard(tmp)
 
     @staticmethod
@@ -173,7 +182,7 @@ class TranscriptCache:
 
     # --- maintenance ------------------------------------------------------
 
-    def entries(self):
+    def entries(self) -> Iterator[Path]:
         """Yield the path of every cached entry.
 
         Yields:
@@ -181,7 +190,7 @@ class TranscriptCache:
         """
         if not self.root.exists():
             return
-        yield from self.root.glob("*/*.json")
+        yield from self.root.glob(f"*/*{self.suffix}")
 
     def stats(self) -> Tuple[int, int]:
         """Return how much the cache is holding.
@@ -251,6 +260,85 @@ class TranscriptCache:
             except OSError:
                 # Not empty, which is the normal case.
                 pass
+
+
+class TranscriptCache(FileCache):
+    """Page transcriptions, keyed by the page image and the model reading it."""
+
+    suffix = ".json"
+    noun = "transcribed page"
+
+    def get(self, key: str) -> Optional[Tuple[str, str]]:
+        """Return the cached (raw, cleaned) pair for ``key``, if there is one.
+
+        A hit refreshes the entry's last-used time, so :meth:`prune` measures
+        how long an entry has gone *unused* rather than how long ago it was
+        written.
+
+        Args:
+            key: A key from :meth:`FileCache.key`.
+
+        Returns:
+            The cached pair, or None on a miss or an unreadable entry.
+        """
+        data = self._read(key)
+        if data is None:
+            return None
+
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            return str(payload["raw"]), str(payload["clean"])
+        except (ValueError, TypeError, KeyError):
+            # A truncated or hand-edited entry is indistinguishable from a
+            # miss, and treating it as one repairs it on the way past.
+            path = self._path_for(key)
+            logger.debug("Discarding a malformed cache entry: %s", path, exc_info=True)
+            self._discard(path)
+            return None
+
+    def put(self, key: str, raw: str, cleaned: str) -> None:
+        """Store one page's transcription.
+
+        Args:
+            key: A key from :meth:`FileCache.key`.
+            raw: The raw OCR text.
+            cleaned: The cleaned text, as published.
+        """
+        payload = json.dumps({"raw": raw, "clean": cleaned}, ensure_ascii=False)
+        self._write(key, payload.encode("utf-8"))
+
+
+class RenderCache(FileCache):
+    """Rendered page images, keyed by the ``.rm`` source and the renderer."""
+
+    suffix = ".png"
+    noun = "rendered page"
+
+    def get(self, key: str) -> Optional[bytes]:
+        """Return the cached PNG for ``key``, if there is one.
+
+        Args:
+            key: A key from :meth:`FileCache.key`.
+
+        Returns:
+            The PNG bytes, or None on a miss.
+        """
+        data = self._read(key)
+        if not data:
+            # A zero-byte entry is not a page; treat it as a miss so the next
+            # render replaces it.
+            return None
+        return data
+
+    def put(self, key: str, png_bytes: bytes) -> None:
+        """Store one rendered page.
+
+        Args:
+            key: A key from :meth:`FileCache.key`.
+            png_bytes: The rendered PNG.
+        """
+        if png_bytes:
+            self._write(key, png_bytes)
 
 
 def format_size(num_bytes: int) -> str:

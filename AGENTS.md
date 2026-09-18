@@ -80,6 +80,7 @@ Publish via Destination.publish()
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
 - **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink cache` shows/prunes/clears it.
+- **Rendered pages are cached under `DATA_DIR/renders/`**, keyed by the page's `.rm` source plus `extract.renderer_fingerprint()` (the `RENDER_FORMAT_VERSION` constant, the installed `rmc` and `rmscene`) and the background colour. An unchanged page skips the `.rm` → SVG → PNG step entirely. Bump `RENDER_FORMAT_VERSION` whenever `extract.py`'s own rendering behaviour changes.
 - **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; `--dry-run` implies it.
 - **`extract.py` monkey-patches `rmc`** to control SVG background and bounds. Upgrading `rmc`/`rmscene` is the likely cause of blank or clipped renders.
 
@@ -98,12 +99,14 @@ Publish via Destination.publish()
 | `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
 | `config.yml` | `sync.ocr_concurrency` | Pages transcribed at once (default 4; 1 is serial) |
 | `config.yml` | `sync.transcript_cache` | Reuse transcriptions across runs (default `true`) |
+| `config.yml` | `sync.render_cache` | Reuse rendered page images across runs (default `true`) |
 | `config.yml` | `sync.cache_max_age_days` | Prune entries unused this long (default 90) |
 | env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method |
 | env var | `REMARKABLE_USE_SSH` | Override USB SSH toggle |
 | env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH overrides |
 | env var | `SYNC_OCR_CONCURRENCY` | Override page transcription concurrency |
 | env var | `SYNC_TRANSCRIPT_CACHE` | Toggle the transcription cache |
+| env var | `SYNC_RENDER_CACHE` | Toggle the render cache |
 | env var | `SYNC_CACHE_MAX_AGE_DAYS` | Override the cache prune age |
 | env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
 | env var | `LIVING_INK_CONFIG` / `LIVING_INK_CONFIG_DIR` / `LIVING_INK_DATA_DIR` | Path overrides |
@@ -120,8 +123,8 @@ uv run living-ink status                              # health check + effective
 uv run living-ink status --json                       # machine-readable health check
 uv run living-ink list                                # what is pending or failing
 uv run living-ink state                               # what is remembered between runs
-uv run living-ink cache                               # transcription cache size
-uv run living-ink cache --clear                       # drop it; the next sync pays again
+uv run living-ink cache                               # transcription and render cache sizes
+uv run living-ink cache --clear                       # drop them; the next sync pays again
 
 uv run ruff check .           # lint
 uv run ruff format --check .  # format check (`ruff format .` to fix)

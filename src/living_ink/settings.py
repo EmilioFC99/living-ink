@@ -45,6 +45,7 @@ DEFAULT_OCR_CONCURRENCY = 4
 # Transcribing is the only step that costs money, and it is pure with respect
 # to the page image, so caching is on unless a user turns it off.
 DEFAULT_TRANSCRIPT_CACHE = True
+DEFAULT_RENDER_CACHE = True
 DEFAULT_CACHE_MAX_AGE_DAYS = 90
 
 _TRUTHY = ("1", "true", "yes", "on")
@@ -64,6 +65,7 @@ FIELD_ENV_VARS: Dict[str, str] = {
     "max_notebooks_per_run": "SYNC_MAX_NOTEBOOKS",
     "ocr_concurrency": "SYNC_OCR_CONCURRENCY",
     "transcript_cache": "SYNC_TRANSCRIPT_CACHE",
+    "render_cache": "SYNC_RENDER_CACHE",
     "cache_max_age_days": "SYNC_CACHE_MAX_AGE_DAYS",
     "apple_notes_folder": "APPLE_NOTES_FOLDER",
 }
@@ -185,6 +187,7 @@ class Settings:
         max_notebooks_per_run: Cap on documents processed in one run.
         ocr_concurrency: How many pages to transcribe at once. 1 is serial.
         transcript_cache: Whether transcriptions are reused across runs.
+        render_cache: Whether rendered page images are reused across runs.
         cache_max_age_days: Idle age at which a cached transcription is pruned.
         apple_notes_folder: Destination folder name in Apple Notes.
     """
@@ -201,6 +204,7 @@ class Settings:
     max_notebooks_per_run: int = DEFAULT_MAX_NOTEBOOKS_PER_RUN
     ocr_concurrency: int = DEFAULT_OCR_CONCURRENCY
     transcript_cache: bool = DEFAULT_TRANSCRIPT_CACHE
+    render_cache: bool = DEFAULT_RENDER_CACHE
     cache_max_age_days: int = DEFAULT_CACHE_MAX_AGE_DAYS
 
     apple_notes_folder: str = DEFAULT_APPLE_NOTES_FOLDER
@@ -259,6 +263,7 @@ class Settings:
             ),
             ocr_concurrency=max(1, as_int(pick("ocr_concurrency"), DEFAULT_OCR_CONCURRENCY)),
             transcript_cache=as_bool(pick("transcript_cache"), DEFAULT_TRANSCRIPT_CACHE),
+            render_cache=as_bool(pick("render_cache"), DEFAULT_RENDER_CACHE),
             cache_max_age_days=as_int(pick("cache_max_age_days"), DEFAULT_CACHE_MAX_AGE_DAYS),
             apple_notes_folder=as_str(pick("apple_notes_folder"), DEFAULT_APPLE_NOTES_FOLDER)
             or DEFAULT_APPLE_NOTES_FOLDER,
@@ -297,6 +302,7 @@ class Settings:
             "max_notebooks_per_run": sync.get("max_notebooks_per_run"),
             "ocr_concurrency": sync.get("ocr_concurrency"),
             "transcript_cache": sync.get("transcript_cache"),
+            "render_cache": sync.get("render_cache"),
             "cache_max_age_days": sync.get("cache_max_age_days"),
             "apple_notes_folder": notes.get("folder_name"),
         }

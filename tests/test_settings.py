@@ -210,6 +210,25 @@ class TestTranscriptCache:
         s = Settings.resolve(config={"sync": {"cache_max_age_days": 7}}, env={})
         assert s.cache_max_age_days == 7
 
+    def test_render_caching_is_on_by_default(self):
+        assert Settings.resolve(config={}, env={}).render_cache is True
+
+    def test_config_can_turn_the_render_cache_off(self):
+        s = Settings.resolve(config={"sync": {"render_cache": False}}, env={})
+        assert s.render_cache is False
+
+    def test_env_outranks_config_for_the_render_cache(self):
+        s = Settings.resolve(
+            config={"sync": {"render_cache": True}},
+            env={"SYNC_RENDER_CACHE": "false"},
+        )
+        assert s.render_cache is False
+
+    def test_the_two_caches_are_independent(self):
+        """Rendering is free to reuse even when transcription must not."""
+        s = Settings.resolve(config={"sync": {"transcript_cache": False}}, env={})
+        assert s.render_cache is True
+
 
 class TestExplain:
     """Every setting can say which layer supplied its value."""
