@@ -1250,9 +1250,10 @@ class SyncPipeline:
         try:
             self._acquire_pages(job, client)
             self._collect_tags(job, client)
-            self._preprocess_images(job)
-            self._ocr_pages(job)
-            self._write_transcripts(job)
+            if not self._reuse_transcript(job):
+                self._preprocess_images(job)
+                self._ocr_pages(job)
+                self._write_transcripts(job)
             success = self._publish(job, needs_update)
         except _StopProcessing as stop:
             if stop.reason:
@@ -1628,6 +1629,41 @@ class SyncPipeline:
 
         log(f"  Cleaning text with AI for {path.name}...")
         return txt or "", repair_text_with_openai(txt or "")
+
+    # ── Stages 4-6, skipped: an existing transcript ──────────────────────
+
+    def _reuse_transcript(self, job: DocumentJob) -> bool:
+        """Adopt a transcript from an earlier run instead of re-transcribing.
+
+        Transcribing is the only part of a sync that costs money, and it is
+        pure with respect to the page images: the same pages produce the same
+        text. A transcript newer than every page it was made from is therefore
+        still correct, and re-running OCR over it would be paying twice.
+
+        This only comes up when the transcript survived the last run — after
+        ``--dry-run`` or ``--keep-temp``, or when a run got as far as
+        transcribing and then failed to publish. The usual auto-purge removes
+        transcripts, so an ordinary repeat sync still transcribes afresh.
+
+        Args:
+            job: The job about to be transcribed; ``clean_out_txt`` is set when
+                an existing transcript is adopted.
+
+        Returns:
+            True if a current transcript was adopted and OCR can be skipped.
+        """
+        existing = OCR_DIR / f"{job.safe_name}_clean.txt"
+        if not job.imgs or not existing.exists() or not existing.stat().st_size:
+            return False
+
+        transcribed_at = existing.stat().st_mtime
+        if any(p.stat().st_mtime > transcribed_at for p in job.imgs):
+            log(f"Pages for {job.notebook} are newer than their transcript; transcribing again.")
+            return False
+
+        log(f"Reusing the existing transcript for {job.notebook}: {existing}")
+        job.clean_out_txt = existing
+        return True
 
     # ── Stage 6: transcripts ─────────────────────────────────────────────
 
