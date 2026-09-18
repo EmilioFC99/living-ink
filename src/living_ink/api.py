@@ -177,8 +177,9 @@ def get_rmapi(settings: Optional[Settings] = None):
         try:
             from living_ink.sync import load_client_from_token
 
-            # Also persist to ~/.rmapi for compatibility
-            rmapi_file.write_text(token, encoding="utf-8")
+            # Deliberately does not write the token back to ~/.rmapi. Building
+            # a client is a read; the only thing that should ever overwrite a
+            # stored credential is registration, which is what wrote it.
             cloud_client = load_client_from_token(token)
         except (OSError, ValueError) as e:
             # A token file that cannot be written or parsed. SSH may still be
