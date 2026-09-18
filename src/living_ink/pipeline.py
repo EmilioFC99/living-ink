@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -52,7 +53,9 @@ class WarningFilter(logging.Filter):
                 )
             ):
                 return False
-        except Exception:
+        except (TypeError, ValueError, KeyError):
+            # getMessage() interpolates the record's args; a library that logs
+            # a mismatched format string must not take the filter down with it.
             pass
         return True
 
@@ -198,14 +201,20 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                             if not creds_path.exists() or creds_path.read_text() != creds_content:
                                 creds_path.write_text(creds_content)
                             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
-                        except Exception as weave_err:
+                        except OSError as weave_err:
                             print(f"❌ Error writing google_creds.json: {weave_err}")
 
                 # 3. AI Provider — initialize from new 'ai' section or legacy 'openai' section
                 configure_ai_provider(yaml_config)
 
         except Exception as e:
+            # Deliberately broad. Everything downstream of the parse — env
+            # export, credential weaving, provider configuration — is driven by
+            # whatever shape the user's YAML happens to have, and a config that
+            # cannot be understood has to degrade to one printed line and an
+            # empty dict rather than abort the run before it reports anything.
             print(f"Critical error loading config.yml: {e}")
+            logging.debug("Loading %s failed", cfg_path, exc_info=True)
 
     # Legacy Fallback
     try:
@@ -380,7 +389,7 @@ def google_vision_available() -> bool:
             content = Path(creds_env).read_text(encoding="utf-8")
             if "your-project-id" not in content and "BEGIN PRIVATE KEY" in content:
                 return True
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             pass
     secrets_dir = ROOT / "secrets"
     if secrets_dir.exists() and list(secrets_dir.glob("*.json")):
@@ -409,7 +418,13 @@ def vision_ocr_image_service_account(png_path: Path):
             return response.full_text_annotation.text.strip()
         return ""
     except Exception as e:
+        # Deliberately broad. Vision raises out of google.api_core, whose
+        # exception hierarchy only exists when the optional dependency is
+        # installed, so it cannot be named here. OCR through this path is a
+        # fallback anyway: any failure means "no text from Vision", not a
+        # failed run.
         print(f"Google Cloud Vision error: {e}")
+        logging.debug("Google Cloud Vision OCR failed for %s", png_path, exc_info=True)
         return None
 
 
@@ -466,7 +481,7 @@ def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
                         item.unlink()
                     elif item.is_dir():
                         shutil.rmtree(item)
-                except Exception as e:
+                except OSError as e:
                     logging.debug("Failed to remove temporary item %s: %s", item, e)
             folder.mkdir(parents=True, exist_ok=True)
 
@@ -475,7 +490,7 @@ def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
         for zip_file in DATA_DIR.glob("*.zip"):
             try:
                 zip_file.unlink(missing_ok=True)
-            except Exception:
+            except OSError:
                 pass
 
 
@@ -499,7 +514,7 @@ def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -
                         p.unlink()
                     elif p.is_dir():
                         shutil.rmtree(p)
-                except Exception:
+                except OSError:
                     pass
 
     if VISION_DIR.exists():
@@ -509,7 +524,7 @@ def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -
                     p.unlink()
                 elif p.is_dir():
                     shutil.rmtree(p)
-            except Exception:
+            except OSError:
                 pass
 
 
@@ -690,7 +705,11 @@ def get_document_type(item: Any, client: Optional[Any] = None) -> str:
             if ft in ("pdf", "epub"):
                 return ft
         except Exception:
-            pass
+            # Deliberately broad. This is a probe against whichever transport
+            # happens to be connected, and the filename fallback below answers
+            # the question just as well. A type lookup must never be the reason
+            # a document drops out of discovery.
+            logging.debug("get_file_type probe failed", exc_info=True)
 
     files = get_val(item, "files") or []
     for f in files:
@@ -743,7 +762,8 @@ def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any
                 mod_str = (
                     f" (modified: {datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')})"
                 )
-            except Exception:
+            except (ValueError, OverflowError, OSError):
+                # A device timestamp outside the range the platform can render.
                 pass
 
     id_label = f" [ID: {short_id}]" if short_id else ""
@@ -1238,7 +1258,10 @@ class SyncPipeline:
                 last_modified=None if mod is None else str(mod),
                 run_id=self.run_id,
             )
-        except Exception as e:
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            # Everything the store can raise: a statement or lock failure, the
+            # database file being unreachable, and a schema written by a newer
+            # build. None of them is a reason to skip the document.
             log(f"⚠️ Could not record {doc_id} in the state database: {e}")
 
     def filter_pending_documents(
@@ -1392,7 +1415,7 @@ class SyncPipeline:
                 store.clear_failure(job.notebook_id)
             else:
                 store.record_failure(job.notebook_id, redact(reason or "Processing failed."))
-        except Exception as e:
+        except (sqlite3.Error, OSError, RuntimeError) as e:
             log(f"⚠️ Could not record the outcome for {job.notebook_id}: {e}")
 
     # ── Stage 1: identify ────────────────────────────────────────────────
@@ -1893,6 +1916,9 @@ class SyncPipeline:
 
             return all_success
         except Exception as e:
+            # Deliberately broad. This is the stage boundary: a notebook that
+            # cannot be published is reported as one failed notebook, with the
+            # traceback, so the rest of the run still goes out.
             log(f"Failed publishing note: {e}")
             import traceback
 
@@ -1973,6 +1999,10 @@ class SyncPipeline:
             log(f"⚠️ {dest_name}: {e}")
             return False
         except Exception:
+            # Deliberately broad, and the message says so: a destination is
+            # contracted to raise DestinationError, so anything else reaching
+            # here is a defect in that destination. Print it loudly and keep
+            # publishing to the others.
             import traceback
 
             log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
