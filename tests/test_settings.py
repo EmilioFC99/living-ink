@@ -8,6 +8,10 @@ from living_ink.settings import (
     DEFAULT_APPLE_NOTES_FOLDER,
     DEFAULT_OCR_CONCURRENCY,
     DEFAULT_SSH_HOST,
+    FIELD_ENV_VARS,
+    SOURCE_CONFIG,
+    SOURCE_DEFAULT,
+    SOURCE_ENV,
     Settings,
     as_bool,
     as_int,
@@ -178,3 +182,65 @@ class TestOcrConcurrency:
         assert (
             Settings.resolve(config={"sync": {"ocr_concurrency": -4}}, env={}).ocr_concurrency == 1
         )
+
+
+class TestExplain:
+    """Every setting can say which layer supplied its value."""
+
+    def test_reports_the_layer_that_won(self):
+        origins = {
+            o.name: o
+            for o in Settings.explain(
+                config={"sync": {"ocr_concurrency": 8}, "remarkable": {"ssh_host": "10.0.0.1"}},
+                env={"SYNC_OCR_CONCURRENCY": "2"},
+            )
+        }
+
+        assert (origins["ocr_concurrency"].value, origins["ocr_concurrency"].source) == (
+            2,
+            SOURCE_ENV,
+        )
+        assert (origins["ssh_host"].value, origins["ssh_host"].source) == (
+            "10.0.0.1",
+            SOURCE_CONFIG,
+        )
+        assert origins["ssh_user"].source == SOURCE_DEFAULT
+
+    def test_an_empty_env_var_does_not_count_as_set(self):
+        """An exported-but-blank variable is how shells leave unset values."""
+        origins = {o.name: o for o in Settings.explain(config={}, env={"REMARKABLE_SSH_USER": ""})}
+
+        assert origins["ssh_user"].source == SOURCE_DEFAULT
+
+    def test_covers_every_field_and_agrees_with_resolve(self):
+        config = {"remarkable": {"preferred_connection": "cloud"}}
+        env = {"SYNC_PDFS": "true"}
+        resolved = Settings.resolve(config=config, env=env)
+
+        origins = Settings.explain(config=config, env=env)
+
+        assert {o.name for o in origins} == set(FIELD_ENV_VARS)
+        assert all(getattr(resolved, o.name) == o.value for o in origins)
+
+    def test_the_token_is_never_displayed(self):
+        origins = {
+            o.name: o
+            for o in Settings.explain(config={"remarkable": {"device_token": "sekrit"}}, env={})
+        }
+        token = origins["remarkable_token"]
+
+        assert token.secret is True
+        assert token.display() == "set"
+        assert "sekrit" not in token.display()
+
+    def test_display_renders_booleans_and_absences_readably(self):
+        origins = {o.name: o for o in Settings.explain(config={}, env={"SYNC_PDFS": "true"})}
+
+        assert origins["sync_pdfs"].display() == "true"
+        assert origins["sync_epubs"].display() == "false"
+        assert origins["remarkable_token"].display() == "not set"
+
+    def test_names_the_variable_that_would_override(self):
+        origins = {o.name: o for o in Settings.explain(config={}, env={})}
+
+        assert origins["ocr_concurrency"].env_var == "SYNC_OCR_CONCURRENCY"
