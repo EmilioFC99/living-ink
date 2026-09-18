@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from living_ink import pipeline
 from living_ink.destinations import AppleNotesDestination, Destination
 from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
@@ -610,3 +612,39 @@ class TestConfigPermissionRepair:
 
     def test_a_missing_config_is_not_an_error(self, tmp_path):
         assert pipeline.load_yaml_config(tmp_path / "absent.yml") == {}
+
+
+class TestProcessedLogDurability:
+    """Sync state survives an interrupted write, because losing it re-pays for OCR."""
+
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        return tmp_path
+
+    def test_entries_round_trip(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        pipeline.add_to_processed_log("Obsidian", "doc-2", "v9")
+        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1", "doc-2": "v9"}
+
+    def test_an_interrupted_write_preserves_the_previous_state(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(pipeline.os, "replace", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            pipeline.add_to_processed_log("Obsidian", "doc-2", "v2")
+
+        # Without the atomic write this would parse as {} and re-sync everything.
+        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1"}
+
+    def test_no_temporary_file_is_left_behind(self, tmp_path, monkeypatch):
+        self._state_dir(tmp_path, monkeypatch)
+        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        assert [p.name for p in tmp_path.iterdir()] == ["processed_notebooks_Obsidian.json"]

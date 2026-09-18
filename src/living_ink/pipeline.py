@@ -31,7 +31,7 @@ from living_ink.destinations import (
     DestinationError,
     build_destinations,
 )
-from living_ink.safeio import restrict_permissions
+from living_ink.safeio import restrict_permissions, write_text_atomic
 from living_ink.settings import Settings
 
 
@@ -290,8 +290,10 @@ def add_to_processed_log(dest_name: str, doc_id, version):
     processed = load_processed_log(dest_name)
     processed[doc_id] = version
     log_path = get_state_file_path(dest_name)
-    with open(log_path, "w") as f:
-        json.dump(processed, f, indent=2, sort_keys=True)
+    # Written in one step because load_processed_log() treats a truncated file
+    # as an empty one: a crash mid-write would silently mark every document
+    # unpublished and re-pay for OCR on all of them on the next run.
+    write_text_atomic(log_path, json.dumps(processed, indent=2, sort_keys=True))
 
 
 def preprocess_image(in_path: Path, out_path: Path):
