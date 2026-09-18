@@ -568,3 +568,91 @@ class TestObsidianPreservesUserEdits:
         written = note.read_text(encoding="utf-8")
         assert written.count(notemerge.MANAGED_BEGIN) == 1
         assert written.count("Transcript v") == 1
+
+
+class TestAppleNotesIdentifiesNotesById:
+    """Deleting by title destroyed notes the user had written themselves."""
+
+    def _run(self, tmp_path, returncode=0, stdout="x-coredata://Store/ICNote/p7", **kwargs):
+        dest = AppleNotesDestination(folder_name="reMarkable")
+        with patch("living_ink.destinations.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=returncode, stdout=stdout, stderr="")
+            result = dest.publish("Meeting Notes", "body", [], **kwargs)
+        return dest, result, run.call_args[0][0][2]
+
+    def test_a_first_publish_deletes_nothing(self, tmp_path):
+        """With no recorded id, a matching title might be somebody else's note."""
+        _, result, script = self._run(tmp_path)
+
+        assert result is True
+        assert "delete note" not in script
+        assert "delete (every" not in script
+
+    def test_a_recorded_id_is_deleted_by_id(self, tmp_path):
+        _, _, script = self._run(tmp_path, existing_id="x-coredata://Store/ICNote/p3")
+
+        assert "delete note id" in script
+        assert "x-coredata://Store/ICNote/p3" in script
+        assert "whose name is noteName" not in script
+
+    def test_an_id_falls_back_to_searching_the_folder(self, tmp_path):
+        """`note id` fails if the note moved; the whose-clause still matches by id."""
+        _, _, script = self._run(tmp_path, existing_id="x-coredata://Store/ICNote/p3")
+
+        assert "whose id is" in script
+
+    def test_title_matching_needs_explicit_permission(self, tmp_path):
+        """Only granted when sync state proves we published this note before."""
+        _, _, script = self._run(tmp_path, adopt_by_name=True)
+
+        assert "whose name is noteName" in script
+
+    def test_an_id_outranks_title_matching(self, tmp_path):
+        _, _, script = self._run(
+            tmp_path, existing_id="x-coredata://Store/ICNote/p3", adopt_by_name=True
+        )
+
+        assert "whose name is noteName" not in script
+
+    def test_the_new_note_id_is_reported_back(self, tmp_path):
+        dest, _, script = self._run(tmp_path)
+
+        assert "return id of newNote" in script
+        assert dest.last_external_id == "x-coredata://Store/ICNote/p7"
+
+    def test_an_empty_reply_records_no_id(self, tmp_path):
+        """Better no id than an empty string that would look like one."""
+        dest, _, _ = self._run(tmp_path, stdout="\n")
+
+        assert dest.last_external_id is None
+
+    def test_a_stale_id_is_cleared_before_publishing(self, tmp_path):
+        dest = AppleNotesDestination()
+        dest.last_external_id = "x-coredata://old"
+        with patch("living_ink.destinations.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
+            with patch("living_ink.destinations.time.sleep"):
+                with pytest.raises(DestinationUnavailable):
+                    dest.publish("Meeting Notes", "body", [])
+
+        assert dest.last_external_id is None
+
+    def test_an_id_with_a_quote_is_escaped(self, tmp_path):
+        """AppleScript is assembled as text, so every value has to be quoted."""
+        _, _, script = self._run(tmp_path, existing_id='weird" id')
+
+        assert '\\"' in script
+
+
+class TestObsidianIgnoresIdentityArguments:
+    """Obsidian finds its note by path, so both arguments are accepted and unused."""
+
+    def test_publishing_with_an_id_still_works(self, tmp_path):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        assert dest.publish("Note", "body", [], existing_id="ignored") is True
+        assert (tmp_path / "Note.md").exists()
+
+    def test_no_external_id_is_reported(self, tmp_path):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        dest.publish("Note", "body", [])
+        assert dest.last_external_id is None

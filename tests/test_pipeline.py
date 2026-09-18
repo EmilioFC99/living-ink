@@ -32,6 +32,8 @@ class MockDestination(Destination):
         sub_folder: str = None,
         document_path=None,
         tags: list = None,
+        existing_id: str = None,
+        adopt_by_name: bool = False,
     ) -> bool:
         self.published.append(
             {
@@ -41,6 +43,8 @@ class MockDestination(Destination):
                 "sub_folder": sub_folder,
                 "document_path": document_path,
                 "tags": tags,
+                "existing_id": existing_id,
+                "adopt_by_name": adopt_by_name,
             }
         )
         return True
@@ -768,3 +772,34 @@ class TestLogPersistence:
             assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
         finally:
             logs._console_mode = logs.ConsoleMode.PLAIN
+
+
+class TestExternalIdRoundTrip:
+    """The id a destination assigns has to survive until the next sync."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def test_an_id_is_stored_with_the_publication(self):
+        pipeline.add_to_processed_log(
+            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
+        )
+        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
+        assert record["external_id"] == "x-coredata://p7"
+
+    def test_a_later_sync_without_an_id_keeps_the_old_one(self):
+        """A destination that fails to report an id must not erase the record."""
+        pipeline.add_to_processed_log(
+            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
+        )
+        pipeline.add_to_processed_log("AppleNotesDestination", "doc-1", "v2")
+
+        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
+        assert record["external_id"] == "x-coredata://p7"
+        assert record["version"] == "v2"

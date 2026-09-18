@@ -92,6 +92,11 @@ class Destination(abc.ABC):
     config_key: ClassVar[str] = ""
     enabled_by_default: ClassVar[bool] = False
 
+    #: Identifier the destination assigned to the note it last published, for
+    #: destinations that have one. Obsidian leaves it None: a note there is
+    #: identified by its path, which the destination can recompute.
+    last_external_id: Optional[str] = None
+
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
         """Build this destination from its config section.
@@ -124,6 +129,8 @@ class Destination(abc.ABC):
         sub_folder: Optional[str] = None,
         document_path: Optional[Path] = None,
         tags: Optional[List[str]] = None,
+        existing_id: Optional[str] = None,
+        adopt_by_name: bool = False,
     ) -> bool:
         """Publish a notebook to the destination.
 
@@ -134,9 +141,18 @@ class Destination(abc.ABC):
             sub_folder: Optional relative sub-folder path (e.g., "Work/Projects").
             document_path: Optional path to underlying raw document (PDF or EPUB).
             tags: Optional list of tags associated with the notebook or its pages.
+            existing_id: Identifier this destination returned the last time it
+                published this notebook, if one was recorded. Replacing exactly
+                that object is the only safe way to re-publish.
+            adopt_by_name: Permission to fall back to matching on title when no
+                ``existing_id`` is known. Only true when sync state says this
+                notebook was published here before, which means the note with
+                that title was almost certainly created by Living Ink.
 
         Returns:
-            True if publication succeeded.
+            True if publication succeeded. On success, implementations set
+            :attr:`last_external_id` when the destination has an identifier
+            worth remembering.
 
         Raises:
             DestinationError: Publication failed for an expected reason. The
@@ -174,6 +190,47 @@ class AppleNotesDestination(Destination):
                 Defaults to "reMarkable".
         """
         self.folder_name = folder_name
+
+    def _removal_script(self, existing_id: Optional[str], adopt_by_name: bool) -> str:
+        """Build the AppleScript fragment that removes the previous note.
+
+        Three cases, and the difference between them is the whole point of
+        this method:
+
+        * A recorded id — delete exactly that note. Nothing else can match.
+        * No id, but sync state says this notebook was published here before —
+          the note carrying this title in Living Ink's own folder was created
+          by Living Ink, so matching on title is safe enough to avoid leaving
+          a duplicate behind for every notebook synced before ids were kept.
+        * Neither — delete nothing. A duplicate note is an annoyance the user
+          can fix; a deleted note is not recoverable.
+
+        Args:
+            existing_id: Apple Notes id recorded for this notebook, if any.
+            adopt_by_name: Whether title matching is permitted as a fallback.
+
+        Returns:
+            AppleScript lines, indented to sit inside the ``tell`` block.
+        """
+        if existing_id:
+            safe_id = json.dumps(existing_id, ensure_ascii=False)
+            return f"""    -- Replace exactly the note this sync created last time
+    try
+        delete note id {safe_id}
+    on error
+        try
+            delete (every note of targetFolder whose id is {safe_id})
+        end try
+    end try
+"""
+        if adopt_by_name:
+            return """    -- Synced before ids were recorded: the note with this title in our
+    -- own folder is one we created, so replacing it will not lose anything.
+    try
+        delete (every note in targetFolder whose name is noteName)
+    end try
+"""
+        return "    -- No recorded id: create rather than guess which note to delete.\n"
 
     def _convert_to_html(self, text: str) -> str:
         """Convert plain text to the HTML format expected by Apple Notes.
@@ -284,8 +341,14 @@ class AppleNotesDestination(Destination):
         sub_folder: Optional[str] = None,
         document_path: Optional[Path] = None,
         tags: Optional[List[str]] = None,
+        existing_id: Optional[str] = None,
+        adopt_by_name: bool = False,
     ) -> bool:
         """Publish a note to Apple Notes via osascript.
+
+        The previous note is removed by identifier, never by title. Deleting
+        every note whose *name* matched destroyed unrelated notes a user had
+        written themselves, and there was no way to get them back.
 
         Args:
             notebook_name: Title of the note.
@@ -296,6 +359,9 @@ class AppleNotesDestination(Destination):
                 the top-level segment is used.
             document_path: Optional path to underlying raw document (PDF or EPUB).
             tags: Optional list of tags associated with the notebook or its pages.
+            existing_id: Apple Notes id of the note published last time.
+            adopt_by_name: Permission to match on title when no id is recorded,
+                which is the case for notebooks synced before ids were stored.
 
         Returns:
             True if AppleScript executed successfully.
@@ -305,6 +371,7 @@ class AppleNotesDestination(Destination):
                 rejected the script on every attempt.
         """
         retries = 3
+        self.last_external_id = None
 
         # Apple Notes supports 1 level of sub-folder under rootFolder.
         # If a nested path like "Work/Projects/Q1" is passed, use the top-level segment.
@@ -379,17 +446,15 @@ tell application "Notes"
         set targetFolder to folder subFolderName of rootFolder
     end if
 
-    -- Check if note exists in that folder and delete it to avoid duplication
     set noteName to {safe_name}
-    try
-        delete (every note in targetFolder whose name is noteName)
-    end try
-
+{self._removal_script(existing_id, adopt_by_name)}
     -- Create the new note with HTML body in the specific folder
     set newNote to make new note at targetFolder with properties {{name:noteName, body:{safe_body}}}
 
     -- Attach images
     {attachment_cmds}
+    -- Reported back so the next sync replaces exactly this note and no other
+    return id of newNote as string
 end tell
 """
                 result = subprocess.run(
@@ -416,6 +481,7 @@ end tell
                         f"(exit {result.returncode}): {result.stderr.strip()}"
                     )
 
+                self.last_external_id = result.stdout.strip() or None
                 logger.info("Apple Note created for %s", notebook_name)
                 return True
 
@@ -551,8 +617,14 @@ class ObsidianDestination(Destination):
         sub_folder: Optional[str] = None,
         document_path: Optional[Path] = None,
         tags: Optional[List[str]] = None,
+        existing_id: Optional[str] = None,
+        adopt_by_name: bool = False,
     ) -> bool:
         """Publish a note to Obsidian as Markdown with image attachments.
+
+        Both identity arguments are accepted and ignored: a note here is
+        identified by its path, which this destination recomputes from the
+        notebook name, and an existing file is merged rather than replaced.
 
         Args:
             notebook_name: Title of the notebook. Can be a base name (e.g. "Note")
@@ -563,6 +635,8 @@ class ObsidianDestination(Destination):
                 (e.g., "Work/Projects/Q1").
             document_path: Optional path to underlying raw document (PDF or EPUB).
             tags: Optional list of tags associated with the notebook or its pages.
+            existing_id: Unused; accepted to satisfy the Destination contract.
+            adopt_by_name: Unused; accepted to satisfy the Destination contract.
 
         Returns:
             True if the Markdown file and attachments were written successfully.
