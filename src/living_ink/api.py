@@ -120,6 +120,36 @@ class FallbackClient:
         return self._with_fallback("get_tags", doc)
 
 
+def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
+    """Find the reMarkable device token, wherever it happens to live.
+
+    The token reaches the tool by two routes: the resolved settings (config
+    file or environment) and the ``~/.rmapi`` file that registration writes.
+    Anything that needs to know whether the Cloud is usable must consult both,
+    or it will report "disconnected" for a setup that syncs perfectly well.
+
+    Args:
+        settings: Resolved settings for this run. Defaults to resolving them
+            from the environment alone.
+
+    Returns:
+        The token, or None if neither route has one.
+    """
+    resolved = settings or Settings.from_env()
+    token = resolved.remarkable_token
+    if token:
+        return token
+
+    rmapi_file = Path.home() / ".rmapi"
+    if not rmapi_file.exists():
+        return None
+    try:
+        return rmapi_file.read_text(encoding="utf-8").strip() or None
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("Could not read %s: %s", rmapi_file, e, exc_info=True)
+        return None
+
+
 def get_rmapi(settings: Optional[Settings] = None):
     """
     Get or initialize the reMarkable API client with automatic fallback.
@@ -164,14 +194,7 @@ def get_rmapi(settings: Optional[Settings] = None):
         # instead of two, which the selection further down already handles.
         logger.debug("Could not create SSH client: %s", e, exc_info=True)
 
-    token = resolved.remarkable_token
-    rmapi_file = Path.home() / ".rmapi"
-    if not token and rmapi_file.exists():
-        try:
-            token = rmapi_file.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError) as e:
-            logger.debug("Could not read %s: %s", rmapi_file, e, exc_info=True)
-            token = None
+    token = resolve_stored_token(resolved)
 
     if token:
         try:
