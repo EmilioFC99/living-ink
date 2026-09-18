@@ -56,6 +56,9 @@ packages = ["src/living_ink"]
 
 [tool.ruff]
 line-length = 100
+# Implementation plans under docs/ contain deliberately-partial pseudocode in
+# fenced blocks; ruff formats Markdown code blocks, which would rewrite it.
+exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
