@@ -793,3 +793,115 @@ class TestStatusDocumentCounts:
         out = capsys.readouterr().out
         assert "1 pending" in out
         assert "living-ink list" in out
+
+
+class TestStateCommand:
+    """`state` is the hand tool for the file everything else depends on."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """A real store on a throwaway database, wired into the command."""
+        from living_ink import pipeline
+
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        opened = pipeline.get_state_store()
+        opened.record_document("id-1", name="Journal", folder="Personal", version="v1")
+        opened.record_publication("id-1", "ObsidianDestination", "v1")
+        yield opened
+        pipeline.reset_state_store()
+
+    def _run(self, capsys, **flags):
+        """Run the command and return its exit code and output."""
+        from living_ink.cli import StateCommand
+
+        defaults = {
+            "dump": False,
+            "forget": None,
+            "repair": False,
+            "destination": None,
+            "json": False,
+        }
+        code = StateCommand().run(argparse.Namespace(**{**defaults, **flags}))
+        return code, capsys.readouterr().out
+
+    def test_the_summary_counts_the_tables(self, store, capsys):
+        _, out = self._run(capsys)
+        assert "documents" in out
+        assert "schema" in out
+
+    def test_a_missing_database_is_reported_not_created(self, tmp_path, monkeypatch, capsys):
+        from living_ink import pipeline
+
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "empty")
+        code, out = self._run(capsys)
+
+        assert code == 1
+        assert "living-ink sync" in out
+        assert not (tmp_path / "empty").exists()
+
+    def test_dump_prints_the_rows(self, store, capsys):
+        _, out = self._run(capsys, dump=True)
+        assert "Journal" in out
+        assert "[publications]" in out
+
+    def test_dump_json_is_parseable(self, store, capsys):
+        _, out = self._run(capsys, dump=True, json=True)
+        assert json.loads(out)["documents"][0]["name"] == "Journal"
+
+    def test_forget_drops_the_publication(self, store, capsys):
+        code, out = self._run(capsys, forget="Journal")
+
+        assert code == 0
+        assert store.published_versions("ObsidianDestination") == {}
+        assert "next sync" in out
+
+    def test_forget_accepts_a_folder_path(self, store, capsys):
+        code, _ = self._run(capsys, forget="Personal/Journal")
+        assert code == 0
+
+    def test_forget_can_target_one_destination(self, store, capsys):
+        store.record_publication("id-1", "AppleNotesDestination", "v1")
+
+        self._run(capsys, forget="id-1", destination="ObsidianDestination")
+
+        assert store.published_versions("AppleNotesDestination") == {"id-1": "v1"}
+
+    def test_forget_refuses_an_unknown_document(self, store, capsys):
+        code, out = self._run(capsys, forget="nope")
+        assert code == 1
+        assert "No document matches" in out
+
+    def test_forget_refuses_to_guess_between_two_matches(self, store, capsys):
+        """Picking one would silently re-OCR the wrong notebook."""
+        store.record_document("id-2", name="Journal", folder="Work", version="v1")
+
+        code, out = self._run(capsys, forget="Journal")
+
+        assert code == 1
+        assert "id-1" in out and "id-2" in out
+        assert store.published_versions("ObsidianDestination") == {"id-1": "v1"}
+
+    def test_repair_reports_a_healthy_database(self, store, capsys):
+        code, out = self._run(capsys, repair=True)
+        assert code == 0
+        assert "ok" in out
+
+    def test_repair_reports_damage_without_deleting_anything(self, store, capsys, monkeypatch):
+        monkeypatch.setattr(store, "integrity_check", lambda: "page 4 is never used")
+
+        code, out = self._run(capsys, repair=True)
+
+        assert code == 1
+        assert "page 4 is never used" in out
+        assert store.path.exists()
+
+    def test_the_command_is_registered(self):
+        assert "state" in LivingInkCLI().commands
+
+    def test_the_actions_are_mutually_exclusive(self):
+        parser = LivingInkCLI().build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["state", "--dump", "--repair"])
