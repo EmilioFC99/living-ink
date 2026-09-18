@@ -7,14 +7,23 @@ does not fail loudly — it silently destroys the developer's own working setup.
 That happened: a test setting ``REMARKABLE_TOKEN=cloud-token`` overwrote a real
 reMarkable token with the literal string ``cloud-token``. Redirecting the home
 directory for every test makes that class of accident impossible rather than
-something each new test has to remember to avoid.
+something each new test has to remember to avoid. The runtime data directory
+gets the same treatment, for the same reason.
 """
 
 import logging
+import os
+import tempfile
 
 import pytest
 
-from living_ink import logs
+# Set before anything imports the package: ``pipeline.DATA_DIR`` is resolved at
+# module load, so a fixture would run too late and the suite would read and
+# write the developer's own ``state.db``. That is not hypothetical — a status
+# test with a mocked SSH client wrote a fake tablet into the real device table.
+os.environ["LIVING_INK_DATA_DIR"] = tempfile.mkdtemp(prefix="living-ink-tests-")
+
+from living_ink import logs  # noqa: E402 - must follow the env var above
 
 
 @pytest.fixture(autouse=True)
