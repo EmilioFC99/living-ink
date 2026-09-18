@@ -484,3 +484,119 @@ class TestAllPublications:
 
     def test_an_empty_database_returns_nothing(self, store):
         assert store.all_publications() == {}
+
+
+class TestFindDocuments:
+    """A user types a name; the database is keyed by an opaque id."""
+
+    @pytest.fixture
+    def populated(self, store):
+        """Three documents, two of them sharing a name in different folders."""
+        store.record_document("id-1", name="Journal", folder="Personal")
+        store.record_document("id-2", name="Notes", folder="Work")
+        store.record_document("id-3", name="Notes", folder="Home")
+        return store
+
+    def test_an_id_matches(self, populated):
+        assert [row["id"] for row in populated.find_documents("id-1")] == ["id-1"]
+
+    def test_a_name_matches(self, populated):
+        assert [row["id"] for row in populated.find_documents("Journal")] == ["id-1"]
+
+    def test_a_name_is_case_insensitive(self, populated):
+        assert [row["id"] for row in populated.find_documents("journal")] == ["id-1"]
+
+    def test_a_folder_path_matches(self, populated):
+        assert [row["id"] for row in populated.find_documents("Work/Notes")] == ["id-2"]
+
+    def test_an_ambiguous_name_returns_every_candidate(self, populated):
+        assert len(populated.find_documents("Notes")) == 2
+
+    def test_an_id_is_never_ambiguous_with_a_name(self, store):
+        """A document named after another's id must not shadow it."""
+        store.record_document("id-1", name="Journal")
+        store.record_document("id-2", name="id-1")
+
+        assert [row["id"] for row in store.find_documents("id-1")] == ["id-1"]
+
+    def test_an_unknown_query_matches_nothing(self, populated):
+        assert populated.find_documents("nope") == []
+
+    def test_a_partial_name_does_not_match(self, populated):
+        """Forgetting the wrong notebook costs a full re-OCR; require the name."""
+        assert populated.find_documents("Jour") == []
+
+
+class TestForgetting:
+    """Starting a document over means dropping everything derived from it."""
+
+    def test_publications_are_removed(self, store):
+        store.record_document("doc-1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        assert store.forget("doc-1") == 1
+        assert store.published_versions("ObsidianDestination") == {}
+
+    def test_page_hashes_go_too(self, store):
+        store.record_document("doc-1")
+        store.record_page("doc-1", 0, source_hash="abc")
+
+        store.forget("doc-1")
+
+        assert store.get_pages("doc-1") == {}
+
+    def test_a_recorded_failure_is_cleared(self, store):
+        store.record_document("doc-1")
+        store.record_failure("doc-1", "boom")
+
+        store.forget("doc-1")
+
+        assert store.get_document("doc-1")["last_error"] is None
+
+    def test_the_document_itself_is_kept(self, store):
+        """It is still on the tablet; the next sync will see it again."""
+        store.record_document("doc-1", name="Notes")
+        store.forget("doc-1")
+
+        assert store.get_document("doc-1")["name"] == "Notes"
+
+    def test_forgetting_one_destination_leaves_the_others(self, store):
+        store.record_document("doc-1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        store.forget("doc-1", "ObsidianDestination")
+
+        assert store.published_versions("AppleNotesDestination") == {"doc-1": "v1"}
+
+    def test_forgetting_one_destination_keeps_the_page_hashes(self, store):
+        """Other destinations still rely on them."""
+        store.record_document("doc-1")
+        store.record_page("doc-1", 0, source_hash="abc")
+
+        store.forget("doc-1", "ObsidianDestination")
+
+        assert store.get_pages("doc-1")[0]["source_hash"] == "abc"
+
+
+class TestMaintenance:
+    """The two things a user can safely do to the file by hand."""
+
+    def test_counts_report_every_table(self, store):
+        store.record_document("doc-1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        counts = store.counts()
+        assert counts["documents"] == 1
+        assert counts["publications"] == 1
+        assert counts["pages"] == 0
+
+    def test_a_healthy_database_passes_its_integrity_check(self, store):
+        assert store.integrity_check() == "ok"
+
+    def test_vacuum_leaves_the_data_alone(self, store):
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        store.vacuum()
+
+        assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}

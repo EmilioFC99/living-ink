@@ -470,6 +470,14 @@ class StateStore:
     def forget(self, doc_id: str, destination: Optional[str] = None) -> int:
         """Drop publication records so a document syncs again.
 
+        Forgetting a document everywhere also drops its page hashes and any
+        recorded failure, because the point of asking is to start that
+        document over from nothing. Forgetting one destination leaves both
+        alone — the other destinations still rely on them.
+
+        Nothing outside the database is touched. The note already published
+        stays where it is; the next sync rewrites it.
+
         Args:
             doc_id: reMarkable document id.
             destination: Only forget this destination; all of them if None.
@@ -483,8 +491,14 @@ class StateStore:
                     "DELETE FROM publications WHERE doc_id = ? AND destination = ?",
                     (doc_id, destination),
                 )
-            else:
-                cursor = conn.execute("DELETE FROM publications WHERE doc_id = ?", (doc_id,))
+                return cursor.rowcount
+
+            cursor = conn.execute("DELETE FROM publications WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM pages WHERE doc_id = ?", (doc_id,))
+            conn.execute(
+                "UPDATE documents SET last_error = NULL, last_error_at = NULL WHERE id = ?",
+                (doc_id,),
+            )
             return cursor.rowcount
 
     def all_publications(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
@@ -611,6 +625,55 @@ class StateStore:
             ``"ok"`` when healthy, otherwise SQLite's description of the damage.
         """
         return str(self._conn.execute("PRAGMA integrity_check").fetchone()[0])
+
+    def counts(self) -> Dict[str, int]:
+        """Return the number of rows in each table.
+
+        Returns:
+            Mapping of table name to row count.
+        """
+        tables = ("runs", "documents", "publications", "pages")
+        return {
+            table: int(self._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in tables
+        }
+
+    def vacuum(self) -> None:
+        """Rebuild the file, reclaiming space freed by deletes.
+
+        Runs outside the usual write helper: SQLite refuses to VACUUM inside a
+        transaction.
+        """
+        with self._lock:
+            self._conn.execute("VACUUM")
+
+    def find_documents(self, query: str) -> List[Dict[str, Any]]:
+        """Find documents by id, name, or folder path.
+
+        The same three things a user might type: the id from a ``--dump``, the
+        name they see on the tablet, or ``Work/Meeting Notes``. Matching on
+        name is case-insensitive because nobody remembers the capitalisation.
+
+        Args:
+            query: Id, visible name, or ``folder/name`` path.
+
+        Returns:
+            Matching document rows. An exact id match wins outright and is
+            returned alone, so an id can never be ambiguous with a name.
+        """
+        exact = self.get_document(query)
+        if exact:
+            return [exact]
+
+        needle = query.strip().lower().strip("/")
+        matches = []
+        for document in self.all_documents():
+            name = (document["name"] or "").lower()
+            folder = (document["folder"] or "").lower().strip("/")
+            path = f"{folder}/{name}" if folder else name
+            if needle in (name, path):
+                matches.append(document)
+        return matches
 
 
 def import_legacy_json(store: StateStore, data_dir: Path) -> int:
