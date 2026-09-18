@@ -415,7 +415,9 @@ class UniversalChatProvider(TextRepairProvider):
                     # body of a 400, headers included, so this is the most
                     # likely place for the API key to reach a log file.
                     logger.error("Details: %s", redact(e.read().decode("utf-8")))
-                except Exception:
+                except (OSError, UnicodeDecodeError):
+                    # No body, or not text. The status line above is already
+                    # the useful half of the report.
                     pass
                 retry_after = e.headers.get("Retry-After") if e.headers else None
                 retryable = e.code in RETRYABLE_STATUS
@@ -423,7 +425,10 @@ class UniversalChatProvider(TextRepairProvider):
                 logger.error("%s Connection Error (%s): %s", purpose, self.name, e.reason)
                 retryable = True
             except Exception as e:
-                logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e)
+                # Broad because this is the outer edge of a network call into
+                # nine different providers; retrying an error we cannot
+                # classify would be guessing, so it is reported and dropped.
+                logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e, exc_info=True)
                 retryable = False
 
             if not retryable or attempt == MAX_ATTEMPTS:
