@@ -537,7 +537,12 @@ def collect_status(config_path: Path) -> StatusReport:
             host=report.ssh_host, port=rm_cfg.get("ssh_port", 22)
         )
 
-    token = rm_cfg.get("device_token", "")
+    # Not rm_cfg["device_token"] alone: registration stores the token in
+    # ~/.rmapi and leaves the config key empty, so reading only the config
+    # reported "Disconnected" for a setup that syncs perfectly well.
+    from living_ink.api import resolve_stored_token
+
+    token = rm_cfg.get("device_token", "") or resolve_stored_token()
     if token:
         report.cloud_ok, report.cloud_msg = verify_remarkable_token(token)
 

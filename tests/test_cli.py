@@ -195,6 +195,30 @@ def test_cmd_status_ssh_unplugged_cloud_backup(
     assert "Cloud backup active" in captured.out
 
 
+@patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
+@patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
+@patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+def test_cmd_status_finds_a_token_registration_left_in_rmapi(
+    mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, isolated_home, capsys
+):
+    """Registration stores the token in ~/.rmapi and leaves device_token empty.
+
+    Reading only the config key reported "Disconnected" for a setup that was
+    syncing from the Cloud perfectly well.
+    """
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.yml").write_text(
+        "remarkable:\n  preferred_connection: 'cloud'\n  device_token: ''\nai:\n  provider: 'none'\n"
+    )
+    (isolated_home / ".rmapi").write_text("registered-token", encoding="utf-8")
+
+    StatusCommand(root=tmp_path).run(MagicMock(json=False))
+
+    assert "Disconnected" not in capsys.readouterr().out
+    mock_verify_cloud.assert_called_once_with("registered-token")
+
+
 def test_main_version_flag(capsys):
     """'living-ink --version' outputs version."""
     with patch("sys.argv", ["living-ink", "--version"]):

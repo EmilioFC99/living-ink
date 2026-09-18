@@ -75,6 +75,28 @@ def test_get_rmapi_ssh_unplugged_falls_back_to_cloud(monkeypatch):
             assert client.active is mock_cloud
 
 
+def test_get_rmapi_never_writes_the_stored_token(monkeypatch, isolated_home):
+    """Building a client must not touch ~/.rmapi.
+
+    It used to write the token it had just resolved back to ~/.rmapi, so simply
+    constructing a client with REMARKABLE_TOKEN set overwrote whatever real
+    credential was already stored there.
+    """
+    monkeypatch.setenv("REMARKABLE_PREFERRED_CONNECTION", "cloud")
+    monkeypatch.setenv("REMARKABLE_TOKEN", "from-the-environment")
+    rmapi = isolated_home / ".rmapi"
+    rmapi.write_text("the-real-token", encoding="utf-8")
+
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        with patch("living_ink.sync.load_client_from_token") as mock_load_cloud:
+            mock_create_ssh.return_value = MagicMock()
+            mock_load_cloud.return_value = MagicMock()
+
+            get_rmapi()
+
+    assert rmapi.read_text(encoding="utf-8") == "the-real-token"
+
+
 def test_get_rmapi_cloud_preferred_with_ssh_backup(monkeypatch):
     """get_rmapi returns FallbackClient with Cloud as primary when preferred."""
     monkeypatch.setenv("REMARKABLE_PREFERRED_CONNECTION", "cloud")
