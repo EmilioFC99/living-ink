@@ -1084,6 +1084,7 @@ class DocumentJob:
     source_hashes: List[str] = field(default_factory=list)
     transcribed_pages: int = 0
     cached_pages: int = 0
+    failed_pages: int = 0
     reused_transcript: bool = False
     published_to: List[str] = field(default_factory=list)
     would_publish_to: List[str] = field(default_factory=list)
@@ -1569,6 +1570,7 @@ class SyncPipeline:
                 pages=len(job.imgs),
                 transcribed=job.transcribed_pages,
                 cached=job.cached_pages,
+                pages_failed=job.failed_pages,
                 reused_transcript=job.reused_transcript,
                 destinations=list(job.published_to or job.would_publish_to),
                 reason=(
@@ -1831,6 +1833,7 @@ class SyncPipeline:
             page_count: How many pages the zip holds.
         """
         from living_ink.extract import (
+            RenderError,
             get_background_color,
             get_page_source_hashes,
             render_page_from_document_zip,
@@ -1856,8 +1859,18 @@ class SyncPipeline:
             png_bytes = self.renders.get(key) if key else None
 
             if png_bytes is None:
-                png_bytes = render_page_from_document_zip(tmp_zip, page)
+                try:
+                    png_bytes = render_page_from_document_zip(tmp_zip, page)
+                except RenderError as e:
+                    # Named rather than counted: a page that renders to nothing
+                    # used to publish as an empty note with no error anywhere.
+                    job.failed_pages += 1
+                    log(f"Failed to render page {page} of {job.notebook}: {e}")
+                    if self.report:
+                        self.report.warn(f"{job.notebook} page {page}: {e}")
+                    continue
                 if png_bytes is None:
+                    job.failed_pages += 1
                     log(f"Failed to render page {page} of {job.notebook}.")
                     continue
                 if key:

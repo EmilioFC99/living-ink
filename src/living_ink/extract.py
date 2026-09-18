@@ -11,6 +11,7 @@ import re
 import tempfile
 import zipfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -60,10 +61,152 @@ _JSON_ERRORS = (ValueError, TypeError, KeyError)
 #: monkey-patching, the background compositing, the bounds calculation. It is
 #: part of the render cache key, so a bump correctly invalidates every cached
 #: page image rather than serving output the current code would not produce.
-RENDER_FORMAT_VERSION = 1
+RENDER_FORMAT_VERSION = 2
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
+
+#: The first bytes of every ``.rm`` file: a fixed ASCII string ending in the
+#: format version, padded to a constant width.
+_RM_HEADER_PREFIX = b"reMarkable .lines file, version="
+
+#: How much of a ``.rm`` file has to be read to learn its version.
+_RM_HEADER_LENGTH = 43
+
+#: Versions the installed parser claims to handle. ``rmscene`` accepts only
+#: v6 (``rmscene.tagged_block_common.HEADER_V6``); the v3 and v5 files written
+#: by firmware before 3.0 need a different library entirely. Rendering one
+#: anyway produces an empty SVG rather than an error, which is the silent
+#: failure this set exists to turn into a message.
+SUPPORTED_RM_VERSIONS = frozenset({6})
+
+#: SVG elements rmc emits for ink. An SVG carrying none of them drew nothing.
+_SVG_INK_ELEMENTS = ("<path", "<polyline", "<line", "<text", "<image")
+
+
+class RenderError(RuntimeError):
+    """A page could not be rendered, for a reason worth telling the user.
+
+    Distinct from the ``None`` the render functions return for the ordinary
+    misses (no such page, no temp file). This is raised only when the cause is
+    known and actionable, so the run report can name it instead of printing
+    "failed to render page 3".
+    """
+
+
+class UnsupportedRmFormat(RenderError):
+    """A ``.rm`` file declares a format version the parser does not support."""
+
+
+class BlankRenderError(RenderError):
+    """A page with strokes in it rendered to no ink at all."""
+
+
+def read_rm_version(rm_file_path: Path) -> Optional[int]:
+    """Read the format version a ``.rm`` file declares in its header.
+
+    Args:
+        rm_file_path: Path to the ``.rm`` file.
+
+    Returns:
+        The declared version, or None if the file is unreadable or does not
+        carry a reMarkable lines header at all.
+    """
+    try:
+        with open(rm_file_path, "rb") as f:
+            header = f.read(_RM_HEADER_LENGTH)
+    except OSError:
+        logger.debug("Could not read a header from %s", rm_file_path, exc_info=True)
+        return None
+
+    if not header.startswith(_RM_HEADER_PREFIX):
+        return None
+
+    try:
+        return int(header[len(_RM_HEADER_PREFIX) :].strip())
+    except ValueError:
+        logger.debug("Unparseable .rm version in %s: %r", rm_file_path, header)
+        return None
+
+
+@dataclass(frozen=True)
+class RmPageStats:
+    """What a ``.rm`` file's blocks say about the page, before rendering it.
+
+    Attributes:
+        strokes: Line items the parser understood.
+        unreadable: Blocks the parser could not decode. ``rmscene`` does not
+            raise on these — it wraps each one in an ``UnreadableBlock`` and
+            carries on, and the scene builder then drops it silently. That is
+            the exact path by which a page full of strokes renders to nothing.
+    """
+
+    strokes: int
+    unreadable: int
+
+    @property
+    def has_content(self) -> bool:
+        """Whether the page had anything the renderer was meant to draw."""
+        return bool(self.strokes or self.unreadable)
+
+
+def inspect_rm_page(rm_file_path: Path) -> Optional[RmPageStats]:
+    """Count what a ``.rm`` file holds, without rendering it.
+
+    This is the second half of the blank-page question. An SVG with no ink is
+    only a bug if the source had something to draw, and the only way to know
+    that is to look at the source rather than at the picture.
+
+    Args:
+        rm_file_path: Path to the ``.rm`` file.
+
+    Returns:
+        The page's block counts, or None if the file could not be inspected —
+        in which case the caller must not conclude anything from it.
+    """
+    try:
+        from rmscene import read_blocks
+        from rmscene.scene_stream import SceneLineItemBlock, UnreadableBlock
+    except ImportError:
+        return None
+
+    strokes = 0
+    unreadable = 0
+    try:
+        with open(rm_file_path, "rb") as f:
+            for block in read_blocks(f):
+                if isinstance(block, UnreadableBlock):
+                    unreadable += 1
+                elif isinstance(block, SceneLineItemBlock) and block.item.value is not None:
+                    strokes += 1
+    except Exception:
+        # Deliberately broad, and for the same reason the render path is: this
+        # walks a binary format written by firmware nobody here controls. A
+        # count we could not take is "unknown", never "zero".
+        logger.debug("Could not inspect %s", rm_file_path, exc_info=True)
+        return None
+
+    return RmPageStats(strokes=strokes, unreadable=unreadable)
+
+
+def _svg_has_ink(svg_path: Path) -> bool:
+    """Report whether an SVG contains any drawing element at all.
+
+    Args:
+        svg_path: Path to the SVG rmc produced.
+
+    Returns:
+        True if the markup holds at least one ink element. An unreadable file
+        reads as True, so a failure here can never be mistaken for a blank
+        page.
+    """
+    try:
+        markup = svg_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.debug("Could not read back %s", svg_path, exc_info=True)
+        return True
+
+    return any(element in markup for element in _SVG_INK_ELEMENTS)
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
@@ -268,6 +411,11 @@ def render_composite_pdf_page(
 
         try:
             rm_png = render_rm_file_to_png(tmp_rm)
+        except RenderError as e:
+            # The PDF page underneath is still worth having, and still worth
+            # transcribing. Losing the annotation layer is not losing the page.
+            logger.warning("Annotation layer on PDF page %s: %s", page_index, e)
+            rm_png = None
         finally:
             tmp_rm.unlink(missing_ok=True)
 
@@ -437,9 +585,23 @@ def render_rm_file_to_png(
 
     Returns:
         PNG image bytes, or None if rendering failed
+
+    Raises:
+        UnsupportedRmFormat: If the file declares a format version the
+            installed parser does not support.
+        BlankRenderError: If a page that contains strokes rendered to no ink.
     """
     import subprocess
     import tempfile
+
+    version = read_rm_version(rm_file_path)
+    if version is not None and version not in SUPPORTED_RM_VERSIONS:
+        supported = ", ".join(str(v) for v in sorted(SUPPORTED_RM_VERSIONS))
+        raise UnsupportedRmFormat(
+            f"{rm_file_path.name} is .rm format version {version}; this build reads "
+            f"version {supported}. Upgrade living-ink, or file an issue naming the "
+            f"version and your firmware."
+        )
 
     tmp_svg_path = None
     tmp_png_path = None
@@ -469,6 +631,21 @@ def render_rm_file_to_png(
         # Check if the file was actually created and has content
         if not tmp_svg_path.exists() or tmp_svg_path.stat().st_size == 0:
             return None
+
+        # A page the user left blank is legal and renders to nothing. A page
+        # with strokes that renders to nothing is a parser or exporter
+        # mismatch, and used to reach the destination as an empty note.
+        if not _svg_has_ink(tmp_svg_path):
+            stats = inspect_rm_page(rm_file_path)
+            if stats is not None and stats.has_content:
+                held = f"{stats.strokes} strokes"
+                if stats.unreadable:
+                    held += f" and {stats.unreadable} blocks this build cannot decode"
+                raise BlankRenderError(
+                    f"{rm_file_path.name} holds {held} but rendered to an empty image. "
+                    f"Known cause: an rmc/rmscene version that cannot draw what this "
+                    f"firmware wrote — try upgrading living-ink."
+                )
 
         # Get content bounds from SVG
         bounds = _get_svg_content_bounds(tmp_svg_path)

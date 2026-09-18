@@ -192,14 +192,20 @@ class StateStore:
         """Create or upgrade the schema to :data:`SCHEMA_VERSION`."""
         with self._lock:
             current = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if current == SCHEMA_VERSION:
-                return
             if current > SCHEMA_VERSION:
                 raise RuntimeError(
                     f"{self.path} was written by a newer Living Ink "
                     f"(schema {current}, this build understands {SCHEMA_VERSION})."
                 )
-            self._conn.executescript(_SCHEMA)
+            if current != SCHEMA_VERSION:
+                self._conn.executescript(_SCHEMA)
+
+            # Checked on every open, not only on a version change. A column
+            # added to _ADDED_COLUMNS without a matching SCHEMA_VERSION bump
+            # would otherwise never be applied, and the miss does not surface
+            # until something writes to it — a live sync died on exactly that
+            # ("table device has no column named measured"). Four PRAGMA
+            # table_info calls are not worth a class of silent breakage.
             self._add_missing_columns()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 

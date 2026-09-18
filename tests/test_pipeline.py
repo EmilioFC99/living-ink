@@ -1146,6 +1146,7 @@ class TestRenderCaching:
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
+        pipe.report = RunReport()
         pipe.saved = []
         pipe._save_page = lambda job, page, data, label="Saved": pipe.saved.append((page, data))
         return pipe
@@ -1162,6 +1163,80 @@ class TestRenderCaching:
             display_title="Notes",
             keep_temp=False,
         )
+
+    def test_a_render_error_names_its_reason_in_the_report(self, tmp_path, rendered, monkeypatch):
+        """A blank or unparseable page used to publish as an empty note."""
+        from living_ink.extract import UnsupportedRmFormat
+
+        def refuse(zip_path, page, **kwargs):
+            raise UnsupportedRmFormat("page-2.rm is .rm format version 3")
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", refuse, raising=True
+        )
+        pipe = self._pipeline(tmp_path)
+
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+
+        assert pipe.saved == []
+        assert any("format version 3" in w for w in pipe.report.warnings)
+
+    def test_the_document_counts_the_pages_it_lost(self, tmp_path, rendered, monkeypatch):
+        """The outcome reads the count, so the summary can stop printing a clean ✓."""
+        from living_ink.extract import UnsupportedRmFormat
+
+        def refuse(zip_path, page, **kwargs):
+            raise UnsupportedRmFormat("nope")
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", refuse, raising=True
+        )
+        pipe = self._pipeline(tmp_path)
+        job = self._job()
+
+        pipe._render_zip_pages(job, tmp_path / "doc.zip", 2)
+
+        assert job.failed_pages == 2
+
+    def test_one_bad_page_does_not_cost_the_others(self, tmp_path, rendered, monkeypatch):
+        def refuse_page_one(zip_path, page, **kwargs):
+            from living_ink.extract import BlankRenderError
+
+            if page == 1:
+                raise BlankRenderError("page-1.rm holds 12 strokes but rendered to an empty image")
+            return b"png-2"
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", refuse_page_one, raising=True
+        )
+        pipe = self._pipeline(tmp_path)
+
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+
+        assert [page for page, _ in pipe.saved] == [2]
+
+    def test_a_refused_page_is_not_cached_as_an_empty_render(self, tmp_path, rendered, monkeypatch):
+        """The next run, with a renderer that works, must still do the work."""
+        from living_ink.extract import UnsupportedRmFormat
+
+        broken = True
+
+        def maybe_refuse(zip_path, page, **kwargs):
+            if broken:
+                raise UnsupportedRmFormat("nope")
+            rendered.append(page)
+            return f"png-{page}".encode()
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", maybe_refuse, raising=True
+        )
+        self._pipeline(tmp_path)._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == []
+
+        broken = False
+        again = self._pipeline(tmp_path)
+        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        assert rendered == [1, 2]
 
     def test_the_first_run_renders_every_page(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path)

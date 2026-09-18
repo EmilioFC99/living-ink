@@ -201,3 +201,68 @@ class TestNameTruncation:
 
     def test_a_name_of_exactly_the_limit_is_not_clipped(self):
         assert "…" not in DocumentOutcome(name="A" * 24, status=SKIPPED).describe()
+
+
+class TestPartialDocuments:
+    """A note that published without every page must not read as a clean ✓."""
+
+    def _partial(self, missing=1, status=PUBLISHED):
+        return DocumentOutcome(
+            name="Sketches",
+            status=status,
+            pages=3,
+            transcribed=2,
+            destinations=["Obsidian"],
+            pages_failed=missing,
+        )
+
+    def test_a_missing_page_is_marked(self):
+        assert self._partial().is_partial is True
+
+    def test_a_complete_document_is_not(self):
+        assert _published().is_partial is False
+
+    def test_a_failed_document_is_not_merely_partial(self):
+        """It did not publish at all; ✗ is the honest marker."""
+        outcome = DocumentOutcome(name="Sketches", status=FAILED, pages_failed=3)
+        assert outcome.is_partial is False
+
+    def test_the_line_warns_instead_of_ticking(self):
+        line = self._partial().describe()
+        assert line.lstrip().startswith("⚠")
+        assert "✓" not in line
+
+    def test_the_line_says_how_many_pages_are_gone(self):
+        assert "(2 pages missing)" in self._partial(missing=2).describe()
+        assert "(1 page missing)" in self._partial(missing=1).describe()
+
+    def test_a_dry_run_can_be_partial_too(self):
+        assert self._partial(status=WOULD_PUBLISH).is_partial is True
+
+    def test_the_summary_totals_the_damage(self):
+        report = RunReport()
+        report.add(self._partial(missing=2))
+        report.add(_published())
+        report.finish()
+
+        assert report.partial == 1
+        assert report.pages_failed == 2
+        assert "1 document(s) published without every page" in report.render()
+
+    def test_a_clean_run_says_nothing_about_missing_pages(self):
+        report = RunReport()
+        report.add(_published())
+        report.finish()
+
+        assert report.partial == 0
+        assert "without every page" not in report.render()
+
+    def test_json_carries_the_counts(self):
+        report = RunReport()
+        report.add(self._partial(missing=2))
+        report.finish()
+
+        data = json.loads(report.as_json())
+        assert data["partial"] == 1
+        assert data["pages_failed"] == 2
+        assert data["documents"][0]["pages_failed"] == 2

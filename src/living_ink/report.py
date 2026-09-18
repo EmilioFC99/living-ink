@@ -47,6 +47,8 @@ class DocumentOutcome:
         reason: Why it was skipped or how it failed.
         reused_transcript: Whether the run adopted an existing transcript whole
             and so read no pages at all.
+        pages_failed: Pages that could not be rendered. The note still
+            published, without them, so a ✓ alone would overstate the result.
     """
 
     name: str
@@ -58,6 +60,12 @@ class DocumentOutcome:
     destinations: List[str] = field(default_factory=list)
     reason: Optional[str] = None
     reused_transcript: bool = False
+    pages_failed: int = 0
+
+    @property
+    def is_partial(self) -> bool:
+        """Whether the note published but is missing pages."""
+        return bool(self.pages_failed) and self.status in (PUBLISHED, WOULD_PUBLISH)
 
     def describe(self) -> str:
         """Render this document as one line of the summary table.
@@ -65,7 +73,7 @@ class DocumentOutcome:
         Returns:
             A single line, already padded to line up with its neighbours.
         """
-        marker = _MARKERS.get(self.status, "·")
+        marker = "⚠" if self.is_partial else _MARKERS.get(self.status, "·")
         # Truncated names are marked, so a clipped title does not read as a
         # notebook that is genuinely called "Fundamentals of Data Eng".
         name = self.name if len(self.name) <= 24 else self.name[:23] + "…"
@@ -85,7 +93,11 @@ class DocumentOutcome:
             work = f"{self.transcribed} transcribed, {self.cached} cached"
         where = ", ".join(self.destinations) or "nowhere"
         arrow = "⇢" if self.status == WOULD_PUBLISH else "→"
-        return f"{line} {pages:<9} {work:<28} {arrow} {where}"
+        described = f"{line} {pages:<9} {work:<28} {arrow} {where}"
+        if self.is_partial:
+            missing = f"{self.pages_failed} page{'' if self.pages_failed == 1 else 's'}"
+            described += f"   ({missing} missing)"
+        return described
 
 
 @dataclass
@@ -159,6 +171,16 @@ class RunReport:
         return len(self._of(FAILED))
 
     @property
+    def partial(self) -> int:
+        """Documents that published without every page."""
+        return len([d for d in self.documents if d.is_partial])
+
+    @property
+    def pages_failed(self) -> int:
+        """Pages that could not be rendered, across the whole run."""
+        return sum(d.pages_failed for d in self.documents)
+
+    @property
     def transcribed(self) -> int:
         """Pages sent to the AI provider, across the whole run."""
         return sum(d.transcribed for d in self.documents)
@@ -188,6 +210,8 @@ class RunReport:
             "would_publish": self.would_publish,
             "skipped": self.skipped,
             "failed": self.failed,
+            "partial": self.partial,
+            "pages_failed": self.pages_failed,
             "pages_transcribed": self.transcribed,
             "pages_cached": self.cached,
             "cache_hit_rate": self.cache_hit_rate,
@@ -229,5 +253,10 @@ class RunReport:
             )
         if self.failed:
             lines.append(f"{self.failed} document(s) failed; see the lines marked ✗ above.")
+        if self.partial:
+            lines.append(
+                f"{self.partial} document(s) published without every page; "
+                f"{self.pages_failed} page(s) could not be rendered — see ⚠ above."
+            )
         lines.extend(f"⚠️  {w}" for w in self.warnings)
         return "\n".join(lines)
