@@ -59,6 +59,9 @@ class FallbackClient:
         except UnsupportedOperation:
             raise
         except Exception as e:
+            # Broad on purpose: failover exists precisely for the failures
+            # nobody enumerated. UnsupportedOperation is re-raised above,
+            # because the backup cannot serve what the Protocol does not offer.
             if not self.backup or self.active is self.backup:
                 raise
             logger.warning(
@@ -92,6 +95,8 @@ class FallbackClient:
         try:
             return self.active.download(doc)
         except Exception as e:
+            # Same reasoning as _with_fallback: any failure is worth a retry
+            # on the other transport, and the last one standing re-raises.
             if not self.backup or self.active is self.backup:
                 raise
             logger.warning(
@@ -154,14 +159,18 @@ def get_rmapi(settings: Optional[Settings] = None):
             host=resolved.ssh_host, user=resolved.ssh_user, port=resolved.ssh_port
         )
     except Exception as e:
-        logger.debug(f"Could not create SSH client: {e}")
+        # Broad: an SSH library that will not even construct must not stop the
+        # Cloud client below from being built. The result is one transport
+        # instead of two, which the selection further down already handles.
+        logger.debug("Could not create SSH client: %s", e, exc_info=True)
 
     token = resolved.remarkable_token
     rmapi_file = Path.home() / ".rmapi"
     if not token and rmapi_file.exists():
         try:
             token = rmapi_file.read_text(encoding="utf-8").strip()
-        except Exception:
+        except (OSError, UnicodeDecodeError) as e:
+            logger.debug("Could not read %s: %s", rmapi_file, e, exc_info=True)
             token = None
 
     if token:
@@ -171,8 +180,10 @@ def get_rmapi(settings: Optional[Settings] = None):
             # Also persist to ~/.rmapi for compatibility
             rmapi_file.write_text(token, encoding="utf-8")
             cloud_client = load_client_from_token(token)
-        except Exception as e:
-            logger.debug(f"Could not load Cloud client: {e}")
+        except (OSError, ValueError) as e:
+            # A token file that cannot be written or parsed. SSH may still be
+            # available, so this is reported and the selection continues.
+            logger.debug("Could not load Cloud client: %s", e, exc_info=True)
 
     # 3. Connection selection with fallback
     if preferred == "ssh":
@@ -247,7 +258,10 @@ def register_and_get_token(one_time_code: str) -> str:
 
         return token_json
     except Exception as e:
-        raise RuntimeError(str(e))
+        # Broad because registration reaches the network, the filesystem and a
+        # JSON encoder, and the caller is a wizard that wants one sentence.
+        # Chained, so the original traceback survives in the log.
+        raise RuntimeError(str(e)) from e
 
 
 def download_raw_file(client: RemarkableTransport, doc: Document, extension: str):
@@ -312,8 +326,11 @@ def get_document_tags(client: RemarkableTransport, doc: Document) -> List[str]:
         tags = client.get_tags(doc)
         if tags:
             return list(tags)
-    except Exception:
-        pass
+    except Exception as e:
+        # Tags are optional metadata and the two transports read them from
+        # different places. Whatever went wrong, the document itself may still
+        # carry them, so fall through rather than fail the notebook.
+        logger.debug("Could not read tags for %s: %s", doc.id, e, exc_info=True)
     if doc.tags:
         return list(doc.tags)
     return []
