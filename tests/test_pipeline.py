@@ -3,7 +3,10 @@
 import os
 import subprocess
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from living_ink import pipeline
@@ -376,3 +379,127 @@ class TestRendererDispatch:
     def test_anything_else_renders_as_a_notebook(self):
         assert SyncPipeline._RENDERERS.get("notebook") is None
         assert SyncPipeline._RENDERERS.get("djvu") is None
+
+
+class TestPageConcurrency:
+    """Pages are transcribed several at a time, but always reported in order."""
+
+    def _pipeline(self, concurrency: int) -> SyncPipeline:
+        p = SyncPipeline(destinations=[])
+        p.settings = replace(p.settings, ocr_concurrency=concurrency)
+        return p
+
+    def test_results_stay_in_page_order(self):
+        """A slow first page must not end up after a fast last page."""
+        pipeline_obj = self._pipeline(4)
+        paths = [Path(f"page-{i}.png") for i in range(4)]
+
+        def transcribe(path, use_vision_ocr):
+            # Earlier pages finish last, which reorders anything unordered.
+            time.sleep(0.05 * (len(paths) - int(path.stem.split("-")[1])))
+            return path.name, path.name
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            results = pipeline_obj._transcribe_pages(paths, use_vision_ocr=True)
+
+        assert [cleaned for _, cleaned in results] == [p.name for p in paths]
+
+    def test_pages_are_transcribed_concurrently(self):
+        """Four pages at width four take about one page's time, not four."""
+        pipeline_obj = self._pipeline(4)
+        paths = [Path(f"page-{i}.png") for i in range(4)]
+
+        def transcribe(path, use_vision_ocr):
+            time.sleep(0.1)
+            return "", ""
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            started = time.monotonic()
+            pipeline_obj._transcribe_pages(paths, use_vision_ocr=True)
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 0.3, f"pages appear to have run serially ({elapsed:.2f}s)"
+
+    def test_concurrency_of_one_runs_serially(self):
+        pipeline_obj = self._pipeline(1)
+        paths = [Path("a.png"), Path("b.png")]
+        in_flight = []
+
+        def transcribe(path, use_vision_ocr):
+            in_flight.append(path.name)
+            assert len(in_flight) == 1
+            in_flight.pop()
+            return path.name, path.name
+
+        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
+            results = pipeline_obj._transcribe_pages(paths, use_vision_ocr=False)
+
+        assert results == [("a.png", "a.png"), ("b.png", "b.png")]
+
+    def test_no_pages_needs_no_workers(self):
+        assert self._pipeline(4)._transcribe_pages([], use_vision_ocr=True) == []
+
+    def test_vision_result_is_used_for_both_transcripts(self):
+        pipeline_obj = self._pipeline(1)
+
+        with patch.object(pipeline_obj, "_vision_ocr_page", return_value="clean text"):
+            assert pipeline_obj._transcribe_page(Path("p.png"), True) == (
+                "clean text",
+                "clean text",
+            )
+
+    def test_empty_vision_result_falls_back_to_google(self):
+        pipeline_obj = self._pipeline(1)
+
+        with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
+            with patch.object(pipeline_obj, "_google_ocr_page", return_value=("raw", "clean")):
+                assert pipeline_obj._transcribe_page(Path("p.png"), True) == ("raw", "clean")
+
+
+class TestDryRun:
+    """A dry run transcribes as usual, then publishes and records nothing."""
+
+    def _job(self, tmp_path) -> DocumentJob:
+        transcript = tmp_path / "Notes_clean.txt"
+        transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
+        return make_job(folder_path="Work", clean_out_txt=transcript)
+
+    def test_nothing_is_published(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log") as recorded:
+            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+
+        assert dest.published == []
+        recorded.assert_not_called()
+
+    def test_it_reports_where_the_transcript_landed(self, tmp_path, capsys):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        job = self._job(tmp_path)
+
+        pipeline_obj._publish(job, {"nb-1": [dest]})
+        out = capsys.readouterr().out
+
+        assert "Dry run" in out
+        assert str(job.clean_out_txt) in out
+
+    def test_a_normal_run_still_publishes(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log") as recorded:
+            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+
+        assert len(dest.published) == 1
+        recorded.assert_called_once()
+
+    def test_dry_run_keeps_the_artifacts_it_points_at(self):
+        assert SyncPipeline(options=SyncOptions(dry_run=True)).keep_temp is True
+        assert SyncPipeline(options=SyncOptions()).keep_temp is False
+
+    def test_the_flag_reaches_the_options(self):
+        args = SimpleNamespace(dry_run=True)
+        assert SyncOptions.from_args(args).dry_run is True
+        assert SyncOptions.from_args(SimpleNamespace()).dry_run is False

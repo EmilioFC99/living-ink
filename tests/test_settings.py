@@ -6,6 +6,7 @@ import pytest
 
 from living_ink.settings import (
     DEFAULT_APPLE_NOTES_FOLDER,
+    DEFAULT_OCR_CONCURRENCY,
     DEFAULT_SSH_HOST,
     Settings,
     as_bool,
@@ -147,3 +148,33 @@ class TestPrecedence:
     def test_from_env_defaults_to_os_environ(self, monkeypatch):
         monkeypatch.setenv("APPLE_NOTES_FOLDER", "FromProcess")
         assert Settings.from_env().apple_notes_folder == "FromProcess"
+
+
+class TestOcrConcurrency:
+    """How many pages are transcribed at once is configurable, and never zero."""
+
+    def test_defaults_to_a_handful(self):
+        assert Settings.resolve(config={}, env={}).ocr_concurrency == DEFAULT_OCR_CONCURRENCY
+
+    def test_config_sets_it(self):
+        s = Settings.resolve(config={"sync": {"ocr_concurrency": 8}}, env={})
+        assert s.ocr_concurrency == 8
+
+    def test_env_outranks_config(self):
+        s = Settings.resolve(
+            config={"sync": {"ocr_concurrency": 8}}, env={"SYNC_OCR_CONCURRENCY": "2"}
+        )
+        assert s.ocr_concurrency == 2
+
+    def test_one_disables_concurrency(self):
+        assert (
+            Settings.resolve(config={"sync": {"ocr_concurrency": 1}}, env={}).ocr_concurrency == 1
+        )
+
+    def test_zero_or_negative_falls_back_to_serial(self):
+        assert (
+            Settings.resolve(config={"sync": {"ocr_concurrency": 0}}, env={}).ocr_concurrency == 1
+        )
+        assert (
+            Settings.resolve(config={"sync": {"ocr_concurrency": -4}}, env={}).ocr_concurrency == 1
+        )

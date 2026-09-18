@@ -70,14 +70,14 @@ Publish via Destination.publish()
 
 **AI providers are presets first, classes second.** Any backend speaking the OpenAI chat API is an entry in `PROVIDER_PRESETS`, not code. One that does not is a `TextRepairProvider` subclass with `from_config()`, decorated `@register_provider("<name>")`; `get_provider()` checks the registry before the presets. Vision OCR and text repair are the same call path with different system prompts.
 
-**Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry.
+**Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry. `_ocr_pages` transcribes `settings.ocr_concurrency` pages at a time and reassembles them in page order; `--dry-run` short-circuits `_publish` so nothing is sent and nothing is recorded as synced.
 
 ## Things that will bite you
 
 - **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
-- **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR.
+- **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; `--dry-run` implies it.
 - **`extract.py` monkey-patches `rmc`** to control SVG background and bounds. Upgrading `rmc`/`rmscene` is the likely cause of blank or clipped renders.
 
 ## Configuration
@@ -93,9 +93,11 @@ Publish via Destination.publish()
 | `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
 | `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
+| `config.yml` | `sync.ocr_concurrency` | Pages transcribed at once (default 4; 1 is serial) |
 | env var | `REMARKABLE_PREFERRED_CONNECTION` | Override preferred method |
 | env var | `REMARKABLE_USE_SSH` | Override USB SSH toggle |
 | env var | `REMARKABLE_SSH_HOST` / `REMARKABLE_SSH_PORT` | SSH overrides |
+| env var | `SYNC_OCR_CONCURRENCY` | Override page transcription concurrency |
 | env var | `ENABLE_REPAIR` | Toggle LLM cleanup (`true`/`false`) |
 | env var | `LIVING_INK_CONFIG` / `LIVING_INK_CONFIG_DIR` / `LIVING_INK_DATA_DIR` | Path overrides |
 
@@ -105,6 +107,7 @@ Publish via Destination.publish()
 uv sync --all-extras                                  # install deps (incl. dev)
 uv run living-ink --help                              # CLI: sync | setup | status
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
+uv run living-ink sync --dry-run                      # transcribe, publish nothing
 uv run living-ink status --json                       # machine-readable health check
 
 uv run ruff check .           # lint

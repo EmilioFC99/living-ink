@@ -400,3 +400,23 @@ def test_cli_default_routing_to_setup(tmp_path):
         code = cli.run([])
         assert code == 0
         mock_setup_run.assert_called_once()
+
+
+def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
+    """--dry-run is an option on the run, not a setting on disk."""
+    args = argparse.Namespace(
+        notebook=None,
+        limit=0,
+        folder=None,
+        ssh=False,
+        cloud=False,
+        sync_pdfs=False,
+        sync_epubs=False,
+        all_types=False,
+        keep_temp=False,
+        dry_run=True,
+    )
+    pipeline_obj = _run_sync_capturing_pipeline(args, tmp_path)
+
+    assert pipeline_obj.dry_run is True
+    assert pipeline_obj.keep_temp is True
