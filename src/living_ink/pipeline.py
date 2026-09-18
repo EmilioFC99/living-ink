@@ -1082,6 +1082,7 @@ class DocumentJob:
     source_hashes: List[str] = field(default_factory=list)
     transcribed_pages: int = 0
     cached_pages: int = 0
+    reused_transcript: bool = False
     published_to: List[str] = field(default_factory=list)
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
@@ -1538,6 +1539,7 @@ class SyncPipeline:
                 pages=len(job.imgs),
                 transcribed=job.transcribed_pages,
                 cached=job.cached_pages,
+                reused_transcript=job.reused_transcript,
                 destinations=list(job.published_to or job.would_publish_to),
                 reason=(
                     None
@@ -2204,6 +2206,7 @@ class SyncPipeline:
 
         log(f"Reusing the existing transcript for {job.notebook}: {existing}")
         job.clean_out_txt = existing
+        job.reused_transcript = True
         return True
 
     # ── Stage 6: transcripts ─────────────────────────────────────────────
