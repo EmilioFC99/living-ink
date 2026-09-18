@@ -20,7 +20,7 @@ import yaml
 from PIL import Image, ImageFilter, ImageOps
 
 from living_ink import logs, state
-from living_ink.cache import CACHE_DIRNAME, TranscriptCache
+from living_ink.cache import CACHE_DIRNAME, RENDER_CACHE_DIRNAME, RenderCache, TranscriptCache
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import (
     ocr_and_repair,
@@ -97,6 +97,7 @@ DOCS_DIR = DATA_DIR / "remarkable_documents"
 # transcription is that it outlives the purge which removes the page it came
 # from. See living_ink.cache.
 TRANSCRIPT_CACHE_DIR = DATA_DIR / CACHE_DIRNAME
+RENDER_CACHE_DIR = DATA_DIR / RENDER_CACHE_DIRNAME
 LOGS_DIR = get_logs_dir()
 LOG_PATH = LOGS_DIR / "pipeline.log"
 
@@ -1171,6 +1172,14 @@ class SyncPipeline:
         self._cache_hits = 0
         self._cache_misses = 0
 
+        # 5. Render cache. Rendering costs CPU rather than money, but it is
+        # the slowest local step and just as pure, so it caches the same way.
+        self.renders = RenderCache(
+            RENDER_CACHE_DIR,
+            enabled=self.settings.render_cache,
+            max_age_days=self.settings.cache_max_age_days,
+        )
+
     # The resolved settings are the single source of truth; these read-only
     # views keep the pipeline's long-standing attribute names working.
 
@@ -1626,7 +1635,6 @@ class SyncPipeline:
         from living_ink.extract import (
             extract_text_from_epub,
             get_document_page_count,
-            render_page_from_document_zip,
         )
 
         if self._ensure_source_file(job, tmp_zip, client):
@@ -1635,10 +1643,7 @@ class SyncPipeline:
         page_count = get_document_page_count(tmp_zip)
         if page_count > 0:
             log(f"Rendering {page_count} annotation pages for EPUB '{job.notebook}'...")
-            for page in range(1, page_count + 1):
-                png_bytes = render_page_from_document_zip(tmp_zip, page)
-                if png_bytes:
-                    self._save_page(job, page, png_bytes)
+            self._render_zip_pages(job, tmp_zip, page_count)
 
     def _render_notebook(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
         """Render every page of a handwritten notebook.
@@ -1647,7 +1652,7 @@ class SyncPipeline:
             _StopProcessing: If the notebook is empty. That is not a failure —
                 there is simply nothing to publish.
         """
-        from living_ink.extract import get_document_page_count, render_page_from_document_zip
+        from living_ink.extract import get_document_page_count
 
         page_count = get_document_page_count(tmp_zip)
         if page_count == 0:
@@ -1656,12 +1661,71 @@ class SyncPipeline:
             )
 
         log(f"Rendering {page_count} pages for {job.notebook}...")
+        self._render_zip_pages(job, tmp_zip, page_count)
+
+    def _render_zip_pages(self, job: DocumentJob, tmp_zip: Path, page_count: int) -> None:
+        """Render every page of a document zip, reusing what has not changed.
+
+        Turning one ``.rm`` page into a PNG goes through rmc, an SVG, and
+        PyMuPDF, and it is the slowest local step in a sync. It is also pure:
+        the same strokes rendered by the same libraries give the same image.
+        So a page whose source is byte-identical to one already rendered is
+        served from the cache and never re-rendered.
+
+        Args:
+            job: The job being rendered.
+            tmp_zip: The downloaded document zip.
+            page_count: How many pages the zip holds.
+        """
+        from living_ink.extract import (
+            get_background_color,
+            get_page_source_hashes,
+            render_page_from_document_zip,
+            renderer_fingerprint,
+        )
+
+        source_hashes = get_page_source_hashes(tmp_zip) if self.renders.enabled else []
+        # The background is chosen per run rather than baked into the build,
+        # so it belongs in the key rather than in the renderer fingerprint.
+        fingerprint = f"{renderer_fingerprint()}:{get_background_color()}" if source_hashes else ""
+
+        reused = 0
         for page in range(1, page_count + 1):
-            png_bytes = render_page_from_document_zip(tmp_zip, page)
+            key = self._render_key(source_hashes, page, fingerprint)
+            png_bytes = self.renders.get(key) if key else None
+
             if png_bytes is None:
-                log(f"Failed to render page {page} of {job.notebook}.")
-                continue
+                png_bytes = render_page_from_document_zip(tmp_zip, page)
+                if png_bytes is None:
+                    log(f"Failed to render page {page} of {job.notebook}.")
+                    continue
+                if key:
+                    self.renders.put(key, png_bytes)
+            else:
+                reused += 1
+
             self._save_page(job, page, png_bytes)
+
+        if reused:
+            log(f"{reused} of {page_count} pages were already rendered; reused as-is.")
+
+    def _render_key(self, source_hashes: List[str], page: int, fingerprint: str) -> Optional[str]:
+        """Return the render cache key for one page, or None if it has none.
+
+        Args:
+            source_hashes: Per-page source digests, in page order.
+            page: One-based page number.
+            fingerprint: Identifies the renderer and the background colour.
+
+        Returns:
+            A cache key, or None when the page's source could not be hashed.
+        """
+        if page > len(source_hashes):
+            return None
+        digest = source_hashes[page - 1]
+        if not digest:
+            return None
+        return self.renders.key(digest.encode("utf-8"), fingerprint)
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
         """Write one rendered page image into the white-background directory."""
