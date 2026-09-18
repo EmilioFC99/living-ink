@@ -349,7 +349,9 @@ def load_processed_log(dest_name: str):
     return get_state_store().published_versions(dest_name)
 
 
-def add_to_processed_log(dest_name: str, doc_id, version, run_id=None, external_id=None):
+def add_to_processed_log(
+    dest_name: str, doc_id, version, run_id=None, external_id=None, target=None
+):
     """Record that a document reached a destination.
 
     Args:
@@ -359,9 +361,10 @@ def add_to_processed_log(dest_name: str, doc_id, version, run_id=None, external_
         run_id: Run that published it, when one is in progress.
         external_id: Identifier the destination gave the note, so the next
             sync replaces that exact note rather than one sharing its title.
+        target: Where the note landed, so a later run can tell it has moved.
     """
     get_state_store().record_publication(
-        doc_id, dest_name, version, run_id=run_id, external_id=external_id
+        doc_id, dest_name, version, run_id=run_id, external_id=external_id, target=target
     )
 
 
@@ -2092,6 +2095,7 @@ class SyncPipeline:
                         job.version,
                         run_id=self.run_id,
                         external_id=dest.last_external_id,
+                        target=dest.last_target,
                     )
                 else:
                     all_success = False
@@ -2177,6 +2181,7 @@ class SyncPipeline:
                 # Only when we already know we published here before: then the
                 # note carrying this title is one we created.
                 adopt_by_name=bool(previous) and not existing_id,
+                doc_id=job.notebook_id,
             )
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")

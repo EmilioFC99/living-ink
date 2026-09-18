@@ -32,7 +32,18 @@ MANAGED_END = "<!-- living-ink:end -->"
 
 #: Frontmatter keys Living Ink writes. Everything else in the block is the
 #: user's and is preserved in its original order and formatting.
-OWNED_FRONTMATTER_KEYS = ("created", "updated", "synced", "source", "type", "document", "tags")
+OWNED_FRONTMATTER_KEYS = (
+    # First, so the identity of the note is the first thing anyone reading the
+    # raw file sees. It is also what lets a moved note still be recognised.
+    "living_ink_id",
+    "created",
+    "updated",
+    "synced",
+    "source",
+    "type",
+    "document",
+    "tags",
+)
 
 #: A key line in a YAML block: not indented, not a list item, not a comment.
 _KEY_LINE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")

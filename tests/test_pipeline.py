@@ -35,6 +35,7 @@ class MockDestination(Destination):
         tags: list = None,
         existing_id: str = None,
         adopt_by_name: bool = False,
+        doc_id: str = None,
     ) -> bool:
         self.published.append(
             {
@@ -46,6 +47,7 @@ class MockDestination(Destination):
                 "tags": tags,
                 "existing_id": existing_id,
                 "adopt_by_name": adopt_by_name,
+                "doc_id": doc_id,
             }
         )
         return True
@@ -1209,3 +1211,42 @@ class TestRenderCaching:
         pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         assert rendered == [1, 2]
         assert pipe.renders.stats()[0] == 1
+
+
+class TestPublicationIdentity:
+    """A destination is told which document it is publishing, and where it put it."""
+
+    def _job(self, tmp_path) -> DocumentJob:
+        clean = tmp_path / "Notes_clean.txt"
+        clean.write_text("Transcript", encoding="utf-8")
+        return DocumentJob(
+            item={"ID": "nb-1"},
+            notebook="Notes",
+            notebook_id="nb-1",
+            doc_type="notebook",
+            version="hash-1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+            clean_out_txt=clean,
+        )
+
+    def test_the_document_id_reaches_the_destination(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert dest.published[0]["doc_id"] == "nb-1"
+
+    def test_where_the_note_landed_is_recorded(self, tmp_path):
+        dest = MockDestination("MockDest")
+        dest.last_target = "Work/Notes.md"
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log") as recorded:
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert recorded.call_args.kwargs["target"] == "Work/Notes.md"

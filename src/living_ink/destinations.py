@@ -97,6 +97,11 @@ class Destination(abc.ABC):
     #: identified by its path, which the destination can recompute.
     last_external_id: Optional[str] = None
 
+    #: Where the note it last published actually landed, in whatever terms the
+    #: destination names its notes. Recorded against the document id, so a
+    #: later run can tell a note has moved rather than guessing from the title.
+    last_target: Optional[str] = None
+
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
         """Build this destination from its config section.
@@ -131,6 +136,7 @@ class Destination(abc.ABC):
         tags: Optional[List[str]] = None,
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
+        doc_id: Optional[str] = None,
     ) -> bool:
         """Publish a notebook to the destination.
 
@@ -148,11 +154,15 @@ class Destination(abc.ABC):
                 ``existing_id`` is known. Only true when sync state says this
                 notebook was published here before, which means the note with
                 that title was almost certainly created by Living Ink.
+            doc_id: The reMarkable document id. This is the note's identity —
+                titles collide and change, document ids do not — so a
+                destination that can record it alongside the note should.
 
         Returns:
             True if publication succeeded. On success, implementations set
             :attr:`last_external_id` when the destination has an identifier
-            worth remembering.
+            worth remembering, and :attr:`last_target` to where the note
+            landed.
 
         Raises:
             DestinationError: Publication failed for an expected reason. The
@@ -347,6 +357,7 @@ class AppleNotesDestination(Destination):
         tags: Optional[List[str]] = None,
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
+        doc_id: Optional[str] = None,
     ) -> bool:
         """Publish a note to Apple Notes via osascript.
 
@@ -366,6 +377,9 @@ class AppleNotesDestination(Destination):
             existing_id: Apple Notes id of the note published last time.
             adopt_by_name: Permission to match on title when no id is recorded,
                 which is the case for notebooks synced before ids were stored.
+            doc_id: Unused. Apple Notes has no place to keep it, and does not
+                need one: the note id it returns is a stabler identity than
+                anything that could be written into the note body.
 
         Returns:
             True if AppleScript executed successfully.
@@ -376,6 +390,7 @@ class AppleNotesDestination(Destination):
         """
         retries = 3
         self.last_external_id = None
+        self.last_target = None
 
         # Apple Notes supports 1 level of sub-folder under rootFolder.
         # If a nested path like "Work/Projects/Q1" is passed, use the top-level segment.
@@ -486,6 +501,11 @@ end tell
                     )
 
                 self.last_external_id = result.stdout.strip() or None
+                self.last_target = (
+                    f"{self.folder_name}/{effective_sub_folder}/{notebook_name}"
+                    if effective_sub_folder
+                    else f"{self.folder_name}/{notebook_name}"
+                )
                 logger.info("Apple Note created for %s", notebook_name)
                 return True
 
@@ -599,6 +619,47 @@ class ObsidianDestination(Destination):
         sanitized = re.sub(r"-+", "-", sanitized).strip(" -")
         return sanitized or "Untitled"
 
+    def _claim_name(self, target_dir: Path, safe_name: str, doc_id: Optional[str]) -> str:
+        """Return a filename that is either this document's note or a free one.
+
+        Two notebooks can have the same title, and before identity was recorded
+        the second one to sync would merge itself into the first one's note.
+        A note is this document's if its ``living_ink_id`` matches, or if it
+        carries no id at all — the latter being every note written before ids
+        existed, which is adopted rather than duplicated.
+
+        Args:
+            target_dir: Directory the note goes in.
+            safe_name: Sanitized filename, without the extension.
+            doc_id: The document being published, or None when it is unknown.
+
+        Returns:
+            The name to write under: ``safe_name``, or ``safe_name (2)`` and
+            upward when the obvious name belongs to somebody else.
+        """
+        if not doc_id:
+            # Nothing to compare against, so the path is the identity, exactly
+            # as it was before ids were recorded.
+            return safe_name
+
+        candidate = safe_name
+        # Bounded rather than unbounded: a hundred same-titled notebooks in one
+        # folder is a sign something is wrong, not a case worth serving.
+        for suffix in range(1, 100):
+            existing = notemerge.read_existing(target_dir / f"{candidate}.md")
+            if existing is None:
+                return candidate
+            front, _ = notemerge.split_frontmatter(existing)
+            owner = notemerge.frontmatter_value(front, "living_ink_id")
+            if owner is None or owner == doc_id:
+                return candidate
+            candidate = f"{safe_name} ({suffix + 1})"
+
+        logger.warning(
+            "Too many notes named '%s' in %s; merging into the last one.", safe_name, target_dir
+        )
+        return candidate
+
     def _sanitize_tag(self, tag: str) -> str:
         """Sanitize a tag for Obsidian YAML frontmatter.
 
@@ -623,12 +684,17 @@ class ObsidianDestination(Destination):
         tags: Optional[List[str]] = None,
         existing_id: Optional[str] = None,
         adopt_by_name: bool = False,
+        doc_id: Optional[str] = None,
     ) -> bool:
         """Publish a note to Obsidian as Markdown with image attachments.
 
-        Both identity arguments are accepted and ignored: a note here is
-        identified by its path, which this destination recomputes from the
-        notebook name, and an existing file is merged rather than replaced.
+        A note here is found by its path, which this destination recomputes
+        from the notebook name, and merged rather than replaced. But a path is
+        not an identity: two notebooks can carry the same title, and the second
+        one must not be merged into the first one's note. So the document id is
+        written into the frontmatter as ``living_ink_id`` and checked before
+        anything is written — a note belonging to a different document is
+        stepped around rather than overwritten.
 
         Args:
             notebook_name: Title of the notebook. Can be a base name (e.g. "Note")
@@ -641,6 +707,9 @@ class ObsidianDestination(Destination):
             tags: Optional list of tags associated with the notebook or its pages.
             existing_id: Unused; accepted to satisfy the Destination contract.
             adopt_by_name: Unused; accepted to satisfy the Destination contract.
+            doc_id: The reMarkable document id, stamped into the frontmatter as
+                the note's identity. When absent, the path is the only identity
+                available and a same-titled note is merged as before.
 
         Returns:
             True if the Markdown file and attachments were written successfully.
@@ -649,6 +718,8 @@ class ObsidianDestination(Destination):
             DestinationError: The vault is unreachable or unwritable (missing
                 path, permission denied, disk full).
         """
+        self.last_target = None
+
         try:
             # 1. Parse Note Name and Source Path
             if " / " in notebook_name:
@@ -690,6 +761,11 @@ class ObsidianDestination(Destination):
                     safe_name = self._sanitize_filename(f"{flat_prefix} - {clean_title}")
                 else:
                     safe_name = self._sanitize_filename(clean_title)
+
+            # A note already at this path that belongs to a different document
+            # is someone else's: take the next free name rather than merging
+            # two notebooks into one file.
+            safe_name = self._claim_name(target_dir, safe_name, doc_id)
 
             # 4. Handle Attachments (centralized _attachments root, mirroring subfolders + dedicated note folder)
             if self.attachments_folder:
@@ -765,6 +841,9 @@ class ObsidianDestination(Destination):
 
             owned = notemerge.owned_frontmatter_lines(
                 {
+                    # The identity of the note, and the only part of the
+                    # frontmatter that is not a description of it.
+                    "living_ink_id": doc_id,
                     # Kept from the note that is already there. Regenerating it
                     # from today's date is what made `created` silently mean
                     # "last synced" on every note that had ever been re-synced.
@@ -798,6 +877,7 @@ class ObsidianDestination(Destination):
             # truncated, so the user would have no reason to suspect a crash.
             write_text_atomic(note_path, final_md)
 
+            self.last_target = note_path.relative_to(self.vault_path).as_posix()
             logger.info("Obsidian note written at: %s", note_path)
             return True
 
