@@ -37,6 +37,23 @@ def get_background_color() -> str:
 # Use get_background_color() for runtime evaluation of env var
 REMARKABLE_BACKGROUND_COLOR = get_background_color()
 
+#: Opening or rendering a document. PyMuPDF raises its own errors
+#: (FileDataError and friends) as RuntimeError subclasses, a path it cannot
+#: read as an OSError, and a page index or argument it does not like as a
+#: ValueError; Pillow reports a broken image or an unsupported mode the same
+#: way. None of these is worth more than "no image from this page".
+_DOC_ERRORS = (RuntimeError, OSError, ValueError)
+
+#: Reading one member out of a document archive: the archive is not a zip, the
+#: member is missing, or it is encrypted. BadZipFile is not an OSError, so it
+#: has to be named.
+_ZIP_ERRORS = (OSError, zipfile.BadZipFile, RuntimeError)
+
+#: Parsing a ``.content`` or ``.metadata`` payload. JSONDecodeError and
+#: UnicodeDecodeError are both ValueErrors; TypeError and KeyError cover JSON
+#: that parsed but is not the shape the format promises.
+_JSON_ERRORS = (ValueError, TypeError, KeyError)
+
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
 
@@ -61,7 +78,8 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         return "\n\n".join(text_parts) if text_parts else ""
     except ImportError:
         return ""
-    except Exception:
+    except _DOC_ERRORS:
+        logger.debug("Failed to extract text from %s", pdf_path, exc_info=True)
         return ""
 
 
@@ -90,6 +108,11 @@ def extract_text_from_epub(epub_path: Path) -> str:
     except ImportError:
         return ""
     except Exception:
+        # Deliberately broad. ebooklib and BeautifulSoup are optional imports,
+        # so their exception types cannot be named at module scope, and both
+        # raise freely on a malformed book. An EPUB that will not parse means
+        # no embedded text, not a failed run.
+        logger.debug("Failed to extract text from %s", epub_path, exc_info=True)
         return ""
 
 
@@ -112,7 +135,7 @@ def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Pa
                     with open(out_path, "wb") as f:
                         f.write(zf.read(name))
                     return out_path
-    except Exception as e:
+    except _ZIP_ERRORS as e:
         logger.debug(f"Failed to extract raw document from {zip_path}: {e}")
     return None
 
@@ -143,7 +166,7 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
                 if n.endswith(".content"):
                     try:
                         content_data = json.loads(zf.read(n).decode("utf-8"))
-                    except Exception:
+                    except (*_ZIP_ERRORS, *_JSON_ERRORS):
                         pass
                     break
 
@@ -195,7 +218,7 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
             # Sort by pdf_page_index
             results.sort(key=lambda x: x["pdf_page_index"])
             return results
-    except Exception as e:
+    except (*_ZIP_ERRORS, *_JSON_ERRORS) as e:
         logger.debug(f"Failed to read page map from {zip_path}: {e}")
         return []
 
@@ -251,7 +274,7 @@ def render_composite_pdf_page(
         out_buf = io.BytesIO()
         pdf_img.save(out_buf, format="PNG")
         return out_buf.getvalue()
-    except Exception as e:
+    except _DOC_ERRORS as e:
         logger.debug(f"Failed to render composite PDF page {page_index}: {e}")
         return None
 
@@ -282,7 +305,7 @@ def render_pdf_page_preview(
         out_buf = io.BytesIO()
         pdf_img.save(out_buf, format="PNG")
         return out_buf.getvalue()
-    except Exception as e:
+    except _DOC_ERRORS as e:
         logger.debug(f"Failed to render PDF page preview: {e}")
         return None
 
@@ -345,7 +368,8 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
             return (0, 0, w, h)
 
         return None
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
+        # An SVG whose viewBox or size attributes are absent or not numbers.
         return None
 
 
@@ -377,14 +401,15 @@ def _patch_rmc() -> None:
         def safe_create(cls, pen_nr, color_id, width):
             try:
                 return orig_create(pen_nr, color_id, width)
-            except Exception:
+            except Exception:  # noqa: BLE001 - the whole point of the patch
                 from rmc.exporters.writing_tools import Ballpoint
 
                 return Ballpoint(width, color_id)
 
         wt.Pen.create = safe_create
-    except Exception:
-        pass
+    except (ImportError, AttributeError):
+        # rmc or rmscene is absent, or an upgrade moved what this patches.
+        logger.debug("Could not patch rmc", exc_info=True)
 
 
 def render_rm_file_to_png(
@@ -426,8 +451,11 @@ def render_rm_file_to_png(
 
             rm_to_svg(str(rm_file_path), str(tmp_svg_path))
         except Exception as e:
-            # Fallback for debugging provided the library call failed
+            # Deliberately broad. rmc walks a binary format written by whatever
+            # firmware drew the page and raises whatever its parser hits; one
+            # unreadable page must not end the notebook.
             print(f"Error converting .rm to .svg: {e}")
+            logger.debug("rm_to_svg failed for %s", rm_file_path, exc_info=True)
             return None
 
         # Check if the file was actually created and has content
@@ -497,7 +525,7 @@ def render_rm_file_to_png(
             with open(tmp_png_path, "rb") as f:
                 return f.read()
 
-        except Exception as e:
+        except _DOC_ERRORS as e:
             print(f"PyMuPDF rendering failed: {e}")
             # Fall back to inkscape as last resort
             try:
@@ -514,7 +542,8 @@ def render_rm_file_to_png(
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return None
 
-    except Exception:
+    except (OSError, ValueError):
+        # Creating or reading back the temporary SVG and PNG.
         return None
     finally:
         if tmp_svg_path:
@@ -548,7 +577,7 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
             # Fallback: pages array directly
             elif "pages" in data and isinstance(data["pages"], list):
                 page_order = data["pages"]
-        except Exception:
+        except (OSError, *_JSON_ERRORS):
             # Ignore errors reading/parsing .content file; fallback to default page order
             pass
         break
@@ -737,9 +766,9 @@ def extract_tags_from_zip(zip_path: Path) -> List[str]:
                         data = json.loads(zf.read(name).decode("utf-8"))
                         if isinstance(data, dict):
                             tags.extend(extract_tags_from_dict(data))
-                    except Exception:
+                    except (*_ZIP_ERRORS, *_JSON_ERRORS):
                         pass
-    except Exception as e:
+    except _ZIP_ERRORS as e:
         logger.debug(f"Failed to extract tags from zip {zip_path}: {e}")
 
     seen = set()
@@ -780,7 +809,7 @@ def format_page_label(page_num: int, pdf_path: Optional[Path] = None) -> str:
                         return f"Page {label.strip()} (pdf-{page_num})"
             finally:
                 doc.close()
-        except Exception as e:
+        except _DOC_ERRORS as e:
             logger.debug(f"Failed to read page label from {pdf_path}: {e}")
 
     return f"Page {page_num}"
@@ -797,7 +826,7 @@ def _get_pdf_toc_entries(pdf_path_str: str) -> List[Tuple[int, str, int]]:
             return [(int(lvl), str(title).strip(), int(p)) for lvl, title, p in doc.get_toc()]
         finally:
             doc.close()
-    except Exception as e:
+    except _DOC_ERRORS as e:
         logger.debug(f"Failed to read TOC from {pdf_path_str}: {e}")
         return []
 
