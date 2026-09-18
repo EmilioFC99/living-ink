@@ -920,6 +920,35 @@ class TestTranscriptionCaching:
         ocr.assert_not_called()
         assert pipe._cache_hits == 1
 
+    def test_a_run_interrupted_mid_notebook_only_pays_for_what_it_missed(self, tmp_path):
+        """Each page is banked as it comes back, so Ctrl+C loses one page."""
+        pages = []
+        for index in range(4):
+            path = tmp_path / f"page-{index}.png"
+            path.write_bytes(f"page {index}".encode("utf-8"))
+            pages.append(path)
+
+        pipe = self._pipeline(tmp_path)
+        pipe.settings = SimpleNamespace(ocr_concurrency=1)
+
+        def transcribe_then_quit(path):
+            if path == pages[2]:
+                raise KeyboardInterrupt
+            return path.name
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=transcribe_then_quit):
+            with pytest.raises(KeyboardInterrupt):
+                pipe._transcribe_pages(pages, True)
+
+        resumed = self._pipeline(tmp_path)
+        resumed.settings = SimpleNamespace(ocr_concurrency=1)
+        with patch.object(resumed, "_vision_ocr_page", side_effect=lambda p: p.name) as ocr:
+            resumed._transcribe_pages(pages, True)
+
+        # Pages 0 and 1 were banked before the interrupt; only 2 and 3 are paid for.
+        assert [call.args[0] for call in ocr.call_args_list] == pages[2:]
+        assert resumed._cache_hits == 2
+
     def test_a_cache_survives_a_new_pipeline(self, tmp_path, page):
         """Entries outlive the run, which is what the temp purge does not."""
         with patch.object(SyncPipeline, "_vision_ocr_page", return_value="text"):
@@ -1427,3 +1456,134 @@ class TestJobModifiedDate:
 
     def test_an_item_with_no_date_reports_none(self):
         assert self._job({}).modified_date() is None
+
+
+class TestInterruptedRuns:
+    """Ctrl+C is not a failure, and the run did not do nothing."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, execute, dry_run=False):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = dry_run
+        pipe.cache = SimpleNamespace(enabled=True)
+        pipe._counts = (0, 0, 0)
+        pipe._execute = execute
+        return pipe
+
+    def _last_run(self):
+        return pipeline.get_state_store().last_run()
+
+    def test_an_interrupt_is_recorded_as_an_interrupt_not_an_error(self):
+        def execute():
+            raise KeyboardInterrupt
+
+        pipe = self._pipeline(execute)
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        assert self._last_run()["outcome"] == "interrupted"
+
+    def test_work_done_before_the_interrupt_is_recorded(self):
+        """The old code reported 0 published however far the run had got."""
+
+        def execute():
+            pipe._counts = (10, 3, 1)
+            raise KeyboardInterrupt
+
+        pipe = self._pipeline(execute)
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        row = self._last_run()
+        assert (row["documents_seen"], row["documents_published"], row["documents_failed"]) == (
+            10,
+            3,
+            1,
+        )
+
+    def test_the_interrupt_still_reaches_the_caller(self):
+        def execute():
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._pipeline(execute)._run_recorded()
+
+    def test_a_real_error_is_still_an_error(self):
+        def execute():
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            self._pipeline(execute)._run_recorded()
+
+        assert self._last_run()["outcome"] == "error"
+
+    def test_a_dry_run_records_no_interrupt(self):
+        def execute():
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._pipeline(execute, dry_run=True)._run_recorded()
+
+        assert self._last_run() is None
+
+    def test_the_user_is_told_the_transcripts_survived(self, capsys):
+        def execute():
+            pipe._counts = (10, 3, 0)
+            raise KeyboardInterrupt
+
+        pipe = self._pipeline(execute)
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        out = capsys.readouterr().out
+        assert "Interrupted" in out
+        assert "3 notebook(s) were published" in out
+        assert "will not pay for them twice" in out
+
+    def test_nothing_is_said_about_the_cache_when_it_is_off(self, capsys):
+        def execute():
+            raise KeyboardInterrupt
+
+        pipe = self._pipeline(execute)
+        pipe.cache = SimpleNamespace(enabled=False)
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        assert "twice" not in capsys.readouterr().out
+
+
+class TestProgressIsRecordedPerNotebook:
+    """A run interrupted mid-loop has still published what it published."""
+
+    def test_counts_advance_as_each_notebook_finishes(self, monkeypatch):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe._counts = (0, 0, 0)
+        pipe.dry_run = False
+        pipe.keep_temp = True
+        seen_counts = []
+
+        def process(nb_item, **kwargs):
+            seen_counts.append(pipe._counts)
+            return nb_item != "bad"
+
+        monkeypatch.setattr(pipe, "process_notebook_item", process)
+        monkeypatch.setattr(pipe, "connect", lambda: object())
+        monkeypatch.setattr(pipe, "discover_documents", lambda c: (["a", "bad", "c"], {}))
+        monkeypatch.setattr(pipe, "_handle_orphans", lambda id_map: None)
+        monkeypatch.setattr(pipe, "filter_pending_documents", lambda nbs, id_map: (nbs, {}, True))
+        monkeypatch.setattr(pipeline, "validate_environment", lambda: None)
+        monkeypatch.setattr(pipeline, "cleanup_temp_artifacts", lambda **kw: None)
+
+        pipe._execute()
+
+        # Before the second notebook the first is already counted, so an
+        # interrupt in the middle of the second still reports one published.
+        assert seen_counts[1] == (3, 1, 0)
+        assert seen_counts[2] == (3, 1, 1)
