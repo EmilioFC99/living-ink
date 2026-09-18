@@ -14,11 +14,12 @@ import json
 import os
 import sys
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Type
 
 from living_ink.config import ConfigurationMissing, get_config_path
+from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
 
 
 class BaseCommand(ABC):
@@ -270,6 +271,8 @@ class StatusReport:
     auto_sync_installed: bool = False
     auto_sync_active: bool = False
 
+    settings: list[SettingOrigin] = field(default_factory=list)
+
     @property
     def usable(self) -> bool:
         """Whether a config was found and parsed; drives the process exit code."""
@@ -292,6 +295,7 @@ class StatusReport:
             "obsidian": {},
             "apple_notes": {},
             "auto_sync": {},
+            "settings": [],
         }
 
         if not self.config_found:
@@ -328,6 +332,15 @@ class StatusReport:
                 "installed": self.auto_sync_installed,
                 "active": self.auto_sync_active,
             },
+            "settings": [
+                {
+                    "name": origin.name,
+                    "value": origin.display(),
+                    "source": origin.source,
+                    "env_var": origin.env_var,
+                }
+                for origin in self.settings
+            ],
         }
 
 
@@ -404,6 +417,9 @@ def collect_status(config_path: Path) -> StatusReport:
     an_cfg = cfg.get("apple_notes", {})
     report.apple_notes_enabled = an_cfg.get("enabled", False)
     report.apple_notes_folder = an_cfg.get("folder_name", "Living Ink")
+
+    # Effective settings, resolved exactly as a sync would resolve them.
+    report.settings = Settings.explain(cfg)
 
     # Background sync
     report.auto_sync_installed = LAUNCH_AGENT_PLIST.exists()
@@ -550,7 +566,37 @@ class StatusCommand(BaseCommand):
         else:
             print(f"Auto-Sync:     {yellow('Installed but not currently loaded')}")
 
+        StatusCommand._render_settings(report)
         print()
+
+    @staticmethod
+    def _render_settings(report: StatusReport) -> None:
+        """Print the effective settings and the layer each one came from.
+
+        A value can come from the config file, an environment variable, or a
+        built-in default, and only the first of those is visible by reading
+        ``config.yml``. Printing the winning layer next to each value turns
+        "why is it doing that?" into something answerable without a debugger.
+
+        Args:
+            report: Snapshot produced by collect_status().
+        """
+        from living_ink.setup_wizard import bold, cyan, dim, yellow
+
+        if not report.settings:
+            return
+
+        print()
+        print(bold(cyan("Effective settings")))
+        width = max(len(origin.name) for origin in report.settings)
+        for origin in report.settings:
+            # An environment override is the surprising case, so it is the one
+            # that gets colour; config and defaults are expected and stay quiet.
+            if origin.source == SOURCE_ENV:
+                note = yellow(f"{origin.source} ({origin.env_var})")
+            else:
+                note = dim(origin.source)
+            print(f"  {origin.name.ljust(width)}  {origin.display()}  {note}")
 
 
 class LivingInkCLI:

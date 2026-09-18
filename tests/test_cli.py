@@ -20,6 +20,7 @@ from living_ink.cli import (
     main,
 )
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
+from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
 from living_ink.setup_wizard import WizardResult
 
 
@@ -420,3 +421,68 @@ def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
 
     assert pipeline_obj.dry_run is True
     assert pipeline_obj.keep_temp is True
+
+
+class TestStatusSettingsReport:
+    """`status` reports the effective settings, not just connectivity."""
+
+    def _report(self, config_text, env=None):
+        """Collect a status report for a config file, with probing stubbed out."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        from living_ink.cli import collect_status
+
+        tmp = _Path(tempfile.mkdtemp()) / "config.yml"
+        tmp.write_text(config_text)
+        with (
+            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_ai_provider", return_value=(False, "no")),
+            patch.dict(os.environ, env or {}, clear=False),
+        ):
+            return collect_status(tmp)
+
+    def test_the_report_carries_resolved_settings(self):
+        report = self._report("sync:\n  ocr_concurrency: 7\n")
+
+        origins = {o.name: o for o in report.settings}
+        assert origins["ocr_concurrency"].value == 7
+        assert origins["ocr_concurrency"].source == SOURCE_CONFIG
+
+    def test_json_output_lists_settings_with_their_source(self):
+        report = self._report("sync: {}\n", env={"SYNC_OCR_CONCURRENCY": "3"})
+
+        entries = {s["name"]: s for s in report.to_dict()["settings"]}
+        assert entries["ocr_concurrency"] == {
+            "name": "ocr_concurrency",
+            "value": "3",
+            "source": SOURCE_ENV,
+            "env_var": "SYNC_OCR_CONCURRENCY",
+        }
+
+    def test_json_output_masks_the_device_token(self):
+        report = self._report("remarkable:\n  device_token: sekrit\n")
+
+        entries = {s["name"]: s for s in report.to_dict()["settings"]}
+        assert entries["remarkable_token"]["value"] == "set"
+        assert "sekrit" not in json.dumps(report.to_dict())
+
+    def test_a_missing_config_reports_no_settings(self):
+        from pathlib import Path as _Path
+
+        from living_ink.cli import collect_status
+
+        report = collect_status(_Path("/nonexistent/living-ink/config.yml"))
+
+        assert report.settings == []
+        assert report.to_dict()["settings"] == []
+
+    def test_console_output_names_the_overriding_variable(self, capsys):
+        report = self._report("sync: {}\n", env={"SYNC_OCR_CONCURRENCY": "3"})
+
+        StatusCommand._render_settings(report)
+
+        out = capsys.readouterr().out
+        assert "ocr_concurrency" in out
+        assert "SYNC_OCR_CONCURRENCY" in out
