@@ -1181,6 +1181,23 @@ class TestRenderCaching:
         assert pipe.saved == []
         assert any("format version 3" in w for w in pipe.report.warnings)
 
+    def test_the_document_counts_the_pages_it_lost(self, tmp_path, rendered, monkeypatch):
+        """The outcome reads the count, so the summary can stop printing a clean ✓."""
+        from living_ink.extract import UnsupportedRmFormat
+
+        def refuse(zip_path, page, **kwargs):
+            raise UnsupportedRmFormat("nope")
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", refuse, raising=True
+        )
+        pipe = self._pipeline(tmp_path)
+        job = self._job()
+
+        pipe._render_zip_pages(job, tmp_path / "doc.zip", 2)
+
+        assert job.failed_pages == 2
+
     def test_one_bad_page_does_not_cost_the_others(self, tmp_path, rendered, monkeypatch):
         def refuse_page_one(zip_path, page, **kwargs):
             from living_ink.extract import BlankRenderError

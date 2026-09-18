@@ -11,6 +11,7 @@ import re
 import tempfile
 import zipfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -128,8 +129,29 @@ def read_rm_version(rm_file_path: Path) -> Optional[int]:
         return None
 
 
-def count_rm_strokes(rm_file_path: Path) -> Optional[int]:
-    """Count the drawn lines a ``.rm`` file contains, without rendering it.
+@dataclass(frozen=True)
+class RmPageStats:
+    """What a ``.rm`` file's blocks say about the page, before rendering it.
+
+    Attributes:
+        strokes: Line items the parser understood.
+        unreadable: Blocks the parser could not decode. ``rmscene`` does not
+            raise on these — it wraps each one in an ``UnreadableBlock`` and
+            carries on, and the scene builder then drops it silently. That is
+            the exact path by which a page full of strokes renders to nothing.
+    """
+
+    strokes: int
+    unreadable: int
+
+    @property
+    def has_content(self) -> bool:
+        """Whether the page had anything the renderer was meant to draw."""
+        return bool(self.strokes or self.unreadable)
+
+
+def inspect_rm_page(rm_file_path: Path) -> Optional[RmPageStats]:
+    """Count what a ``.rm`` file holds, without rendering it.
 
     This is the second half of the blank-page question. An SVG with no ink is
     only a bug if the source had something to draw, and the only way to know
@@ -139,28 +161,32 @@ def count_rm_strokes(rm_file_path: Path) -> Optional[int]:
         rm_file_path: Path to the ``.rm`` file.
 
     Returns:
-        The number of line items, or None if the file could not be inspected
-        — in which case the caller must not conclude anything from it.
+        The page's block counts, or None if the file could not be inspected —
+        in which case the caller must not conclude anything from it.
     """
     try:
         from rmscene import read_blocks
-        from rmscene.scene_stream import SceneLineItemBlock
+        from rmscene.scene_stream import SceneLineItemBlock, UnreadableBlock
     except ImportError:
         return None
 
+    strokes = 0
+    unreadable = 0
     try:
         with open(rm_file_path, "rb") as f:
-            return sum(
-                1
-                for block in read_blocks(f)
-                if isinstance(block, SceneLineItemBlock) and block.item.value is not None
-            )
+            for block in read_blocks(f):
+                if isinstance(block, UnreadableBlock):
+                    unreadable += 1
+                elif isinstance(block, SceneLineItemBlock) and block.item.value is not None:
+                    strokes += 1
     except Exception:
         # Deliberately broad, and for the same reason the render path is: this
         # walks a binary format written by firmware nobody here controls. A
         # count we could not take is "unknown", never "zero".
-        logger.debug("Could not count strokes in %s", rm_file_path, exc_info=True)
+        logger.debug("Could not inspect %s", rm_file_path, exc_info=True)
         return None
+
+    return RmPageStats(strokes=strokes, unreadable=unreadable)
 
 
 def _svg_has_ink(svg_path: Path) -> bool:
@@ -610,12 +636,15 @@ def render_rm_file_to_png(
         # with strokes that renders to nothing is a parser or exporter
         # mismatch, and used to reach the destination as an empty note.
         if not _svg_has_ink(tmp_svg_path):
-            strokes = count_rm_strokes(rm_file_path)
-            if strokes:
+            stats = inspect_rm_page(rm_file_path)
+            if stats is not None and stats.has_content:
+                held = f"{stats.strokes} strokes"
+                if stats.unreadable:
+                    held += f" and {stats.unreadable} blocks this build cannot decode"
                 raise BlankRenderError(
-                    f"{rm_file_path.name} holds {strokes} strokes but rendered to an "
-                    f"empty image. Known cause: an rmc/rmscene version that cannot "
-                    f"draw what this firmware wrote."
+                    f"{rm_file_path.name} holds {held} but rendered to an empty image. "
+                    f"Known cause: an rmc/rmscene version that cannot draw what this "
+                    f"firmware wrote — try upgrading living-ink."
                 )
 
         # Get content bounds from SVG

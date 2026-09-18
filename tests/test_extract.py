@@ -275,7 +275,7 @@ class TestBlankRenderIsLoud:
         monkeypatch.setitem(
             sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
         )
-        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: 42)
+        monkeypatch.setattr(extract, "inspect_rm_page", lambda p: extract.RmPageStats(42, 0))
 
         with pytest.raises(extract.BlankRenderError, match="42 strokes"):
             extract.render_rm_file_to_png(path)
@@ -291,7 +291,7 @@ class TestBlankRenderIsLoud:
         monkeypatch.setitem(
             sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
         )
-        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: 0)
+        monkeypatch.setattr(extract, "inspect_rm_page", lambda p: extract.RmPageStats(0, 0))
 
         assert extract.render_rm_file_to_png(path) is not None
 
@@ -307,7 +307,7 @@ class TestBlankRenderIsLoud:
         monkeypatch.setitem(
             sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
         )
-        monkeypatch.setattr(extract, "count_rm_strokes", lambda p: None)
+        monkeypatch.setattr(extract, "inspect_rm_page", lambda p: None)
 
         assert extract.render_rm_file_to_png(path) is not None
 
@@ -315,7 +315,31 @@ class TestBlankRenderIsLoud:
         path = tmp_path / "page.rm"
         path.write_bytes(b"not a page at all")
 
-        assert extract.count_rm_strokes(path) is None
+        assert extract.inspect_rm_page(path) is None
+
+    def test_blocks_the_parser_could_not_decode_also_count_as_content(self, tmp_path, monkeypatch):
+        """rmscene wraps an undecodable block and carries on, drawing nothing."""
+        path = tmp_path / "page.rm"
+        path.write_bytes(_rm_bytes(6))
+
+        def fake_rm_to_svg(source, target):
+            Path(target).write_text('<svg height="10" width="10"></svg>', encoding="utf-8")
+
+        monkeypatch.setattr(extract, "_patch_rmc", lambda: None)
+        monkeypatch.setitem(
+            sys.modules, "rmc.exporters.svg", SimpleNamespace(rm_to_svg=fake_rm_to_svg)
+        )
+        monkeypatch.setattr(extract, "inspect_rm_page", lambda p: extract.RmPageStats(0, 5))
+
+        with pytest.raises(extract.BlankRenderError) as excinfo:
+            extract.render_rm_file_to_png(path)
+
+        assert "5 blocks this build cannot decode" in str(excinfo.value)
+
+    def test_an_empty_page_has_no_content(self):
+        assert extract.RmPageStats(0, 0).has_content is False
+        assert extract.RmPageStats(1, 0).has_content is True
+        assert extract.RmPageStats(0, 1).has_content is True
 
 
 class TestRenderFingerprintCoversTheGuards:
