@@ -6,6 +6,7 @@ import pytest
 
 from living_ink.settings import (
     DEFAULT_APPLE_NOTES_FOLDER,
+    DEFAULT_CACHE_MAX_AGE_DAYS,
     DEFAULT_OCR_CONCURRENCY,
     DEFAULT_SSH_HOST,
     FIELD_ENV_VARS,
@@ -182,6 +183,32 @@ class TestOcrConcurrency:
         assert (
             Settings.resolve(config={"sync": {"ocr_concurrency": -4}}, env={}).ocr_concurrency == 1
         )
+
+
+class TestTranscriptCache:
+    """The cache is on by default, and both of its knobs are reachable."""
+
+    def test_caching_is_on_by_default(self):
+        assert Settings.resolve(config={}, env={}).transcript_cache is True
+
+    def test_config_can_turn_it_off(self):
+        s = Settings.resolve(config={"sync": {"transcript_cache": False}}, env={})
+        assert s.transcript_cache is False
+
+    def test_env_outranks_config(self):
+        s = Settings.resolve(
+            config={"sync": {"transcript_cache": True}},
+            env={"SYNC_TRANSCRIPT_CACHE": "false"},
+        )
+        assert s.transcript_cache is False
+
+    def test_the_prune_age_defaults_to_a_season(self):
+        s = Settings.resolve(config={}, env={})
+        assert s.cache_max_age_days == DEFAULT_CACHE_MAX_AGE_DAYS
+
+    def test_config_sets_the_prune_age(self):
+        s = Settings.resolve(config={"sync": {"cache_max_age_days": 7}}, env={})
+        assert s.cache_max_age_days == 7
 
 
 class TestExplain:

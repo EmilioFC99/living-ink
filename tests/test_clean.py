@@ -343,3 +343,34 @@ class TestReadOcrInstructions:
         with patch.object(clean, "OCR_PROMPT_FILE", missing):
             result = clean._read_ocr_instructions()
             assert "Transcribe the handwritten text" in result
+
+
+class TestTranscriptionFingerprint:
+    """The fingerprint is what makes a cached transcription safe to reuse."""
+
+    def test_it_is_stable_for_unchanged_behaviour(self, mock_prompt_file, mock_ocr_prompt_file):
+        clean._provider = NoneProvider()
+        assert clean.transcription_fingerprint() == clean.transcription_fingerprint()
+
+    def test_editing_the_ocr_prompt_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
+        """An edited prompt is supposed to change the answer, so it must miss."""
+        clean._provider = NoneProvider()
+        before = clean.transcription_fingerprint()
+        mock_ocr_prompt_file.write_text("Transcribe, but in French.")
+        assert clean.transcription_fingerprint() != before
+
+    def test_editing_the_cleanup_prompt_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
+        clean._provider = NoneProvider()
+        before = clean.transcription_fingerprint()
+        mock_prompt_file.write_text("Clean this text, and shout.")
+        assert clean.transcription_fingerprint() != before
+
+    def test_switching_the_model_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
+        clean._provider = UniversalChatProvider("https://x/v1", api_key="k", model="gpt-4o-mini")
+        before = clean.transcription_fingerprint()
+        clean._provider = UniversalChatProvider("https://x/v1", api_key="k", model="gpt-4o")
+        assert clean.transcription_fingerprint() != before
+
+    def test_it_is_short_enough_to_print(self, mock_prompt_file, mock_ocr_prompt_file):
+        clean._provider = NoneProvider()
+        assert len(clean.transcription_fingerprint()) == 16

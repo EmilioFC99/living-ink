@@ -10,6 +10,7 @@ Commands:
     living-ink status        Display connection, vault, and sync service status
     living-ink list          Show which documents are synced, pending, or failing
     living-ink state         Inspect, reset, or check the sync state database
+    living-ink cache         Show, prune, or clear the transcription cache
 """
 
 import argparse
@@ -391,6 +392,9 @@ class StatusReport:
     documents_pending: int = 0
     documents_failing: int = 0
 
+    cache_entries: int = 0
+    cache_bytes: int = 0
+
     settings: list[SettingOrigin] = field(default_factory=list)
 
     @property
@@ -458,6 +462,10 @@ class StatusReport:
                 "synced": self.documents_synced,
                 "pending": self.documents_pending,
                 "failing": self.documents_failing,
+            },
+            "cache": {
+                "entries": self.cache_entries,
+                "size_bytes": self.cache_bytes,
             },
             "settings": [
                 {
@@ -580,6 +588,11 @@ def collect_status(config_path: Path) -> StatusReport:
         report.documents_pending = counts[STATUS_PENDING]
         report.documents_failing = counts[STATUS_FAILING]
 
+    try:
+        report.cache_entries, report.cache_bytes = transcript_cache().stats()
+    except OSError:
+        logger.debug("Could not measure the transcription cache", exc_info=True)
+
     return report
 
 
@@ -652,6 +665,28 @@ def state_db_path() -> Path:
     from living_ink.pipeline import DATA_DIR
 
     return DATA_DIR / state.DB_FILENAME
+
+
+def transcript_cache():
+    """Return the transcription cache the configured settings describe.
+
+    Built from the resolved settings rather than defaults so that ``cache``
+    reports on the same cache a sync would use, including a disabled one.
+
+    Returns:
+        A :class:`living_ink.cache.TranscriptCache`, whose directory may not
+        exist yet. Reading the cache must not create it.
+    """
+    from living_ink.cache import TranscriptCache
+    from living_ink.pipeline import TRANSCRIPT_CACHE_DIR, get_default_config
+    from living_ink.settings import Settings
+
+    settings = Settings.resolve(get_default_config())
+    return TranscriptCache(
+        TRANSCRIPT_CACHE_DIR,
+        enabled=settings.transcript_cache,
+        max_age_days=settings.cache_max_age_days,
+    )
 
 
 class StateCommand(BaseCommand):
@@ -894,6 +929,130 @@ class StateCommand(BaseCommand):
         print(f"Move {path} aside and run 'living-ink sync' to rebuild it.")
         print("Everything will be transcribed again, which costs another full OCR pass.")
         return 1
+
+
+class CacheCommand(BaseCommand):
+    """Inspect and maintain the transcription cache.
+
+    The cache is what makes re-syncing an unchanged notebook free, so the only
+    things worth doing to it by hand are seeing how big it has grown, dropping
+    entries nobody has used in months, and — when a transcription is wrong and
+    a prompt edit is not the fix — throwing it all away.
+    """
+
+    name = "cache"
+    help = "Show, prune, or clear the transcription cache"
+    description = "Show how much transcribed text is cached. With no options, prints a summary."
+
+    @classmethod
+    def register_args(cls, parser: argparse.ArgumentParser) -> None:
+        """Register arguments for the cache command.
+
+        Args:
+            parser: Subparser to attach arguments to.
+        """
+        action = parser.add_mutually_exclusive_group()
+        action.add_argument(
+            "--clear",
+            action="store_true",
+            help="Delete every cached transcription",
+        )
+        action.add_argument(
+            "--prune",
+            nargs="?",
+            const=-1,
+            type=int,
+            metavar="DAYS",
+            help="Delete entries unused for DAYS days (default: the configured age)",
+        )
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Output in JSON format",
+        )
+
+    def run(self, args: argparse.Namespace) -> int:
+        """Show the cache, or prune or clear it.
+
+        Args:
+            args: Parsed arguments for cache.
+
+        Returns:
+            0. An empty cache is a normal state, not an error.
+        """
+        cache = transcript_cache()
+        as_json = getattr(args, "json", False)
+
+        if getattr(args, "clear", False):
+            return self._report_removal(cache, cache.clear(), "cleared", as_json)
+
+        days = getattr(args, "prune", None)
+        if days is not None:
+            limit = cache.max_age_days if days < 0 else days
+            return self._report_removal(cache, cache.prune(limit), "pruned", as_json, days=limit)
+
+        return self._summary(cache, as_json)
+
+    @staticmethod
+    def _summary(cache, as_json: bool) -> int:
+        """Print what the cache is holding and what it is keyed on.
+
+        Args:
+            cache: The transcript cache.
+            as_json: Whether to print JSON instead of a console summary.
+
+        Returns:
+            0.
+        """
+        from living_ink.cache import format_size
+
+        entries, total = cache.stats()
+        payload = {
+            "path": str(cache.root),
+            "enabled": cache.enabled,
+            "entries": entries,
+            "size_bytes": total,
+            "max_age_days": cache.max_age_days,
+        }
+
+        if as_json:
+            print(json.dumps(payload, indent=2))
+            return 0
+
+        from living_ink.setup_wizard import bold, cyan, dim
+
+        print()
+        print(bold(cyan("Transcription cache")))
+        print(f"  {dim(str(cache.root))}")
+        if not cache.enabled:
+            print("  disabled — every page is transcribed afresh")
+        print(f"  {entries} page(s), {format_size(total)}")
+        print(f"  pruned after {cache.max_age_days} day(s) unused")
+        print()
+        return 0
+
+    @staticmethod
+    def _report_removal(cache, removed: int, verb: str, as_json: bool, days: int = 0) -> int:
+        """Report how many entries an operation removed.
+
+        Args:
+            cache: The transcript cache.
+            removed: How many entries were deleted.
+            verb: Past-tense description of what happened.
+            as_json: Whether to print JSON instead of a console message.
+            days: The age limit used, for a prune.
+
+        Returns:
+            0.
+        """
+        if as_json:
+            print(json.dumps({"action": verb, "removed": removed, "max_age_days": days}))
+            return 0
+
+        print(f"{verb.capitalize()} {removed} cached page(s).")
+        if removed:
+            print("Those pages will be transcribed again, and paid for, on the next sync.")
+        return 0
 
 
 class ListCommand(BaseCommand):
@@ -1165,6 +1324,14 @@ class StatusCommand(BaseCommand):
         else:
             print(f"Documents:     {dim('None synced yet')}")
 
+        # Cache — how much of the next sync is already paid for.
+        if report.cache_entries:
+            from living_ink.cache import format_size
+
+            print(
+                f"Cache:         {report.cache_entries} page(s), {format_size(report.cache_bytes)}"
+            )
+
         StatusCommand._render_settings(report)
         print()
 
@@ -1262,6 +1429,7 @@ class LivingInkCLI:
         StatusCommand,
         ListCommand,
         StateCommand,
+        CacheCommand,
     ]
 
     def __init__(
