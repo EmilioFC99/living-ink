@@ -648,3 +648,53 @@ class TestProcessedLogDurability:
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
         assert [p.name for p in tmp_path.iterdir()] == ["processed_notebooks_Obsidian.json"]
+
+
+class TestLogRedaction:
+    """pipeline.log writes the file users attach to bug reports."""
+
+    def test_a_registered_secret_never_reaches_the_log_file(self, tmp_path, monkeypatch, capsys):
+        from living_ink import redact as redact_mod
+
+        redact_mod.clear_secrets()
+        redact_mod.register_secret("rm-device-token-abcdef123456")
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+
+        try:
+            pipeline.log("connecting with rm-device-token-abcdef123456")
+        finally:
+            redact_mod.clear_secrets()
+
+        written = log_path.read_text(encoding="utf-8")
+        assert "rm-device-token-abcdef123456" not in written
+        assert "***redacted***" in written
+        # The same masked text is what the user saw on screen.
+        assert "rm-device-token-abcdef123456" not in capsys.readouterr().out
+
+    def test_ordinary_messages_are_untouched(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.log("Publishing Meeting Notes")
+        assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
+
+    def test_config_credentials_are_registered_on_load(self, tmp_path):
+        from living_ink import redact as redact_mod
+
+        redact_mod.clear_secrets()
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(
+            "ai:\n  provider: gemini\n  api_key: AIzaSyExampleKeyForTesting1234\n"
+            "remarkable:\n  device_token: rm-device-token-abcdef123456\n",
+            encoding="utf-8",
+        )
+        try:
+            pipeline.load_yaml_config(cfg)
+            secrets = redact_mod.registered_secrets()
+        finally:
+            redact_mod.clear_secrets()
+
+        assert "AIzaSyExampleKeyForTesting1234" in secrets
+        assert "rm-device-token-abcdef123456" in secrets

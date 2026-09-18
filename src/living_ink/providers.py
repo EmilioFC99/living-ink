@@ -31,6 +31,8 @@ import urllib.error
 import urllib.request
 from typing import Dict, Optional, Type
 
+from living_ink.redact import redact, register_secret
+
 logger = logging.getLogger(__name__)
 
 # Transient failures are retried with exponential backoff. Pages are
@@ -294,6 +296,7 @@ class UniversalChatProvider(TextRepairProvider):
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        register_secret(api_key)
         self.model = model
         self.temperature = temperature
         self.auth_header = auth_header
@@ -408,7 +411,10 @@ class UniversalChatProvider(TextRepairProvider):
             except urllib.error.HTTPError as e:
                 logger.error("%s HTTP Error (%s): %s %s", purpose, self.name, e.code, e.reason)
                 try:
-                    logger.error("Details: %s", e.read().decode("utf-8"))
+                    # Several providers echo the failing request back in the
+                    # body of a 400, headers included, so this is the most
+                    # likely place for the API key to reach a log file.
+                    logger.error("Details: %s", redact(e.read().decode("utf-8")))
                 except Exception:
                     pass
                 retry_after = e.headers.get("Retry-After") if e.headers else None
