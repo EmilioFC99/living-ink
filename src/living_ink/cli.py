@@ -705,6 +705,52 @@ class StatusCommand(BaseCommand):
             print(f"  {origin.name.ljust(width)}  {origin.display()}  {note}")
 
 
+def configure_logging(args: argparse.Namespace) -> None:
+    """Install the package log handlers for this invocation.
+
+    Done once here rather than per command, so the modules that know most
+    about a failure — providers, transports, the renderer — reach the log file
+    no matter which subcommand is running.
+
+    Args:
+        args: Parsed arguments; ``--verbose`` and ``--quiet`` are read off it.
+    """
+    from living_ink import logs
+    from living_ink.pipeline import LOG_PATH
+
+    logs.configure(
+        LOG_PATH,
+        verbose=getattr(args, "verbose", False),
+        quiet=getattr(args, "quiet", False),
+    )
+
+
+def add_verbosity_args(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--verbose`` / ``--quiet`` pair to a parser.
+
+    Both default to ``argparse.SUPPRESS``: the same flags are declared on the
+    top-level parser and on every subparser, and a real default on the
+    subparser would overwrite a flag given before the subcommand name.
+
+    Args:
+        parser: Parser or subparser to extend.
+    """
+    group = parser.add_argument_group("output")
+    group.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show every log record, including internal detail, on stderr",
+    )
+    group.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Suppress progress output; the log file is still written in full",
+    )
+
+
 class LivingInkCLI:
     """Unified command-line interface orchestrator for Living Ink.
 
@@ -779,6 +825,12 @@ class LivingInkCLI:
             help="Path to custom config.yml file",
         )
 
+        # Attached to the top-level parser *and* to every subparser, so both
+        # `living-ink --verbose sync` and `living-ink sync --verbose` work;
+        # people reach for the second form and argparse does not allow it
+        # otherwise.
+        add_verbosity_args(parser)
+
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
         for cmd_name, cmd_cls in self.commands.items():
@@ -787,6 +839,7 @@ class LivingInkCLI:
                 help=cmd_cls.help,
                 description=cmd_cls.description or cmd_cls.help,
             )
+            add_verbosity_args(subparser)
             cmd_cls.register_args(subparser)
 
         return parser
@@ -802,6 +855,8 @@ class LivingInkCLI:
         """
         if getattr(args, "config", None):
             os.environ["LIVING_INK_CONFIG"] = str(Path(args.config).resolve())
+
+        configure_logging(args)
 
         if args.command is None:
             # Default behavior: if config exists, sync; otherwise setup
