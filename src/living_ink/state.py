@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 #: Bumped whenever the schema changes; drives the migration ladder in _migrate.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Name of the database inside the data directory.
 DB_FILENAME = "state.db"
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS publications (
     destination        TEXT NOT NULL,
     version            TEXT,
     external_id        TEXT,
+    target             TEXT,
     content_hash       TEXT,
     first_published_at TEXT NOT NULL,
     last_published_at  TEXT NOT NULL,
@@ -96,6 +97,9 @@ _ADDED_COLUMNS = {
     "documents": {
         "last_error": "TEXT",
         "last_error_at": "TEXT",
+    },
+    "publications": {
+        "target": "TEXT",
     },
 }
 
@@ -418,6 +422,7 @@ class StateStore:
         version: Any,
         *,
         external_id: Optional[str] = None,
+        target: Optional[str] = None,
         content_hash: Optional[str] = None,
         run_id: Optional[int] = None,
         published_at: Optional[str] = None,
@@ -434,6 +439,9 @@ class StateStore:
             version: Device version or content hash that was published.
             external_id: Identifier on the far side, where the destination has
                 one (an Apple Notes note id, for instance).
+            target: Where the note landed, in whatever terms the destination
+                names its notes — a vault-relative path, a folder and title.
+                Recorded so a later run can tell that a note has moved.
             content_hash: Hash of what was sent, for change detection.
             run_id: Run that published it.
             published_at: Override the timestamp; for migration of old state.
@@ -443,14 +451,15 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO publications
-                    (doc_id, destination, version, external_id, content_hash,
+                    (doc_id, destination, version, external_id, target, content_hash,
                      first_published_at, last_published_at, run_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id, destination) DO UPDATE SET
                     version = excluded.version,
                     -- Only overwrite these when the caller actually knows
                     -- them, so a partial record never erases a full one.
                     external_id = COALESCE(excluded.external_id, publications.external_id),
+                    target = COALESCE(excluded.target, publications.target),
                     content_hash = COALESCE(excluded.content_hash, publications.content_hash),
                     last_published_at = excluded.last_published_at,
                     run_id = excluded.run_id
@@ -460,6 +469,7 @@ class StateStore:
                     destination,
                     None if version is None else str(version),
                     external_id,
+                    target,
                     content_hash,
                     stamp,
                     stamp,

@@ -338,6 +338,36 @@ class TestUpgradingAnOlderDatabase:
 
         assert {"last_error", "last_error_at"} <= columns
 
+    def test_a_publications_table_without_target_gains_it(self, tmp_path):
+        """The column arrived after the table shipped, so it needs an ALTER."""
+        path = tmp_path / "state.db"
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE publications (
+                doc_id             TEXT NOT NULL,
+                destination        TEXT NOT NULL,
+                version            TEXT,
+                external_id        TEXT,
+                content_hash       TEXT,
+                first_published_at TEXT NOT NULL,
+                last_published_at  TEXT NOT NULL,
+                run_id             INTEGER,
+                PRIMARY KEY (doc_id, destination)
+            );
+            INSERT INTO publications
+                (doc_id, destination, first_published_at, last_published_at)
+            VALUES ('doc-1', 'Obsidian', '2020-01-01', '2020-01-01');
+            PRAGMA user_version=1;
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        with StateStore(path) as store:
+            store.record_publication("doc-1", "Obsidian", "v2", target="Work/Notes.md")
+            assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
+
     def test_existing_rows_survive_the_upgrade(self, tmp_path):
         path = tmp_path / "state.db"
         self._v1_database(path)
@@ -361,6 +391,31 @@ class TestUpgradingAnOlderDatabase:
         with StateStore(path) as store:
             store.record_failure("doc-1", "boom")
             assert store.get_document("doc-1")["last_error"] == "boom"
+
+
+class TestPublicationTargets:
+    """Where a note landed is recorded, so a later run can tell it has moved."""
+
+    def test_the_target_is_stored(self, store):
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
+        assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
+
+    def test_republishing_elsewhere_updates_the_target(self, store):
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
+        store.record_publication("doc-1", "Obsidian", "v2", target="Archive/Notes.md")
+        assert store.get_publication("doc-1", "Obsidian")["target"] == "Archive/Notes.md"
+
+    def test_a_caller_that_does_not_know_the_target_does_not_erase_it(self, store):
+        """A partial record must never turn a known location into an unknown one."""
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
+        store.record_publication("doc-1", "Obsidian", "v2")
+        assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
+
+    def test_each_destination_keeps_its_own_target(self, store):
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
+        store.record_publication("doc-1", "AppleNotes", "v1", target="Living Ink/Notes")
+        assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
+        assert store.get_publication("doc-1", "AppleNotes")["target"] == "Living Ink/Notes"
 
 
 class TestFailures:
