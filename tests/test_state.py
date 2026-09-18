@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from living_ink.state import SCHEMA_VERSION, StateStore, import_legacy_json
+from living_ink.transport import DeviceInfo
 
 
 @pytest.fixture
@@ -49,6 +50,41 @@ class TestSchema:
     def test_the_database_is_intact(self, store):
         store.record_publication("doc-1", "Obsidian", "v1")
         assert store.integrity_check() == "ok"
+
+    def test_a_column_is_added_even_at_the_current_schema_version(self, tmp_path):
+        """A live sync died on exactly this: the table existed, the column did not.
+
+        A column added to _ADDED_COLUMNS without a SCHEMA_VERSION bump used to
+        be skipped by the early return, and the miss only surfaced when
+        something wrote to it.
+        """
+        path = tmp_path / "state.db"
+        with StateStore(path) as first:
+            first.remember_device(
+                DeviceInfo("reMarkable 2", "3.20.0", (1404, 1872), screen_measured=False)
+            )
+
+        conn = sqlite3.connect(str(path))
+        conn.execute("ALTER TABLE device DROP COLUMN measured")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.close()
+
+        with StateStore(path) as reopened:
+            columns = {row["name"] for row in reopened._conn.execute("PRAGMA table_info(device)")}
+            assert "measured" in columns
+            # And the store is usable, not merely shaped right.
+            reopened.remember_device(DeviceInfo("reMarkable Paper Pure", "3.28", (1404, 1872)))
+            assert reopened.recall_device()[0].model == "reMarkable Paper Pure"
+
+    def test_an_untouched_database_is_not_rewritten(self, tmp_path):
+        """The per-open column check must not disturb existing rows."""
+        path = tmp_path / "state.db"
+        with StateStore(path) as first:
+            first.record_publication("doc-1", "Obsidian", "v1")
+
+        with StateStore(path) as second:
+            assert second.published_versions("Obsidian") == {"doc-1": "v1"}
+            assert second.integrity_check() == "ok"
 
 
 class TestPublications:
