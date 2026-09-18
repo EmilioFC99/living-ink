@@ -12,6 +12,7 @@ from living_ink.devices import (
     SOURCE_DEFAULT,
     SOURCE_REMEMBERED,
     SOURCE_USB,
+    identify,
     profile_for,
     resolve_device,
 )
@@ -37,9 +38,9 @@ class TestKnownModels:
     def test_matching_ignores_case(self):
         assert profile_for("REMARKABLE 2.0").name == "reMarkable 2"
 
-    def test_only_the_colour_device_is_colour(self):
-        greyscale = [p for p in DEVICE_PROFILES.values() if not p.color]
-        assert len(greyscale) == 2
+    def test_colour_is_the_exception_rather_than_the_rule(self):
+        colour = [p.name for p in DEVICE_PROFILES.values() if p.color]
+        assert colour == ["reMarkable Paper Pro"]
 
 
 class TestUnknownModels:
@@ -158,3 +159,19 @@ class TestRememberingTheDevice:
         described = resolve_device(None, store).describe()
 
         assert re.search(r"remembered from USB, \d{4}-\d{2}-\d{2}\)$", described)
+
+
+class TestPaperPure:
+    """The Pure reports a codename, not a product name."""
+
+    def test_the_codename_is_recognised(self):
+        """Measured on the hardware: /proc/device-tree/model says this."""
+        assert profile_for("reMarkable Tatsu").name == "reMarkable Paper Pure"
+
+    def test_it_carries_the_panel_its_own_boot_splash_is_drawn_at(self):
+        assert DEVICE_PROFILES["reMarkable Paper Pure"].screen == (1404, 1872)
+
+    def test_an_unknown_machine_string_is_not_silently_promoted(self):
+        """identify() says None so a caller can report the raw string."""
+        assert identify("reMarkable Tatsu") is not None
+        assert identify("reMarkable Bananaphone") is None

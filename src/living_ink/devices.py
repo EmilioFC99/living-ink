@@ -43,6 +43,9 @@ DEVICE_PROFILES: Dict[str, DeviceProfile] = {
     "reMarkable 1": DeviceProfile("reMarkable 1", (1404, 1872), color=False),
     "reMarkable 2": DeviceProfile("reMarkable 2", (1404, 1872), color=False),
     "reMarkable Paper Pro": DeviceProfile("reMarkable Paper Pro", (1620, 2160), color=True),
+    # Measured on the hardware: the device reports itself as "reMarkable Tatsu"
+    # and its own boot splash is 1404×1872, the same panel as the reMarkable 2.
+    "reMarkable Paper Pure": DeviceProfile("reMarkable Paper Pure", (1404, 1872), color=False),
 }
 
 #: What the code assumed before profiles existed, now named rather than implied.
@@ -58,31 +61,46 @@ _MACHINE_HINTS = {
     "reMarkable 2": "reMarkable 2",
     "ferrari": "reMarkable Paper Pro",
     "paper pro": "reMarkable Paper Pro",
+    "tatsu": "reMarkable Paper Pure",
+    "paper pure": "reMarkable Paper Pure",
 }
 
 
-def profile_for(machine: str) -> DeviceProfile:
-    """Identify a device from the machine string it reports about itself.
+def identify(machine: str) -> Optional[DeviceProfile]:
+    """Match a machine string against the models this project knows.
 
     Args:
         machine: Contents of the tablet's machine identifier, e.g.
             ``"reMarkable 2.0"``. May be empty if the device did not answer.
 
     Returns:
+        The matching profile, or None. None is the honest answer for a device
+        nobody here has seen, and callers that must produce *something* say so
+        rather than passing the default off as a match.
+    """
+    haystack = (machine or "").lower()
+    hits = [hint for hint in _MACHINE_HINTS if hint.lower() in haystack]
+    if not hits:
+        return None
+    # Longest hint wins so "reMarkable Paper Pro" is not read as a plain
+    # "reMarkable 2" when both would match.
+    return DEVICE_PROFILES[_MACHINE_HINTS[max(hits, key=len)]]
+
+
+def profile_for(machine: str) -> DeviceProfile:
+    """Identify a device, falling back to the default geometry.
+
+    Args:
+        machine: Contents of the tablet's machine identifier.
+
+    Returns:
         The matching profile, or :data:`DEFAULT_PROFILE` for anything
         unrecognised. An unknown device is logged rather than passed over, so a
         wrong-geometry bug report starts with the model that caused it.
     """
-    haystack = (machine or "").lower()
-    matches = [name for hint, name in _MACHINE_HINTS.items() if hint.lower() in haystack]
-    if matches:
-        # Longest hint wins so "reMarkable Paper Pro" is not read as a plain
-        # "reMarkable 2" when both would match.
-        best = max(
-            (hint for hint in _MACHINE_HINTS if hint.lower() in haystack),
-            key=len,
-        )
-        return DEVICE_PROFILES[_MACHINE_HINTS[best]]
+    profile = identify(machine)
+    if profile is not None:
+        return profile
 
     logger.info(
         "Unrecognised reMarkable model %r; using %s geometry.",

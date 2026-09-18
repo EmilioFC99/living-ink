@@ -22,7 +22,7 @@ import zipfile
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from living_ink.devices import profile_for
+from living_ink.devices import DEFAULT_PROFILE, identify
 from living_ink.models import Document
 from living_ink.transport import DeviceInfo
 
@@ -404,10 +404,18 @@ class SSHClient:
         # One command, because each SSH invocation is a fresh connection and
         # this runs on the interactive path. '|| true' keeps a missing file
         # from failing the whole read.
+        # One command, because each SSH invocation is a fresh connection and
+        # this runs on the interactive path. '|| true' keeps a missing file
+        # from failing the whole read. Three firmware sources in preference
+        # order: the reMarkable release file, the human-readable IMG_VERSION
+        # the Paper Pro's Codex Linux carries, and the raw build timestamp in
+        # /etc/version, which is a real answer but not one anyone recognises.
         command = (
-            "cat /sys/devices/soc0/machine 2>/dev/null || true; echo '===';"
-            " grep -h REMARKABLE_RELEASE_VERSION /usr/share/remarkable/update.conf"
-            " 2>/dev/null || cat /etc/version 2>/dev/null || true"
+            "cat /proc/device-tree/model 2>/dev/null"
+            " || cat /sys/devices/soc0/machine 2>/dev/null || true; echo '===';"
+            " grep -h REMARKABLE_RELEASE_VERSION /usr/share/remarkable/update.conf 2>/dev/null"
+            " || grep -h IMG_VERSION /etc/os-release 2>/dev/null"
+            " || cat /etc/version 2>/dev/null || true"
         )
         try:
             output = self._ssh_command(command, timeout=15)
@@ -415,12 +423,24 @@ class SSHClient:
             raise RuntimeError(f"Could not read device info: {e}") from e
 
         machine, _, firmware_raw = output.partition("===")
-        machine = machine.strip()
-        firmware = firmware_raw.strip().rpartition("=")[2].strip()
+        # \x00 because /proc/device-tree entries are NUL-terminated strings.
+        machine = machine.strip().strip("\x00").strip()
+        firmware = firmware_raw.strip().rpartition("=")[2].strip().strip('"')
 
-        profile = profile_for(machine)
+        profile = identify(machine)
+        if profile is None:
+            # Reporting the raw string rather than DEFAULT_PROFILE.name: the
+            # geometry has to fall back to something, but calling an unknown
+            # tablet a "reMarkable 2" turns a visible guess into a false
+            # measurement, which is the one thing this path must not do.
+            logger.info("Unrecognised reMarkable machine string %r.", machine)
+            profile = DEFAULT_PROFILE
+            model = machine or "unknown"
+        else:
+            model = profile.name
+
         self._device_info = DeviceInfo(
-            model=profile.name if machine else "unknown",
+            model=model,
             firmware=firmware,
             screen=profile.screen,
             color=profile.color,
