@@ -16,7 +16,7 @@
 living-ink/
 ├── src/living_ink/
 │   ├── __main__.py              # python -m living_ink entry point
-│   ├── cli.py                   # CLI entry point (`living-ink`): sync | setup | status
+│   ├── cli.py                   # CLI entry point (`living-ink`): sync | watch | setup | status
 │   ├── pipeline.py              # SyncPipeline orchestrator + processing stages
 │   ├── settings.py              # Settings: resolved, typed configuration
 │   ├── config.py                # XDG path resolution & config helpers

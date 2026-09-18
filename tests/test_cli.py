@@ -17,6 +17,7 @@ from living_ink.cli import (
     SetupCommand,
     StatusCommand,
     SyncCommand,
+    WatchCommand,
     main,
 )
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
@@ -486,3 +487,94 @@ class TestStatusSettingsReport:
         out = capsys.readouterr().out
         assert "ocr_concurrency" in out
         assert "SYNC_OCR_CONCURRENCY" in out
+
+
+class TestWatchCommand:
+    """`watch` syncs on a timer and survives everything but a bad config."""
+
+    def _watch(self, side_effects, interval=30):
+        """Run the loop until the stubbed sync raises KeyboardInterrupt.
+
+        Args:
+            side_effects: What successive execute_sync calls do; the last one
+                must interrupt, or the loop would never end.
+            interval: Value for --interval.
+
+        Returns:
+            (exit code, execute_sync mock, sleep mock).
+        """
+        args = argparse.Namespace(interval=interval)
+        with (
+            patch.object(SyncCommand, "execute_sync", side_effect=side_effects) as sync,
+            patch("living_ink.cli.time.sleep") as sleep,
+        ):
+            code = WatchCommand().run(args)
+        return code, sync, sleep
+
+    def test_syncs_repeatedly_until_interrupted(self):
+        code, sync, sleep = self._watch([True, True, KeyboardInterrupt()])
+
+        assert code == 0
+        assert sync.call_count == 3
+        assert sleep.call_count == 2
+
+    def test_a_failed_sync_does_not_end_the_watch(self):
+        """An unplugged tablet is the condition watch exists to ride out."""
+        code, sync, _ = self._watch([False, KeyboardInterrupt()])
+
+        assert code == 0
+        assert sync.call_count == 2
+
+    def test_an_unexpected_error_does_not_end_the_watch(self):
+        code, sync, _ = self._watch([RuntimeError("tablet vanished"), KeyboardInterrupt()])
+
+        assert code == 0
+        assert sync.call_count == 2
+
+    def test_a_missing_config_stops_the_watch(self):
+        """That failure will still be there next tick, so looping is pointless."""
+        code, sync, _ = self._watch([ConfigurationMissing("no config")])
+
+        assert code == 1
+        assert sync.call_count == 1
+
+    def test_the_watch_never_offers_the_setup_wizard(self):
+        """It runs unattended; blocking on input() would hang a daemon."""
+        args = argparse.Namespace(interval=30)
+        with (
+            patch.object(SyncCommand, "execute_sync", side_effect=ConfigurationMissing("nope")),
+            patch("builtins.input", side_effect=AssertionError("must not prompt")),
+            patch("living_ink.cli.time.sleep"),
+        ):
+            assert WatchCommand().run(args) == 1
+
+    def test_the_interval_is_floored(self):
+        """Polling faster than a sync finishes just stacks runs on each other."""
+        _, _, sleep = self._watch([True, KeyboardInterrupt()], interval=1)
+
+        sleep.assert_called_once_with(WatchCommand.MIN_INTERVAL)
+
+    def test_interrupting_the_wait_stops_cleanly(self):
+        args = argparse.Namespace(interval=30)
+        with (
+            patch.object(SyncCommand, "execute_sync", return_value=True),
+            patch("living_ink.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            assert WatchCommand().run(args) == 0
+
+    def test_watch_is_registered_and_takes_every_sync_option(self):
+        parser = LivingInkCLI().build_parser()
+
+        args = parser.parse_args(["watch", "--interval", "60", "--notebook", "Foo", "--cloud"])
+
+        assert (args.command, args.interval, args.notebook, args.cloud) == (
+            "watch",
+            60,
+            "Foo",
+            True,
+        )
+
+    def test_watch_interval_defaults_to_half_an_hour(self):
+        args = LivingInkCLI().build_parser().parse_args(["watch"])
+
+        assert args.interval == WatchCommand.DEFAULT_INTERVAL
