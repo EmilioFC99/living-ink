@@ -1045,3 +1045,14 @@ class TestCacheCommand:
     def test_clearing_reports_the_render_cache_too(self, cache, capsys):
         _, out = self._run(capsys, clear=True)
         assert "0 cached rendered page(s)" in out
+
+
+class TestInterruptExitCode:
+    """Ctrl+C ends a sync; it does not crash it."""
+
+    def test_no_traceback_and_the_conventional_sigint_code(self):
+        with patch("living_ink.cli.LivingInkCLI.run", side_effect=KeyboardInterrupt):
+            with pytest.raises(SystemExit) as exit_info:
+                main([])
+
+        assert exit_info.value.code == 130

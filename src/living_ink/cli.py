@@ -1607,7 +1607,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         Exit code integer.
     """
     cli = LivingInkCLI()
-    code = cli.run(argv)
+    try:
+        code = cli.run(argv)
+    except KeyboardInterrupt:
+        # Ctrl+C is how a user ends a long sync. A traceback would suggest
+        # something broke; 130 is what a shell expects from SIGINT.
+        sys.exit(130)
     if isinstance(code, int) and code != 0:
         sys.exit(code)
     return code or 0

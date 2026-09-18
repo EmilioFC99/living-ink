@@ -2396,6 +2396,13 @@ class SyncPipeline:
             seen, published, failed = self._counts
             outcome = "success" if result else "partial"
             return result
+        except KeyboardInterrupt:
+            # Ctrl+C is not a failure, and the run did not do nothing. Record
+            # what it got through, then let the interrupt carry on out.
+            seen, published, failed = self._counts
+            outcome = "interrupted"
+            self._report_interrupt(published)
+            raise
         finally:
             if self.run_id is not None:
                 store.finish_run(
@@ -2405,6 +2412,24 @@ class SyncPipeline:
                     published=published,
                     failed=failed,
                 )
+
+    def _report_interrupt(self, published: int) -> None:
+        """Say what an interrupted run kept, so the user knows what it cost.
+
+        Transcribing is the only part of a sync that costs money, and every
+        page is written to the transcript cache the moment it comes back. An
+        interrupt therefore loses the current page and nothing else — but that
+        is not obvious from the outside, so it is worth saying out loud.
+
+        Args:
+            published: Notebooks published before the interrupt.
+        """
+        log("")
+        log("⏹️  Interrupted.")
+        if published:
+            log(f"   {published} notebook(s) were published and will not be synced again.")
+        if self.cache.enabled:
+            log("   Pages already transcribed are cached; resuming will not pay for them twice.")
 
     def _execute(self) -> bool:
         """Do the actual sync work.
@@ -2451,7 +2476,10 @@ class SyncPipeline:
             else:
                 failed += 1
                 all_success = False
-        self._counts = (len(notebooks), published, failed)
+            # Updated per notebook, not once at the end: a run that is
+            # interrupted half way through still did the work it did, and the
+            # run record has to say so.
+            self._counts = (len(notebooks), published, failed)
 
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
