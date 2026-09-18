@@ -749,6 +749,65 @@ def get_document_type(item: Any, client: Optional[Any] = None) -> str:
     return "notebook"
 
 
+def to_datetime(value: Any) -> Optional[datetime.datetime]:
+    """Coerce whatever a transport calls a timestamp into a datetime.
+
+    The two transports disagree: the cloud client hands back a datetime, SSH
+    hands back the device's epoch value, and the device counts in milliseconds
+    where everything else counts in seconds. A string may be either an ISO
+    timestamp or a number that happens to be spelled out.
+
+    Args:
+        value: A datetime, an epoch number, an ISO string, or None.
+
+    Returns:
+        The moment it names, or None when it names nothing intelligible.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if not text.replace(".", "", 1).isdigit():
+            try:
+                return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        value = text
+
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    # The device reports milliseconds. Anything past this is not a plausible
+    # second-count for a tablet that did not exist before 2017.
+    if seconds > 1e11:
+        seconds /= 1000
+    try:
+        return datetime.datetime.fromtimestamp(seconds)
+    except (ValueError, OverflowError, OSError):
+        # A timestamp outside the range this platform can represent.
+        return None
+
+
+def to_iso_date(value: Any) -> Optional[str]:
+    """Render a transport timestamp as a plain ``YYYY-MM-DD`` date.
+
+    Args:
+        value: Anything :func:`to_datetime` accepts.
+
+    Returns:
+        The date, or None when the value names no moment.
+    """
+    moment = to_datetime(value)
+    return None if moment is None else moment.date().isoformat()
+
+
 def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any] = None) -> str:
     """Format a notebook item description for display in selection prompts."""
     name = str(
@@ -765,22 +824,8 @@ def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any
     doc_type = get_document_type(item, client)
     type_badge = f" [{doc_type.upper()}]" if doc_type in ("pdf", "epub") else ""
 
-    mod_val = get_val(item, "ModifiedClient") or getattr(item, "last_modified", None)
-    mod_str = ""
-    if mod_val:
-        if isinstance(mod_val, datetime.datetime):
-            mod_str = f" (modified: {mod_val.strftime('%Y-%m-%d %H:%M')})"
-        elif isinstance(mod_val, (int, float)):
-            try:
-                ts = float(mod_val)
-                if ts > 1e11:
-                    ts = ts / 1000
-                mod_str = (
-                    f" (modified: {datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')})"
-                )
-            except (ValueError, OverflowError, OSError):
-                # A device timestamp outside the range the platform can render.
-                pass
+    modified = to_datetime(get_val(item, "ModifiedClient") or getattr(item, "last_modified", None))
+    mod_str = "" if modified is None else f" (modified: {modified.strftime('%Y-%m-%d %H:%M')})"
 
     id_label = f" [ID: {short_id}]" if short_id else ""
     return f"{title}{type_badge}{id_label}{mod_str}"
@@ -1028,6 +1073,17 @@ class DocumentJob:
     raw_texts: List[str] = field(default_factory=list)
     cleaned_texts: List[str] = field(default_factory=list)
     clean_out_txt: Optional[Path] = None
+
+    def modified_date(self) -> Optional[str]:
+        """Return the date the tablet says this notebook was last written on.
+
+        Returns:
+            ``YYYY-MM-DD``, or None when the transport reported no usable
+            timestamp for it.
+        """
+        return to_iso_date(
+            get_val(self.item, "ModifiedClient") or getattr(self.item, "last_modified", None)
+        )
 
     def page_number(self, index: int) -> int:
         """Return the document page number for the given transcript index.
@@ -2176,6 +2232,9 @@ class SyncPipeline:
         # Where it landed last time. A notebook renamed or moved on the tablet
         # is the same note in a new place, not a second note.
         existing_target = previous["target"] if previous else None
+        # When the note first appeared here, for a note that has to state when
+        # it came into existence and predates the frontmatter that says so.
+        first_published = to_iso_date(previous["first_published_at"]) if previous else None
 
         try:
             published = dest.publish(
@@ -2191,6 +2250,8 @@ class SyncPipeline:
                 adopt_by_name=bool(previous) and not existing_id,
                 doc_id=job.notebook_id,
                 existing_target=existing_target,
+                document_modified=job.modified_date(),
+                first_published=first_published,
             )
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")

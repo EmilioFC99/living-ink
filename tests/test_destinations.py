@@ -885,3 +885,63 @@ class TestUnpublishDefault:
                 return True
 
         assert Bare().unpublish(target="x", external_id="y", doc_id="z") is False
+
+
+class TestObsidianNoteDates:
+    """Three dates, three meanings. There used to be one, and it was wrong."""
+
+    def _dest(self, tmp_path):
+        return ObsidianDestination(vault_path=str(tmp_path))
+
+    def _front(self, tmp_path, name="Notes"):
+        return (tmp_path / f"{name}.md").read_text(encoding="utf-8")
+
+    def test_updated_is_when_the_notebook_was_written_on(self, tmp_path):
+        self._dest(tmp_path).publish("Notes", "body", [], document_modified="2026-03-04")
+        assert "updated: 2026-03-04" in self._front(tmp_path)
+
+    def test_synced_is_today(self, tmp_path):
+        self._dest(tmp_path).publish("Notes", "body", [], document_modified="2026-03-04")
+        today = datetime.date.today().isoformat()
+        assert f"synced: {today}" in self._front(tmp_path)
+
+    def test_created_stops_moving_on_every_sync(self, tmp_path):
+        """This is the bug: a note written in March reported today as its birthday."""
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "v1", [], document_modified="2026-03-04")
+        (tmp_path / "Notes.md").write_text(
+            self._front(tmp_path).replace(
+                f"created: {datetime.date.today().isoformat()}", "created: 2026-03-04"
+            ),
+            encoding="utf-8",
+        )
+
+        dest.publish("Notes", "v2", [], document_modified="2026-09-17")
+        assert "created: 2026-03-04" in self._front(tmp_path)
+
+    def test_created_falls_back_to_when_the_note_first_appeared(self, tmp_path):
+        """A note from before this existed has no created line to preserve."""
+        self._dest(tmp_path).publish("Notes", "body", [], first_published="2025-11-02")
+        assert "created: 2025-11-02" in self._front(tmp_path)
+
+    def test_created_prefers_the_note_over_the_database(self, tmp_path):
+        dest = self._dest(tmp_path)
+        dest.publish("Notes", "v1", [], first_published="2025-11-02")
+        dest.publish("Notes", "v2", [], first_published="2026-01-01")
+        assert "created: 2025-11-02" in self._front(tmp_path)
+
+    def test_created_falls_back_to_the_modification_date_before_today(self, tmp_path):
+        """A date the notebook was demonstrably alive on beats one that is wrong."""
+        self._dest(tmp_path).publish("Notes", "body", [], document_modified="2026-03-04")
+        assert "created: 2026-03-04" in self._front(tmp_path)
+
+    def test_a_notebook_with_no_known_dates_still_publishes(self, tmp_path):
+        assert self._dest(tmp_path).publish("Notes", "body", []) is True
+        today = datetime.date.today().isoformat()
+        assert f"created: {today}" in self._front(tmp_path)
+        assert f"updated: {today}" in self._front(tmp_path)
+
+    def test_the_three_dates_are_all_present(self, tmp_path):
+        self._dest(tmp_path).publish("Notes", "body", [], document_modified="2026-03-04")
+        written = self._front(tmp_path)
+        assert all(key in written for key in ("created:", "updated:", "synced:"))

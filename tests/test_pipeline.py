@@ -1,5 +1,6 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
+import datetime
 import os
 import stat
 import subprocess
@@ -39,26 +40,16 @@ class MockDestination(Destination):
         notebook_name: str,
         text_content: str,
         image_paths: list,
-        sub_folder: str = None,
-        document_path=None,
-        tags: list = None,
-        existing_id: str = None,
-        adopt_by_name: bool = False,
-        doc_id: str = None,
-        existing_target: str = None,
+        **kwargs,
     ) -> bool:
+        # Recorded as passed rather than named one by one, so a new argument on
+        # the contract does not need this double edited to keep the suite green.
         self.published.append(
             {
                 "notebook_name": notebook_name,
                 "text_content": text_content,
                 "image_paths": image_paths,
-                "sub_folder": sub_folder,
-                "document_path": document_path,
-                "tags": tags,
-                "existing_id": existing_id,
-                "adopt_by_name": adopt_by_name,
-                "doc_id": doc_id,
-                "existing_target": existing_target,
+                **kwargs,
             }
         )
         return True
@@ -1262,6 +1253,18 @@ class TestPublicationIdentity:
 
         assert recorded.call_args.kwargs["target"] == "Work/Notes.md"
 
+    def test_the_tablets_modification_date_reaches_the_destination(self, tmp_path):
+        """It used to be fetched for one log line and then thrown away."""
+        dest = MockDestination("MockDest")
+        job = self._job(tmp_path)
+        job.item = {"ID": "nb-1", "ModifiedClient": "2026-03-04T09:30:00"}
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(job, {"nb-1": [dest]})
+
+        assert dest.published[0]["document_modified"] == "2026-03-04"
+
 
 class TestOrphanedNotebooks:
     """A notebook deleted on the tablet is reported, and pruned only when asked."""
@@ -1357,3 +1360,70 @@ class TestOrphanedNotebooks:
 
         assert dest.unpublished == []
         assert "not configured" in capsys.readouterr().out
+
+
+class TestTimestampCoercion:
+    """The two transports disagree about what a timestamp looks like."""
+
+    def test_a_datetime_passes_through(self):
+        moment = datetime.datetime(2026, 3, 4, 9, 30)
+        assert pipeline.to_datetime(moment) is moment
+
+    def test_epoch_seconds(self):
+        seconds = datetime.datetime(2026, 3, 4, 9, 30).timestamp()
+        assert pipeline.to_datetime(seconds).year == 2026
+
+    def test_the_device_counts_in_milliseconds(self):
+        """SSH hands back the tablet's clock, which is 1000x everyone else's."""
+        moment = datetime.datetime(2026, 3, 4, 9, 30)
+        assert pipeline.to_datetime(int(moment.timestamp() * 1000)) == moment
+
+    def test_milliseconds_spelled_as_a_string(self):
+        moment = datetime.datetime(2026, 3, 4, 9, 30)
+        assert pipeline.to_datetime(str(int(moment.timestamp() * 1000))) == moment
+
+    def test_an_iso_string(self):
+        assert pipeline.to_datetime("2026-03-04T09:30:00").year == 2026
+
+    def test_an_iso_string_ending_in_z(self):
+        assert pipeline.to_datetime("2026-03-04T09:30:00Z") is not None
+
+    @pytest.mark.parametrize("value", [None, True, False, "", "   ", "not a date", object()])
+    def test_nothing_intelligible_is_none(self, value):
+        assert pipeline.to_datetime(value) is None
+
+    def test_an_unrepresentable_timestamp_is_none(self):
+        assert pipeline.to_datetime(1e18) is None
+
+    def test_to_iso_date_drops_the_time(self):
+        assert pipeline.to_iso_date("2026-03-04T09:30:00") == "2026-03-04"
+
+    def test_to_iso_date_of_nothing_is_none(self):
+        assert pipeline.to_iso_date(None) is None
+
+
+class TestJobModifiedDate:
+    """The tablet knows when the notebook was last written on. Ask it."""
+
+    def _job(self, item):
+        return DocumentJob(
+            item=item,
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="notebook",
+            version=1,
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+        )
+
+    def test_reads_the_cloud_metadata_field(self):
+        assert self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_date() == "2026-03-04"
+
+    def test_falls_back_to_the_document_attribute(self):
+        item = SimpleNamespace(last_modified=datetime.datetime(2026, 3, 4, 9, 30))
+        assert self._job(item).modified_date() == "2026-03-04"
+
+    def test_an_item_with_no_date_reports_none(self):
+        assert self._job({}).modified_date() is None
