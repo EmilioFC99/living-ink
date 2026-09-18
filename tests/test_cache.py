@@ -1,11 +1,11 @@
-"""Tests for the content-addressed transcription cache."""
+"""Tests for the content-addressed transcription and render caches."""
 
 import os
 import time
 
 import pytest
 
-from living_ink.cache import DEFAULT_MAX_AGE_DAYS, TranscriptCache, format_size
+from living_ink.cache import DEFAULT_MAX_AGE_DAYS, RenderCache, TranscriptCache, format_size
 
 
 @pytest.fixture
@@ -196,3 +196,47 @@ class TestFormatSize:
     )
     def test_units(self, num_bytes, expected):
         assert format_size(num_bytes) == expected
+
+
+class TestRenderCache:
+    """Rendered pages cache the same way, with bytes instead of JSON."""
+
+    @pytest.fixture
+    def renders(self, tmp_path):
+        """A render cache rooted in a throwaway directory."""
+        return RenderCache(tmp_path / "renders")
+
+    def test_a_miss_returns_none(self, renders):
+        assert renders.get("nothing-here") is None
+
+    def test_a_stored_page_comes_back_byte_for_byte(self, renders):
+        renders.put("k", b"\x89PNG fake")
+        assert renders.get("k") == b"\x89PNG fake"
+
+    def test_entries_are_stored_as_png(self, renders):
+        renders.put("abcdef", b"png")
+        assert (renders.root / "ab" / "abcdef.png").exists()
+
+    def test_an_empty_render_is_not_stored(self, renders):
+        """A render that produced nothing is a failure, not a blank page."""
+        renders.put("k", b"")
+        assert not renders.root.exists()
+
+    def test_a_zero_byte_entry_reads_as_a_miss(self, renders):
+        renders.put("abcdef", b"png")
+        (renders.root / "ab" / "abcdef.png").write_bytes(b"")
+        assert renders.get("abcdef") is None
+
+    def test_a_disabled_cache_stores_nothing(self, tmp_path):
+        off = RenderCache(tmp_path / "r", enabled=False)
+        off.put("k", b"png")
+        assert not off.root.exists()
+
+    def test_the_two_caches_do_not_share_a_directory(self, tmp_path):
+        """A transcript and a render can collide on key; they must not on path."""
+        transcripts = TranscriptCache(tmp_path / "transcripts")
+        renders = RenderCache(tmp_path / "renders")
+        transcripts.put("aa", "raw", "clean")
+        renders.put("aa", b"png")
+        assert transcripts.get("aa") == ("raw", "clean")
+        assert renders.get("aa") == b"png"
