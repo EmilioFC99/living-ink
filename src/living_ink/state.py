@@ -31,10 +31,13 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle: transport does not need state
+    from living_ink.transport import DeviceInfo
 
 #: Bumped whenever the schema changes; drives the migration ladder in _migrate.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Name of the database inside the data directory.
 DB_FILENAME = "state.db"
@@ -79,6 +82,20 @@ CREATE TABLE IF NOT EXISTS publications (
 CREATE INDEX IF NOT EXISTS publications_by_destination
     ON publications (destination);
 
+-- At most one row: the tablet this installation syncs with. Written only
+-- when USB SSH can actually see the hardware, and read on every other run so
+-- a Cloud-only sync still knows the geometry a single USB session taught it.
+CREATE TABLE IF NOT EXISTS device (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    model      TEXT NOT NULL,
+    firmware   TEXT,
+    width      INTEGER NOT NULL,
+    height     INTEGER NOT NULL,
+    color      INTEGER NOT NULL DEFAULT 0,
+    measured   INTEGER NOT NULL DEFAULT 1,
+    learned_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pages (
     doc_id      TEXT NOT NULL,
     page_index  INTEGER NOT NULL,
@@ -100,6 +117,9 @@ _ADDED_COLUMNS = {
     },
     "publications": {
         "target": "TEXT",
+    },
+    "device": {
+        "measured": "INTEGER NOT NULL DEFAULT 1",
     },
 }
 
@@ -566,6 +586,71 @@ class StateStore:
             )
 
         return overview
+
+    # --- device -----------------------------------------------------------
+
+    def remember_device(self, info: "DeviceInfo") -> None:
+        """Record the tablet this installation syncs with.
+
+        Only USB SSH can see the hardware, and most runs are Cloud-only, so
+        what a single USB session learns has to outlive it. The row is
+        overwritten rather than appended: there is one tablet, and a later
+        reading of it is better than an earlier one.
+
+        Args:
+            info: What the transport reported about the device.
+        """
+        with self._write() as conn:
+            conn.execute(
+                """
+                INSERT INTO device
+                    (id, model, firmware, width, height, color, measured, learned_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    model = excluded.model,
+                    firmware = excluded.firmware,
+                    width = excluded.width,
+                    height = excluded.height,
+                    color = excluded.color,
+                    measured = excluded.measured,
+                    learned_at = excluded.learned_at
+                """,
+                (
+                    info.model,
+                    info.firmware,
+                    info.screen[0],
+                    info.screen[1],
+                    int(info.color),
+                    int(info.screen_measured),
+                    _now(),
+                ),
+            )
+
+    def recall_device(self) -> Optional[Tuple["DeviceInfo", str]]:
+        """Return the tablet learned during some past USB session.
+
+        Returns:
+            The remembered device and the ISO timestamp it was learned at, or
+            None if USB SSH has never connected. The timestamp is returned
+            alongside so callers can say "remembered" rather than implying a
+            live reading.
+        """
+        row = self._conn.execute("SELECT * FROM device WHERE id = 1").fetchone()
+        if row is None:
+            return None
+
+        from living_ink.transport import DeviceInfo
+
+        return (
+            DeviceInfo(
+                model=row["model"],
+                firmware=row["firmware"] or "",
+                screen=(row["width"], row["height"]),
+                color=bool(row["color"]),
+                screen_measured=bool(row["measured"]),
+            ),
+            row["learned_at"],
+        )
 
     # --- pages ------------------------------------------------------------
 

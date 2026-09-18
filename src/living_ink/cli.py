@@ -493,26 +493,46 @@ class StatusReport:
         }
 
 
-def _describe_connected_device(host: str, port: int, user: str) -> str:
-    """Ask a reachable tablet what it is, for the status line.
+def _describe_connected_device(host: str, port: int, user: str, *, live: bool = True) -> str:
+    """Say which tablet this installation syncs with, for the status line.
+
+    A live USB reading wins, and is written to the state store on the way past
+    so a later Cloud-only ``status`` can still name the device. When USB is not
+    there, the answer comes from that memory, and only then from the default
+    profile.
 
     Args:
         host: SSH host the tablet answers on.
         port: SSH port.
         user: SSH user.
+        live: Whether SSH looked reachable. False skips the probe entirely
+            rather than spending its timeout on a cable that is not plugged in.
 
     Returns:
-        A one-line description, or an empty string if the device could not be
-        identified. A health check that cannot name the model is still a useful
+        A one-line description, or an empty string if nothing at all could be
+        said. A health check that cannot name the model is still a useful
         health check, so every failure here degrades to silence rather than
         turning ``status`` itself into an error.
     """
-    from living_ink.ssh import create_ssh_client
-    from living_ink.transport import UnsupportedOperation
+    from living_ink.devices import resolve_device
+
+    transport = None
+    if live:
+        from living_ink.ssh import create_ssh_client
+
+        transport = create_ssh_client(host=host, user=user, port=port)
 
     try:
-        return create_ssh_client(host=host, user=user, port=port).get_device_info().describe()
-    except (UnsupportedOperation, RuntimeError, OSError) as e:
+        from living_ink.pipeline import get_state_store
+
+        store = get_state_store()
+    except (OSError, RuntimeError) as e:
+        logger.debug("No state store for the device memory: %s", e)
+        store = None
+
+    try:
+        return resolve_device(transport, store).describe()
+    except (RuntimeError, OSError) as e:
         logger.debug("Could not identify the device: %s", e, exc_info=True)
         return ""
 
@@ -565,10 +585,14 @@ def collect_status(config_path: Path) -> StatusReport:
             host=report.ssh_host, port=rm_cfg.get("ssh_port", 22)
         )
 
-    if report.ssh_ok:
-        report.device = _describe_connected_device(
-            report.ssh_host, rm_cfg.get("ssh_port", 22), rm_cfg.get("ssh_user", "root")
-        )
+    # Asked even when SSH is down: the memory of a past USB session is still
+    # the best answer available, and saying nothing would hide it.
+    report.device = _describe_connected_device(
+        report.ssh_host,
+        rm_cfg.get("ssh_port", 22),
+        rm_cfg.get("ssh_user", "root"),
+        live=report.ssh_ok,
+    )
 
     # Not rm_cfg["device_token"] alone: registration stores the token in
     # ~/.rmapi and leaves the config key empty, so reading only the config
