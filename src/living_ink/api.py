@@ -188,7 +188,10 @@ def resolve_stored_token(
     """
     from living_ink.config.credentials import CLOUD_TOKEN, migrate_secret, read_secret
 
-    resolved = settings or Settings.from_env()
+    # Resolved *with* the config path: the credentials store is one of the
+    # layers Settings.resolve reads, so resolving without it would answer from
+    # the default profile's store and never reach the requested one below.
+    resolved = settings or Settings.resolve(config_path=config_path)
     token = resolved.remarkable_token
     if token:
         migrate_secret(CLOUD_TOKEN, token, config_path=config_path)

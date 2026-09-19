@@ -1,14 +1,39 @@
 """What a ``config.yml`` may contain, and what to do when it does not.
 
-Holds the declarative schema every config is checked against on load
-(:data:`CONFIG_SCHEMA`, :func:`validate_config`). A misspelled key used to
-parse cleanly and be ignored, which surfaced much later as "0 notebooks
-published" and no reason given.
+Checks a parsed config against :data:`living_ink.config.schema.SETTINGS`
+(:func:`validate_config`) and then hands the rest of the package the version of
+it they should read (:func:`apply_status`). A misspelled key used to parse
+cleanly and be ignored, which surfaced much later as "0 notebooks published"
+and no reason given.
+
+The schema itself lives in :mod:`living_ink.config.schema`. Nothing here
+decides what a setting is; it only decides what to do about one.
 """
 
 import difflib
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from living_ink.config.schema import (
+    ACTIVE,
+    CHOICE,
+    DEPRECATED,
+    FLAG,
+    LEGACY_KEYS,
+    LIST,
+    NUMBER,
+    PATH,
+    REMOVED,
+    SECRET,
+    SECTION_KEYS,
+    SECTIONS,
+    SETTINGS,
+    TEXT,
+    WHOLE,
+    Section,
+    Setting,
+    section_status,
+)
 
 
 class ConfigurationMissing(Exception):
@@ -33,10 +58,6 @@ class ConfigurationMissing(Exception):
         self.hint = hint
 
 
-# ---------------------------------------------------------------------------
-# Config schema
-# ---------------------------------------------------------------------------
-
 #: Version of the ``config.yml`` shape this build understands.
 #:
 #: Written into every config the setup wizard generates. It is not a
@@ -46,164 +67,8 @@ class ConfigurationMissing(Exception):
 #: by a newer one instead of silently ignoring half of it.
 SCHEMA_VERSION = 1
 
-#: Marker for "any scalar is fine here", used for free-text values.
-TEXT = "text"
-#: Marker for "must read as a whole number".
-WHOLE = "whole number"
-#: Marker for "must read as true or false".
-FLAG = "true/false"
-#: Marker for "must read as a number, decimals allowed".
-NUMBER = "number"
-
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSEY = {"0", "false", "no", "off"}
-
-#: The setting is current. Validate it, read it, say nothing.
-ACTIVE = "active"
-#: The setting still works but is on its way out.
-#:
-#: Warned about by name, and — when it has a key-for-key ``replacement`` —
-#: copied onto that replacement in memory at load time, so the rest of the
-#: package only ever has to know the current spelling.
-DEPRECATED = "deprecated"
-#: The setting is gone. Warned about, then dropped before anything reads it.
-#:
-#: This is the difference between "your config does nothing" and "your config
-#: does not load". An unrecognised section is a hard :data:`ERROR` and aborts
-#: the run, so a section cannot simply be deleted from the schema on the day
-#: its code is deleted — every config still naming it would stop working. It
-#: is marked ``removed`` instead, and disappears from the schema a release
-#: later, once the warning has had time to be seen.
-REMOVED = "removed"
-
-
-@dataclass(frozen=True)
-class Key:
-    """One config key that is not simply active.
-
-    Active keys are written as a bare kind marker; this wrapper exists for the
-    ones carrying a status, so the schema stays readable at a glance and the
-    exceptions are the only thing that looks exceptional.
-
-    Attributes:
-        kind: One of :data:`TEXT`, :data:`WHOLE`, :data:`FLAG`, :data:`NUMBER`.
-        status: :data:`ACTIVE`, :data:`DEPRECATED` or :data:`REMOVED`.
-        replacement: Dotted path of the key that supersedes this one, when the
-            mapping is key-for-key. ``None`` when there is no single successor.
-        note: One clause appended to the warning, for anything the status and
-            the replacement do not already say.
-    """
-
-    kind: str
-    status: str = ACTIVE
-    replacement: Optional[str] = None
-    note: str = ""
-
-
-@dataclass(frozen=True)
-class Section:
-    """One config section that is not simply active.
-
-    As with :class:`Key`, an active section is written as a bare mapping and
-    only the ones carrying a status are wrapped.
-
-    Attributes:
-        keys: Key name to kind marker or :class:`Key`. Empty means the section
-            is free-form and only its shape is checked.
-        status: :data:`ACTIVE`, :data:`DEPRECATED` or :data:`REMOVED`.
-        replacement: Name of the section that supersedes this one, or ``None``.
-        note: One clause appended to the warning.
-    """
-
-    keys: Dict[str, Union[str, Key]]
-    status: str = ACTIVE
-    replacement: Optional[str] = None
-    note: str = ""
-
-
-#: What a ``config.yml`` may contain.
-#:
-#: A mapping means a section and lists the keys that section accepts; a marker
-#: means a bare top-level key. Anything not named here is rejected, so this
-#: table has to stay complete: a key some module reads but this forgets is a
-#: working config that no longer loads. Every legacy spelling still honoured
-#: elsewhere in the package therefore appears here too. Sections belonging to a
-#: registered destination are exempt from key checking entirely — see the
-#: ``extra_sections`` argument to :func:`validate_config`.
-#:
-#: A section or key on its way out is wrapped in :class:`Section` or
-#: :class:`Key` and carries a status; everything written bare is
-#: :data:`ACTIVE`. That wrapper is what lets a removal ship as a warning
-#: instead of an abort — see :data:`REMOVED` and :func:`apply_status`.
-CONFIG_SCHEMA: Dict[str, Union[str, Key, Dict[str, Union[str, Key]], Section]] = {
-    "schema_version": WHOLE,
-    "use_ssh": Key(FLAG, DEPRECATED, replacement="remarkable.use_ssh"),
-    "ai": {
-        "provider": TEXT,
-        "api_key": TEXT,
-        "model": TEXT,
-        "base_url": TEXT,
-        "temperature": NUMBER,
-    },
-    # The pre-``ai:`` spelling. Still read, and still the place a 0.1 install
-    # keeps its key, so it maps forward rather than being refused.
-    "openai": Section(
-        {
-            "api_key": Key(TEXT, DEPRECATED, replacement="ai.api_key"),
-            "model": Key(TEXT, DEPRECATED, replacement="ai.model"),
-        },
-        status=DEPRECATED,
-        replacement="ai",
-    ),
-    "remarkable": {
-        "device_token": TEXT,
-        "preferred_connection": TEXT,
-        "use_ssh": FLAG,
-        "ssh_host": TEXT,
-        "ssh_user": TEXT,
-        "ssh_port": WHOLE,
-    },
-    "sync": {
-        "sync_pdfs": FLAG,
-        "sync_epubs": FLAG,
-        "max_notebooks_per_run": WHOLE,
-        "ocr_concurrency": WHOLE,
-        "transcript_cache": FLAG,
-        "render_cache": FLAG,
-        "cache_max_age_days": WHOLE,
-    },
-    # There is one OCR backend, and it is the configured AI provider. This
-    # section is kept only so the configs that still name it keep loading.
-    "google_vision": Section(
-        {
-            "credentials_path": TEXT,
-            "credentials_json": TEXT,
-        },
-        status=REMOVED,
-        note="pages are read by the provider named in 'ai:'",
-    ),
-    "obsidian": {
-        "enabled": FLAG,
-        "vault_path": TEXT,
-        "root_folder": TEXT,
-        "mirror_folders": FLAG,
-        "attachments_folder": TEXT,
-    },
-    "apple_notes": {
-        "enabled": FLAG,
-        "folder_name": TEXT,
-    },
-    # The single-destination era's block, normalised away by
-    # destinations._apply_legacy_destination. Free-form on purpose: its keys
-    # are whichever destination it names, which is also why it has no
-    # key-for-key replacement to map onto — the successor is a section named
-    # after the destination.
-    "destination": Section(
-        {},
-        status=DEPRECATED,
-        note="name the destination's own section instead, e.g. 'obsidian:'",
-    ),
-}
 
 #: The run cannot proceed: the config does not say what its author meant.
 ERROR = "error"
@@ -244,26 +109,31 @@ class ConfigProblem:
         return f"{text} ({self.hint})" if self.hint else text
 
 
-def _reads_as(value: Any, kind: str) -> bool:
+def reads_as(value: Any, kind: str) -> bool:
     """Report whether a YAML value can be used as the declared kind.
 
     Deliberately permissive about spelling and strict about meaning. YAML gives
     no way to say "this 22 is a string", and Settings already coerces, so
-    ``ssh_port: "22"`` is accepted. ``max_notebooks_per_run: many`` is not,
-    because nothing downstream can turn that into a number and the run would
-    quietly fall back to the default instead.
+    ``ssh_port: "22"`` is accepted. ``limit: many`` is not, because nothing
+    downstream can turn that into a number and the run would quietly fall back
+    to the default instead.
 
     Args:
         value: The parsed YAML value.
-        kind: One of :data:`TEXT`, :data:`WHOLE`, :data:`FLAG`, :data:`NUMBER`.
+        kind: A kind marker from :mod:`living_ink.config.schema`.
 
     Returns:
         True when the value is usable as that kind.
     """
+    if kind == LIST:
+        # A list is the natural spelling, but an environment variable has no
+        # way to say "several", so a comma-separated string reads as one too.
+        return isinstance(value, (list, tuple)) or isinstance(value, str)
+
     if isinstance(value, (dict, list)):
         return False
 
-    if kind == TEXT:
+    if kind in (TEXT, PATH, SECRET, CHOICE):
         return True
 
     if kind == FLAG:
@@ -297,28 +167,79 @@ def _reads_as(value: Any, kind: str) -> bool:
     return True
 
 
-def _status_problem(path: str, entry: Union[Key, Section]) -> Optional[ConfigProblem]:
-    """Report that a section or key carries a status worth mentioning.
+def _value_problem(path: str, setting: Setting, value: Any) -> Optional[ConfigProblem]:
+    """Report that a value cannot be used as the setting it was written under.
 
     Args:
-        path: Dotted location of the section or key, as written in the file.
-        entry: The schema entry found for it.
+        path: Dotted location of the key, as written in the file.
+        setting: The schema entry found for it.
+        value: The parsed YAML value. ``None`` means the key was written with
+            nothing after it, which is "unset", not "mistyped".
 
     Returns:
-        A :data:`WARNING` problem for a deprecated or removed entry, or None
-        when the entry is active and there is nothing to say.
+        An :data:`ERROR` problem, or None when the value is readable.
     """
-    if entry.status == DEPRECATED:
-        message = "deprecated"
-        hint = f"use {entry.replacement}" if entry.replacement else ""
-    elif entry.status == REMOVED:
-        message = "no longer used, and ignored"
-        hint = f"delete it; {entry.note}" if entry.note else "delete it"
-    else:
+    if value is None:
         return None
 
-    if entry.status == DEPRECATED and entry.note:
-        hint = f"{hint}; {entry.note}" if hint else entry.note
+    if not reads_as(value, setting.kind):
+        return ConfigProblem(ERROR, path, f"expected {setting.kind}, found {value!r}")
+
+    if setting.kind == CHOICE and setting.choices:
+        allowed = [choice.value for choice in setting.choices]
+        if str(value).strip().lower() not in allowed:
+            return ConfigProblem(
+                ERROR,
+                path,
+                f"expected one of {', '.join(allowed)}, found {value!r}",
+            )
+
+    return None
+
+
+def _legacy_problem(path: str, setting: Setting) -> ConfigProblem:
+    """Report that a key is spelled the way an older release spelled it.
+
+    Args:
+        path: The legacy dotted path, as written in the file.
+        setting: The setting that superseded it.
+
+    Returns:
+        A :data:`WARNING` naming the current spelling, or — for a credential,
+        which has no spelling in ``config.yml`` at all — naming the command
+        that stores it properly.
+    """
+    if setting.key is not None:
+        return ConfigProblem(WARNING, path, "deprecated", f"use {setting.key}")
+    return ConfigProblem(
+        WARNING,
+        path,
+        "deprecated",
+        "secrets are stored outside config.yml; run: living-ink setup",
+    )
+
+
+def _status_problem(path: str, section: Section) -> Optional[ConfigProblem]:
+    """Report that a section carries a status worth mentioning.
+
+    Args:
+        path: The section's name, as written in the file.
+        section: The schema entry found for it.
+
+    Returns:
+        A :data:`WARNING` problem for a deprecated or removed section, or None
+        when the section is active and there is nothing to say.
+    """
+    if section.status == DEPRECATED:
+        message = "deprecated"
+        hint = f"use {section.replacement}" if section.replacement else ""
+        if section.note:
+            hint = f"{hint}; {section.note}" if hint else section.note
+    elif section.status == REMOVED:
+        message = "no longer used, and ignored"
+        hint = f"delete it; {section.note}" if section.note else "delete it"
+    else:
+        return None
 
     return ConfigProblem(WARNING, path, message, hint)
 
@@ -338,72 +259,86 @@ def _did_you_mean(key: str, candidates: Iterable[str]) -> str:
     return f"did you mean {matches[0]}?" if matches else ""
 
 
-def _check_section(
-    name: str,
-    section: Any,
-    allowed: Dict[str, Union[str, Key]],
-    check_keys: bool = True,
-) -> List[ConfigProblem]:
+def _current_leaves(section: str) -> List[str]:
+    """List the keys a section accepts under their current spelling.
+
+    A suggestion must not point at a name that is itself deprecated, so the
+    legacy spellings this section still reads are excluded.
+
+    Args:
+        section: Section name, or ``""`` for bare top-level keys.
+
+    Returns:
+        Leaf key names, unordered.
+    """
+    return [
+        leaf
+        for leaf, setting in SECTION_KEYS.get(section, {}).items()
+        if setting.key is not None and setting.leaf == leaf and setting.section == section
+    ]
+
+
+def _check_section(name: str, value: Any, check_keys: bool = True) -> List[ConfigProblem]:
     """Validate one section of a config against the keys it accepts.
 
     Args:
         name: The section's name, used to build the dotted path in a problem.
-        section: The parsed value found under that name.
-        allowed: Key name to kind marker or :class:`Key`. An empty mapping
-            means the section is free-form and only its shape is checked.
+        value: The parsed value found under that name.
         check_keys: Whether to police the contents at all. False for a
-            :data:`REMOVED` section, whose keys are about to be dropped: naming
-            them one by one adds noise to a warning that already says the whole
-            section is ignored, and a stray key inside a dead section must not
-            be the thing that stops the run.
+            :data:`REMOVED` or free-form section: naming the keys of a section
+            that is about to be discarded adds noise to a warning that already
+            says the whole section is ignored, and a stray key inside a dead
+            section must not be the thing that stops the run.
 
     Returns:
         Every problem found inside this section, in file order.
     """
     problems: List[ConfigProblem] = []
 
-    if section is None:
+    if value is None:
         return problems
-    if not isinstance(section, dict):
+    if not isinstance(value, dict):
         return [
             ConfigProblem(
                 ERROR,
                 name,
-                f"expected a section of settings, found {type(section).__name__}",
+                f"expected a section of settings, found {type(value).__name__}",
                 "indent its settings underneath it",
             )
         ]
-    if not allowed or not check_keys:
+    if not check_keys:
         return problems
 
-    for key, value in section.items():
+    accepted = SECTION_KEYS.get(name, {})
+    for key, item in value.items():
         path = f"{name}.{key}"
-        entry = allowed.get(str(key))
-        if entry is None:
+        setting = accepted.get(str(key))
+        if setting is None:
             problems.append(
-                ConfigProblem(ERROR, path, "unknown key", _did_you_mean(str(key), allowed))
+                ConfigProblem(
+                    ERROR, path, "unknown key", _did_you_mean(str(key), _current_leaves(name))
+                )
             )
             continue
 
-        kind = entry.kind if isinstance(entry, Key) else entry
-        if value is not None and not _reads_as(value, kind):
-            problems.append(ConfigProblem(ERROR, path, f"expected {kind}, found {value!r}"))
+        problem = _value_problem(path, setting, item)
+        if problem is not None:
+            problems.append(problem)
             continue
 
         # Only after the value is known to be readable: telling someone a key
         # is deprecated and then not saying it is also unparseable would send
         # them to rename it and hit the same wall again.
-        if isinstance(entry, Key):
-            status = _status_problem(path, entry)
-            if status is not None:
-                problems.append(status)
+        if path in LEGACY_KEYS:
+            problems.append(_legacy_problem(path, setting))
+
     return problems
 
 
 def validate_config(
     config: Optional[Dict[str, Any]], extra_sections: Sequence[str] = ()
 ) -> List[ConfigProblem]:
-    """Check a parsed ``config.yml`` against :data:`CONFIG_SCHEMA`.
+    """Check a parsed ``config.yml`` against the schema.
 
     Anything the schema does not recognise is an error, the way ``gcloud``
     rejects ``--quyery`` rather than running without it. A config is a
@@ -443,10 +378,11 @@ def validate_config(
         ]
 
     problems: List[ConfigProblem] = []
-    known = set(CONFIG_SCHEMA) | set(extra_sections)
+    top_level = SECTION_KEYS.get("", {})
+    known = set(SECTIONS) | set(top_level) | set(extra_sections) | {"schema_version"}
 
     declared = config.get("schema_version")
-    if declared is not None and _reads_as(declared, WHOLE) and int(declared) > SCHEMA_VERSION:
+    if declared is not None and reads_as(declared, WHOLE) and int(declared) > SCHEMA_VERSION:
         problems.append(
             ConfigProblem(
                 ERROR,
@@ -458,41 +394,43 @@ def validate_config(
 
     for name, value in config.items():
         key = str(name)
-        schema = CONFIG_SCHEMA.get(key)
 
-        if schema is None:
-            if key in extra_sections:
-                problems.extend(_check_section(key, value, {}))
-            else:
-                problems.append(
-                    ConfigProblem(ERROR, key, "unknown section", _did_you_mean(key, known))
-                )
-        elif isinstance(schema, Section):
-            problems.extend(
-                _check_section(key, value, schema.keys, check_keys=schema.status != REMOVED)
-            )
-            status = _status_problem(key, schema)
-            if status is not None:
-                problems.append(status)
-        elif isinstance(schema, dict):
-            problems.extend(_check_section(key, value, schema))
-        elif isinstance(schema, Key):
-            if value is not None and not _reads_as(value, schema.kind):
-                problems.append(
-                    ConfigProblem(ERROR, key, f"expected {schema.kind}, found {value!r}")
-                )
-            else:
-                status = _status_problem(key, schema)
-                if status is not None:
-                    problems.append(status)
-        elif value is not None and not _reads_as(value, schema):
-            problems.append(ConfigProblem(ERROR, key, f"expected {schema}, found {value!r}"))
+        if key == "schema_version":
+            if value is not None and not reads_as(value, WHOLE):
+                problems.append(ConfigProblem(ERROR, key, f"expected {WHOLE}, found {value!r}"))
+            continue
+
+        # A bare top-level key, which today means one spelling that predates
+        # its section.
+        setting = top_level.get(key)
+        if setting is not None:
+            problem = _value_problem(key, setting, value)
+            if problem is not None:
+                problems.append(problem)
+            elif key in LEGACY_KEYS:
+                problems.append(_legacy_problem(key, setting))
+            continue
+
+        if key in extra_sections and key not in SECTIONS:
+            problems.extend(_check_section(key, value, check_keys=False))
+            continue
+
+        if key not in SECTIONS and key not in SECTION_KEYS:
+            problems.append(ConfigProblem(ERROR, key, "unknown section", _did_you_mean(key, known)))
+            continue
+
+        section = section_status(key)
+        check_keys = section.status != REMOVED and not section.free_form
+        problems.extend(_check_section(key, value, check_keys=check_keys))
+        status = _status_problem(key, section)
+        if status is not None:
+            problems.append(status)
 
     return problems
 
 
 def _adopt(config: Dict[str, Any], path: str, value: Any) -> None:
-    """Copy a deprecated key's value onto its current spelling, if free.
+    """Copy a legacy key's value onto its current spelling, if free.
 
     Additive on purpose: the old key is left exactly where the user wrote it,
     and the new one is only filled when nothing already occupies it. A config
@@ -501,11 +439,13 @@ def _adopt(config: Dict[str, Any], path: str, value: Any) -> None:
 
     Args:
         config: The config being rewritten, modified in place.
-        path: Dotted path of the replacement, e.g. ``remarkable.use_ssh``.
-        value: The value found under the deprecated key.
+        path: Dotted path of the current spelling, e.g. ``remarkable.use_ssh``.
+        value: The value found under the legacy key.
     """
-    section_name, _, key = path.partition(".")
-    if not key:
+    section_name, dot, key = path.partition(".")
+    if not dot:
+        if config.get(section_name) is None:
+            config[section_name] = value
         return
 
     existing = config.get(section_name)
@@ -520,14 +460,31 @@ def _adopt(config: Dict[str, Any], path: str, value: Any) -> None:
     config[section_name] = section
 
 
+def _lookup(config: Dict[str, Any], path: str) -> Any:
+    """Read a dotted path out of a parsed config.
+
+    Args:
+        config: Parsed config contents.
+        path: Dotted path, e.g. ``sync.max_notebooks_per_run``.
+
+    Returns:
+        The value found, or None when any level of the path is absent.
+    """
+    section_name, dot, key = path.partition(".")
+    if not dot:
+        return config.get(section_name)
+    section = config.get(section_name)
+    return section.get(key) if isinstance(section, dict) else None
+
+
 def apply_status(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the config the rest of the package should read.
 
     The schema's statuses are declarations; this is where they take effect.
-    :data:`REMOVED` sections and keys are dropped, so nothing downstream has to
-    remember that a dead setting might still be sitting in the file, and
-    :data:`DEPRECATED` keys are copied onto their current spelling, so nothing
-    downstream has to know the old one. Both happen in memory.
+    :data:`REMOVED` sections are dropped, so nothing downstream has to remember
+    that a dead setting might still be sitting in the file, and legacy keys are
+    copied onto their current spelling, so nothing downstream has to know the
+    old one. Both happen in memory.
 
     **No config file is ever rewritten.** The alternative — migrating the file
     in place behind a backup — loses the user's comments and ordering, and a
@@ -548,42 +505,25 @@ def apply_status(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(config, dict):
         return {}
 
-    result: Dict[str, Any] = dict(config)
+    result: Dict[str, Any] = {
+        name: dict(value) if isinstance(value, dict) else value for name, value in config.items()
+    }
 
     for name in list(result):
-        schema = CONFIG_SCHEMA.get(str(name))
-
-        if isinstance(schema, Key):
-            if schema.status == REMOVED:
-                del result[name]
-            elif schema.status == DEPRECATED and schema.replacement:
-                _adopt(result, schema.replacement, result[name])
-            continue
-
-        if not isinstance(schema, Section):
-            continue
-
-        if schema.status == REMOVED:
+        if section_status(str(name)).status == REMOVED:
             del result[name]
-            continue
 
-        section = result.get(name)
-        if not isinstance(section, dict):
+    # Read from the original so that a legacy key inside a section this loop
+    # also writes to cannot be seen half-updated.
+    for path, setting in LEGACY_KEYS.items():
+        if setting.key is None:
             continue
-
-        updated = dict(section)
-        changed = False
-        for key in list(updated):
-            entry = schema.keys.get(str(key))
-            if not isinstance(entry, Key):
-                continue
-            if entry.status == REMOVED:
-                del updated[key]
-                changed = True
-            elif entry.status == DEPRECATED and entry.replacement:
-                _adopt(result, entry.replacement, updated[key])
-        if changed:
-            result[name] = updated
+        value = _lookup(config, path)
+        if value is None:
+            continue
+        if section_status(path.partition(".")[0]).status == REMOVED:
+            continue
+        _adopt(result, setting.key, value)
 
     return result
 
@@ -603,3 +543,20 @@ def split_problems(
         [p for p in problems if p.level == ERROR],
         [p for p in problems if p.level == WARNING],
     )
+
+
+__all__ = [
+    "ACTIVE",
+    "DEPRECATED",
+    "ERROR",
+    "REMOVED",
+    "SCHEMA_VERSION",
+    "SETTINGS",
+    "WARNING",
+    "ConfigProblem",
+    "ConfigurationMissing",
+    "apply_status",
+    "reads_as",
+    "split_problems",
+    "validate_config",
+]

@@ -11,6 +11,7 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
+from living_ink.settings import Settings
 from living_ink.setup_wizard import generate_config_yaml
 
 
@@ -235,6 +236,8 @@ class TestStatus:
         assert warnings
         loaded = apply_status(stale)
         assert "google_vision" not in loaded
-        assert loaded["ai"]["api_key"] == "sk-x"
         assert loaded["ai"]["model"] == "gpt-4o-mini"
         assert loaded["remarkable"]["use_ssh"] is True
+        # The API key has no current spelling in config.yml at all — it is a
+        # credential now — so it is not mapped onto one. It is still read.
+        assert Settings.resolve(loaded, env={}).ai_api_key == "sk-x"

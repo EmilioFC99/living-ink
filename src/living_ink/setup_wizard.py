@@ -27,6 +27,13 @@ import yaml
 
 from living_ink import safeio
 from living_ink.config import SCHEMA_VERSION, credentials
+from living_ink.config.schema import (
+    DEFAULT_APPLE_NOTES_FOLDER,
+    DEFAULT_ATTACHMENTS_FOLDER,
+    DEFAULT_PREFERRED_CONNECTION,
+    DEFAULT_SSH_HOST,
+    DEFAULT_SSH_PORT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -561,16 +568,16 @@ fi
 def generate_config_yaml(
     ai_provider: str,
     ai_model: str,
-    preferred_connection: str = "ssh",
+    preferred_connection: str = DEFAULT_PREFERRED_CONNECTION,
     use_ssh: bool = True,
-    ssh_host: str = "10.11.99.1",
-    ssh_port: int = 22,
+    ssh_host: str = DEFAULT_SSH_HOST,
+    ssh_port: int = DEFAULT_SSH_PORT,
     obsidian_enabled: bool = False,
     obsidian_vault_path: str = "",
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
     apple_notes_enabled: bool = False,
-    apple_notes_folder: str = "Living Ink",
+    apple_notes_folder: str = DEFAULT_APPLE_NOTES_FOLDER,
     max_notebooks_per_run: int = 5,
 ) -> str:
     """Generate clean, commented config.yml content.
@@ -630,7 +637,7 @@ def generate_config_yaml(
         ),
         (
             "3. Sync Settings",
-            {"sync": {"max_notebooks_per_run": max_notebooks_per_run}},
+            {"sync": {"limit": max_notebooks_per_run}},
         ),
         (
             "4. Obsidian Destination",
@@ -640,7 +647,7 @@ def generate_config_yaml(
                     "vault_path": obsidian_vault_path.strip(),
                     "root_folder": obsidian_root_folder,
                     "mirror_folders": obsidian_mirror_folders,
-                    "attachments_folder": "_attachments",
+                    "attachments_folder": DEFAULT_ATTACHMENTS_FOLDER,
                 }
             },
         ),

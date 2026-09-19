@@ -747,7 +747,7 @@ class TestConfigIsValidatedOnLoad:
 
     def test_a_valid_config_says_nothing(self, tmp_path, capsys):
         """Validation must not add noise to the normal path."""
-        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+        cfg = self._write(tmp_path, "sync:\n  limit: 5\n")
         pipeline.load_yaml_config(cfg)
         assert "⚠️" not in capsys.readouterr().out
 
