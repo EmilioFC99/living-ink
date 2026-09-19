@@ -249,8 +249,8 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
 
         # Check WikiLinks
         assert "## Original Pages" in content
-        assert "- [[Living Ink/_attachments/Personal/Sketches/page-1.png|Page 1]]" in content
-        assert "- [[Living Ink/_attachments/Personal/Sketches/page-2.png|Page 2]]" in content
+        assert "![[Living Ink/_attachments/Personal/Sketches/page-1.png|Page 1]]" in content
+        assert "![[Living Ink/_attachments/Personal/Sketches/page-2.png|Page 2]]" in content
 
         # Check copied files in centralized _attachments with mirrored subfolder and note folder
         attach_dir = vault / "Living Ink" / "_attachments" / "Personal" / "Sketches"
@@ -279,7 +279,7 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
 
         content = note_file.read_text(encoding="utf-8")
         assert (
-            "- [[Living Ink/_attachments/Work/Projects/2026/Roadmap/page-1.png|Page 1]]" in content
+            "![[Living Ink/_attachments/Work/Projects/2026/Roadmap/page-1.png|Page 1]]" in content
         )
 
     def test_missing_attachment_skipped_gracefully(self, tmp_path):
@@ -402,9 +402,12 @@ class TestAppleNotesDestination:
 
 
 class TestObsidianFailureReporting:
-    """An unwritable vault must be reported as a DestinationError."""
+    """An unwritable vault is a reported failure, not a traceback."""
 
-    def test_unwritable_vault_raises_destination_error(self, tmp_path):
+    def test_an_unwritable_vault_comes_back_as_a_refusal_with_a_reason(self, tmp_path):
+        # The stages raise; FileSystemDestination.publish catches at one seam
+        # and answers with a result, so the caller never has to decide what a
+        # filesystem error from a destination means.
         vault = tmp_path / "vault"
         vault.mkdir()
         dest = ObsidianDestination(vault_path=str(vault), root_folder="Living Ink")
@@ -412,8 +415,11 @@ class TestObsidianFailureReporting:
         with patch(
             "living_ink.destinations.obsidian.Path.mkdir", side_effect=PermissionError("denied")
         ):
-            with pytest.raises(DestinationError, match="Could not write"):
-                dest.publish(*make_both("Note", "Content"))
+            result = dest.publish(*make_both("Note", "Content"))
+
+        assert result.ok is False
+        assert "Could not write" in result.detail
+        assert "denied" in result.detail
 
     def test_destination_unavailable_is_a_destination_error(self):
         """Callers can catch the base class and handle both cases."""

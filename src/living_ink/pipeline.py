@@ -2426,7 +2426,11 @@ class SyncPipeline:
                     )
                 else:
                     all_success = False
-                    log(f"⚠️ Failed to publish to {dest.display_name}")
+                    # The reason rides on the result, not only on an exception:
+                    # a destination that reports a failure rather than raising
+                    # would otherwise lose it here.
+                    reason = f": {result.detail}" if result.detail else ""
+                    log(f"⚠️ Failed to publish to {dest.display_name}{reason}")
 
             return all_success
         except Exception as e:
