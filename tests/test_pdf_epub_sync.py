@@ -278,7 +278,7 @@ class TestPageLabelFormatting:
 
         note_file = vault / "Living Ink" / "Book.md"
         content = note_file.read_text(encoding="utf-8")
-        assert "- [[Living Ink/_attachments/Book/page-1.png|Page xiii (pdf-1)]]" in content
+        assert "![[Living Ink/_attachments/Book/page-1.png|Page xiii (pdf-1)]]" in content
 
 
 class TestLabellingEveryPageAtOnce:

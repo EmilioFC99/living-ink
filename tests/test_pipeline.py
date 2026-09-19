@@ -61,6 +61,14 @@ class MockDestination(Destination):
         self.publish_warnings = ()
         self.publish_ok = True
         self.ready = True
+        self.failure_reports = []
+        self.failures_cleared = 0
+
+    def report_failure(self, summary: str) -> None:
+        self.failure_reports.append(summary)
+
+    def clear_failure(self) -> None:
+        self.failures_cleared += 1
 
     def check(self) -> DestinationStatus:
         return DestinationStatus(ok=self.ready, detail="mock")
@@ -1994,6 +2002,8 @@ class TestInterruptedRuns:
         pipe.cache = SimpleNamespace(enabled=True)
         pipe._counts = (0, 0, 0)
         pipe._execute = execute
+        pipe.destinations = []
+        pipe.report = None
         return pipe
 
     def _last_run(self):
@@ -2042,6 +2052,58 @@ class TestInterruptedRuns:
             self._pipeline(execute)._run_recorded()
 
         assert self._last_run()["outcome"] == "error"
+
+    def test_a_failed_run_tells_the_destination_so(self):
+        # A CLI that fails in a terminal nobody is watching has told nobody.
+        dest = MockDestination()
+        pipe = self._pipeline(lambda: False)
+        pipe.destinations = [dest]
+        pipe._counts = (4, 1, 3)
+        pipe._run_recorded()
+
+        assert dest.failure_reports
+        assert "1 of 4" in dest.failure_reports[0]
+        assert dest.failures_cleared == 0
+
+    def test_a_successful_run_takes_the_notice_away_again(self):
+        dest = MockDestination()
+        pipe = self._pipeline(lambda: True)
+        pipe.destinations = [dest]
+        pipe._run_recorded()
+
+        assert dest.failures_cleared == 1
+        assert dest.failure_reports == []
+
+    def test_an_interrupt_says_nothing_because_the_user_did_it(self):
+        dest = MockDestination()
+
+        def execute():
+            raise KeyboardInterrupt
+
+        pipe = self._pipeline(execute)
+        pipe.destinations = [dest]
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        assert dest.failure_reports == []
+        assert dest.failures_cleared == 0
+
+    def test_a_dry_run_leaves_the_destinations_untouched(self):
+        dest = MockDestination()
+        pipe = self._pipeline(lambda: True, dry_run=True)
+        pipe.destinations = [dest]
+        pipe._run_recorded()
+
+        assert dest.failure_reports == []
+        assert dest.failures_cleared == 0
+
+    def test_a_destination_that_breaks_while_reporting_does_not_break_the_run(self):
+        dest = MockDestination()
+        dest.report_failure = lambda summary: (_ for _ in ()).throw(RuntimeError("nope"))
+        pipe = self._pipeline(lambda: False)
+        pipe.destinations = [dest]
+
+        assert pipe._run_recorded() is False
 
     def test_a_dry_run_records_no_interrupt(self):
         def execute():

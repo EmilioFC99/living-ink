@@ -12,7 +12,7 @@ import statement nobody thinks of as configuration.
 Example:
     >>> from living_ink.destinations import ObsidianDestination
     >>> dest = ObsidianDestination(vault_path="/path/to/vault", root_folder="Living Ink")
-    >>> dest.publish("Meeting Notes", "# Content", [])
+    >>> dest.publish(document, context)
 """
 
 import logging
@@ -29,6 +29,7 @@ from living_ink.destinations.base import (
     MergeUnit,
     register_destination,
 )
+from living_ink.destinations.filesystem import FileSystemDestination, NoteLayout
 from living_ink.destinations.obsidian import ObsidianDestination
 from living_ink.settings import Settings
 
@@ -41,7 +42,9 @@ __all__ = [
     "DestinationError",
     "DestinationStatus",
     "DestinationUnavailable",
+    "FileSystemDestination",
     "MergeUnit",
+    "NoteLayout",
     "ObsidianDestination",
     "build_destinations",
     "register_destination",

@@ -13,6 +13,12 @@ one and never something in between.
 be readable by other accounts on the machine. Temporary files are created at
 ``0600`` before any byte is written, so a secret is never briefly world-readable
 even when the final mode is wider.
+
+**Writes outside the tree they were meant for.** A folder name read off the
+tablet, or a root folder read out of ``config.yml``, becomes a path segment. A
+segment of ``..`` climbs out of the vault, and the check that used to catch it
+ran *after* the file was already written. :func:`contained_path` joins segments
+and refuses before anything is created.
 """
 
 import os
@@ -33,6 +39,64 @@ SECRET_DIR_MODE = 0o700
 _OTHER_BITS = 0o077
 
 PathLike = Union[str, Path]
+
+#: Segments that are a traversal instruction rather than a name. Refused whole
+#: rather than sanitized, because there is no sensible sanitized form of "up".
+_TRAVERSAL_SEGMENTS = frozenset({"", ".", ".."})
+
+
+class PathEscapesRoot(ValueError):
+    """A path built from untrusted segments would land outside its root.
+
+    A ``ValueError`` and not a destination-specific error on purpose: this
+    module is a standard-library-only leaf that :mod:`living_ink.config`
+    depends on, so it cannot name an exception defined further up. The caller
+    translates it into whatever its own layer reports failures with.
+    """
+
+
+def contained_path(root: PathLike, *segments: str) -> Path:
+    """Join segments under a root, or refuse if the result escapes it.
+
+    Every segment is a name, never an instruction. ``.`` and ``..`` are refused
+    outright rather than stripped, because a silently sanitized path is one the
+    user cannot debug — a notebook that vanishes into a folder they never named
+    is worse than one that is reported as unpublishable.
+
+    The result is resolved before it is compared, so a symlinked subfolder
+    cannot be used to step out of the tree either.
+
+    Args:
+        root: Directory the result must stay inside. Resolved, so it may be
+            relative or contain symlinks itself.
+        *segments: Path components, innermost last. A segment containing a
+            separator is refused: splitting it here would silently create a
+            nesting level the caller did not ask for.
+
+    Returns:
+        The resolved path, guaranteed to be ``root`` itself or below it.
+
+    Raises:
+        PathEscapesRoot: A segment is a traversal instruction, holds a
+            separator or a NUL byte, is absolute, or the joined path resolves
+            outside ``root``.
+    """
+    base = Path(root).resolve()
+
+    for segment in segments:
+        if segment.strip() in _TRAVERSAL_SEGMENTS:
+            raise PathEscapesRoot(f"'{segment}' is a path instruction, not a folder name.")
+        if "\x00" in segment:
+            raise PathEscapesRoot("A path segment contains a NUL byte.")
+        if "/" in segment or "\\" in segment:
+            raise PathEscapesRoot(f"'{segment}' contains a path separator.")
+        if Path(segment).is_absolute():
+            raise PathEscapesRoot(f"'{segment}' is an absolute path.")
+
+    candidate = base.joinpath(*segments).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise PathEscapesRoot(f"'{candidate}' is outside '{base}'.")
+    return candidate
 
 
 def _sync_directory(directory: Path) -> None:

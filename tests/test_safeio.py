@@ -159,3 +159,85 @@ class TestDirectorySync:
         monkeypatch.setattr(safeio.os, "fsync", fail_on_directories)
         safeio.write_text_atomic(target, "hello")
         assert target.read_text() == "hello"
+
+
+class TestContainedPath:
+    """No name off the tablet or out of ``config.yml`` writes outside the root.
+
+    The table is §20.3 F3's: ``_sanitize_filename`` neutralised ``..`` only
+    incidentally, by replacing the ``/`` that was never there in a single
+    segment, and the caller split the folder path on ``/`` before sanitizing.
+    So ``../../..`` on the tablet arrived as three separate ``..`` segments and
+    escaped three levels — and the containment check ran after the note had
+    already been written outside the vault.
+    """
+
+    @pytest.mark.parametrize(
+        "segments",
+        [
+            ("..",),
+            ("  ..  ",),
+            ("..", "..", ".."),
+            (".",),
+            ("",),
+            ("   ",),
+            ("Work", "..", ".."),
+            ("../..",),
+            ("foo/../..",),
+            ("foo\\..\\..",),
+            ("/etc",),
+            ("/etc", "passwd"),
+            ("no\x00pe",),
+        ],
+    )
+    def test_a_traversal_is_refused(self, tmp_path, segments):
+        root = tmp_path / "vault"
+        root.mkdir()
+        with pytest.raises(safeio.PathEscapesRoot):
+            safeio.contained_path(root, *segments)
+
+    def test_it_refuses_before_anything_is_created(self, tmp_path):
+        root = tmp_path / "vault"
+        root.mkdir()
+        with pytest.raises(safeio.PathEscapesRoot):
+            safeio.contained_path(root, "..", "escaped")
+
+        assert list(tmp_path.iterdir()) == [root]
+        assert list(root.iterdir()) == []
+
+    def test_an_ordinary_name_is_joined(self, tmp_path):
+        assert safeio.contained_path(tmp_path, "Work", "Notes.md") == (
+            tmp_path.resolve() / "Work" / "Notes.md"
+        )
+
+    def test_a_name_that_merely_contains_dots_is_fine(self, tmp_path):
+        assert safeio.contained_path(tmp_path, "v1.2.3 notes.md").name == "v1.2.3 notes.md"
+
+    def test_no_segments_is_the_root_itself(self, tmp_path):
+        assert safeio.contained_path(tmp_path) == tmp_path.resolve()
+
+    def test_a_symlinked_subfolder_cannot_be_used_to_leave(self, tmp_path):
+        root = tmp_path / "vault"
+        root.mkdir()
+        (tmp_path / "elsewhere").mkdir()
+        (root / "shortcut").symlink_to(tmp_path / "elsewhere")
+
+        with pytest.raises(safeio.PathEscapesRoot):
+            safeio.contained_path(root, "shortcut", "Notes.md")
+
+    def test_a_symlink_inside_the_root_is_allowed(self, tmp_path):
+        root = tmp_path / "vault"
+        (root / "real").mkdir(parents=True)
+        (root / "shortcut").symlink_to(root / "real")
+
+        assert safeio.contained_path(root, "shortcut", "Notes.md") == (
+            root.resolve() / "real" / "Notes.md"
+        )
+
+    def test_a_relative_root_is_resolved_too(self, tmp_path, monkeypatch):
+        (tmp_path / "vault").mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        assert safeio.contained_path("vault", "Notes.md") == (
+            tmp_path.resolve() / "vault" / "Notes.md"
+        )

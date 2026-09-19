@@ -242,3 +242,26 @@ class Destination(abc.ABC):
         name = self.display_name or type(self).__name__
         logger.info("%s does not support removing notes.", name)
         return PublishResult(ok=False, detail=f"{name} cannot remove notes.")
+
+    def report_failure(self, summary: str) -> None:
+        """Tell the user, at the destination, that the last sync did not finish.
+
+        A CLI that fails in a terminal nobody is watching has told nobody, and
+        a sync that quietly stops running is the failure mode a user discovers
+        weeks later by noticing a notebook never arrived. A destination the
+        user actually looks at can say so.
+
+        A no-op by default, because "leave a message" is not something every
+        destination can do — and a destination that cannot should not have to
+        pretend. Silence here is a deliberate answer, not a missing one.
+
+        Args:
+            summary: What went wrong, in the user's words.
+        """
+
+    def clear_failure(self) -> None:
+        """Withdraw a previous :meth:`report_failure`, if there was one.
+
+        Called after every successful run, so the notice a destination left
+        disappears by itself rather than being cleaned up by hand.
+        """
