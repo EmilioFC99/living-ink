@@ -1311,3 +1311,54 @@ class TestVersionOf:
         from living_ink.cli import version_of
 
         assert version_of({}) == "1"
+
+
+class TestComparisonPaging:
+    """`--all` on a terminal stops every ten rows instead of scrolling away."""
+
+    def _rows(self, count):
+        """`count` rows, enough to span more than one page."""
+        from living_ink.state import STATUS_NEW
+
+        return [
+            {
+                "id": f"doc-{n:04d}",
+                "name": f"Note {n}",
+                "doc_type": "notebook",
+                "status": STATUS_NEW,
+                "last_error": None,
+            }
+            for n in range(count)
+        ]
+
+    def _page(self, capsys, rows, answers, interactive=True):
+        """Page through `rows`, feeding `answers` to each prompt."""
+        from living_ink.cli import _print_paged
+
+        with patch("sys.stdout.isatty", return_value=interactive):
+            with patch("sys.stdin.isatty", return_value=interactive):
+                with patch("builtins.input", side_effect=answers) as mock_input:
+                    _print_paged(rows)
+        return capsys.readouterr().out, mock_input
+
+    def test_a_pipe_prints_everything_without_pausing(self, capsys):
+        out, mock_input = self._page(capsys, self._rows(25), [], interactive=False)
+        assert "Note 24" in out
+        mock_input.assert_not_called()
+
+    def test_a_terminal_pauses_between_pages(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), ["", ""])
+        assert "Note 24" in out
+
+    def test_q_stops_early(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), ["q"])
+        assert "Note 9" in out
+        assert "Note 10" not in out
+
+    def test_the_last_page_does_not_ask_for_more(self, capsys):
+        _, mock_input = self._page(capsys, self._rows(20), [""])
+        assert mock_input.call_count == 1
+
+    def test_giving_up_at_the_prompt_is_not_an_error(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), KeyboardInterrupt())
+        assert "Note 9" in out
