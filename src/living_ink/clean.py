@@ -4,10 +4,11 @@ Delegates AI-powered text repair to the provider configured in
 ``config.yml``. See ``living_ink.providers`` for available providers.
 
 Vision OCR:
-    When the configured provider supports vision (e.g., Gemini, GPT-4o),
-    ``ocr_and_repair()`` can read handwritten text directly from page
-    images — combining OCR + text cleanup in a single API call. This
-    eliminates the need for a separate OCR service like Google Cloud Vision.
+    ``ocr_and_repair()`` reads handwritten text directly from a page image,
+    combining OCR and text cleanup in a single API call. It is the only way a
+    page becomes text: there is no separate OCR service behind it, so a
+    provider without vision support (``supports_vision``) transcribes nothing
+    rather than degrading to something worse.
 
 Backward compatibility:
     - ``repair_text_with_openai()`` still works as the public API entry point.
@@ -303,8 +304,9 @@ def ocr_and_repair(image_path: str) -> Optional[str]:
     provider = _get_provider()
 
     if not provider.supports_vision:
-        logger.info(
-            "Provider '%s' does not support vision OCR. Falling back to traditional OCR.",
+        logger.error(
+            "Provider '%s' cannot read an image, and it is the only thing that reads "
+            "pages. Set 'ai.provider' to one with vision support.",
             provider.name,
         )
         return None
