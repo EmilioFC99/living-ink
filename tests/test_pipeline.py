@@ -33,6 +33,7 @@ from living_ink.pipeline import (
     SyncPipeline,
     log,
 )
+from living_ink.redact import clear_secrets, register_secret
 from living_ink.report import (
     FAILED,
     PUBLISHED,
@@ -585,14 +586,132 @@ class TestPageConcurrency:
         pipeline_obj = self._pipeline(1)
 
         with patch.object(pipeline_obj, "_vision_ocr_page", return_value="clean text"):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == "clean text"
+            assert pipeline_obj._transcribe_page(Path("p.png")) == ("clean text", None)
 
     def test_an_empty_vision_result_has_nowhere_left_to_fall_back_to(self):
         """One backend: a page the model could not read is an empty page."""
         pipeline_obj = self._pipeline(1)
 
         with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == ""
+            assert pipeline_obj._transcribe_page(Path("p.png")) == ("", None)
+
+
+class TestAFailedPageIsNotABlankPage:
+    """Three pages out of two hundred failing is not a failed notebook.
+
+    Both a failure and a blank arrive as ``text == ""``. Only ``Page.error``
+    tells them apart, and without it the partial-page policy is unimplementable:
+    the page vanishes from the note with nothing marking where it was, and the
+    next run's merge has no block to heal.
+    """
+
+    def _pipeline(self):
+        pipe = SyncPipeline(destinations=[MockDestination()])
+        pipe.settings = replace(pipe.settings, ocr_concurrency=1)
+        return pipe
+
+    def _job_with_pages(self, count: int) -> DocumentJob:
+        job = make_job(imgs=[Path(f"nb.page-{n}.png") for n in range(1, count + 1)])
+        job.pre_paths = list(job.imgs)
+        SyncPipeline(destinations=[MockDestination()])._describe_pages(job)
+        return job
+
+    def test_a_raising_page_reports_the_reason_instead_of_propagating(self):
+        pipe = self._pipeline()
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("429 rate limited")):
+            text, error = pipe._transcribe_page(Path("p.png"))
+
+        assert text == ""
+        assert "429 rate limited" in error
+
+    def test_the_error_names_the_exception_type(self):
+        pipe = self._pipeline()
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=OSError("truncated")):
+            _, error = pipe._transcribe_page(Path("p.png"))
+
+        assert error.startswith("OSError:")
+
+    def test_a_key_in_the_message_is_redacted_before_it_reaches_the_user(self):
+        """The reason is printed and put in the report; a provider URL can carry a key."""
+        pipe = self._pipeline()
+        register_secret("sk-supersecret")
+
+        try:
+            with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("sk-supersecret")):
+                _, error = pipe._transcribe_page(Path("p.png"))
+        finally:
+            clear_secrets()
+
+        assert "sk-supersecret" not in error
+
+    def test_one_bad_page_does_not_cost_the_other_two(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(3)
+
+        def read(path):
+            if path.name.endswith("page-2.png"):
+                raise RuntimeError("boom")
+            return "text"
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=read):
+            pipe._ocr_pages(job)
+
+        assert [p.text for p in job.pages] == ["text", "", "text"]
+        assert "boom" in job.pages[1].error
+
+    def test_the_failure_is_recorded_on_the_page_that_failed(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert job.pages[0].error is None
+        assert job.pages[1].error == "boom"
+
+    def test_a_blank_page_is_left_unmarked(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(1)
+
+        with patch.object(pipe, "_transcribe_page", return_value=("", None)):
+            pipe._ocr_pages(job)
+
+        assert job.pages[0].error is None
+
+    def test_failures_are_counted(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("", "boom"), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert job.failed_pages == 2
+
+    def test_the_run_report_names_the_page_not_just_the_document(self):
+        pipe = self._pipeline()
+        pipe.report = RunReport()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert any("Page 2" in w and "boom" in w for w in pipe.report.warnings)
+
+    def test_the_transcript_shows_the_reason_where_the_text_would_be(self, tmp_path, monkeypatch):
+        """A reader of the transcript sees a gap, not a page that was blank."""
+        monkeypatch.setattr(pipeline, "OCR_DIR", tmp_path)
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+        job.pages = [
+            replace(job.pages[0], text="written"),
+            replace(job.pages[1], error="429 rate limited"),
+        ]
+
+        pipe._write_transcripts(job)
+
+        assert "429 rate limited" in job.clean_out_txt.read_text(encoding="utf-8")
 
 
 class TestDryRun:
@@ -1245,7 +1364,7 @@ class TestTranscriptionCaching:
     def test_the_first_read_calls_the_provider(self, tmp_path, page):
         pipe = self._pipeline(tmp_path)
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         assert ocr.call_count == 1
 
     def test_the_second_read_does_not(self, tmp_path, page):
@@ -1255,7 +1374,7 @@ class TestTranscriptionCaching:
             pipe._transcribe_page(page)
 
         with patch.object(pipe, "_vision_ocr_page") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         ocr.assert_not_called()
         assert pipe._cache_hits == 1
 
@@ -1295,7 +1414,7 @@ class TestTranscriptionCaching:
 
         second = self._pipeline(tmp_path)
         with patch.object(second, "_vision_ocr_page") as ocr:
-            assert second._transcribe_page(page) == "text"
+            assert second._transcribe_page(page) == ("text", None)
         ocr.assert_not_called()
 
     def test_an_edited_page_is_read_again(self, tmp_path, page):
@@ -1305,7 +1424,7 @@ class TestTranscriptionCaching:
 
         page.write_bytes(b"different png bytes")
         with patch.object(pipe, "_vision_ocr_page", return_value="new text") as ocr:
-            assert pipe._transcribe_page(page) == "new text"
+            assert pipe._transcribe_page(page) == ("new text", None)
         assert ocr.call_count == 1
 
     def test_an_entry_from_the_two_backend_era_is_not_served(self, tmp_path, page):
@@ -1315,7 +1434,7 @@ class TestTranscriptionCaching:
         pipe.cache._write(key, b'{"raw": "google text", "clean": "repaired text"}')
 
         with patch.object(pipe, "_vision_ocr_page", return_value="vision text") as ocr:
-            assert pipe._transcribe_page(page) == "vision text"
+            assert pipe._transcribe_page(page) == ("vision text", None)
         assert ocr.call_count == 1
 
     def test_an_empty_transcription_is_not_cached(self, tmp_path, page):
@@ -1325,7 +1444,7 @@ class TestTranscriptionCaching:
             pipe._transcribe_page(page)
 
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         assert ocr.call_count == 1
 
     def test_a_disabled_cache_reads_every_time(self, tmp_path, page):
@@ -1341,7 +1460,7 @@ class TestTranscriptionCaching:
         pipe = self._pipeline(tmp_path)
         missing = tmp_path / "gone.png"
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(missing) == "text"
+            assert pipe._transcribe_page(missing) == ("text", None)
         assert ocr.call_count == 1
         assert not pipe.cache.root.exists()
 

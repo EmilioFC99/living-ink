@@ -1095,7 +1095,6 @@ class DocumentJob:
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
-    cleaned_texts: List[str] = field(default_factory=list)
     clean_out_txt: Optional[Path] = None
 
     def modified_date(self) -> Optional[str]:
@@ -2145,15 +2144,18 @@ class SyncPipeline:
     # ── Stage 5: OCR ─────────────────────────────────────────────────────
 
     def _ocr_pages(self, job: DocumentJob) -> None:
-        """Transcribe every prepared page.
+        """Transcribe every prepared page and write the results onto the pages.
 
         There is one way to read a page: a single multimodal call that reads
-        and cleans in one step. If no page yielded text but the document
-        carried extractable text (an unannotated PDF, an EPUB), that text is
-        used instead.
+        and cleans in one step.
+
+        A page that raised is recorded on that page and nowhere else. Three
+        pages out of two hundred failing is not a failed notebook: the other
+        197 publish, the three are marked, and the transcript cache makes the
+        retry cost three API calls rather than two hundred.
         """
         before = self._cache_hits
-        job.cleaned_texts = self._transcribe_pages(job.pre_paths)
+        results = self._transcribe_pages(job.pre_paths)
         reused = self._cache_hits - before
         if reused:
             log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
@@ -2161,10 +2163,18 @@ class SyncPipeline:
         job.transcribed_pages = len(job.pre_paths) - reused
         job.cached_pages = reused
 
-        if not any(t.strip() for t in job.cleaned_texts) and job.extracted_doc_text:
-            job.cleaned_texts = [job.extracted_doc_text]
+        job.pages = [
+            replace(page, text=text, error=error) for page, (text, error) in zip(job.pages, results)
+        ]
 
-    def _transcribe_pages(self, paths: List[Path]) -> List[str]:
+        failed = [page for page in job.pages if page.error]
+        job.failed_pages += len(failed)
+        for page in failed:
+            log(f"⚠️ {job.notebook} {page.label}: {page.error}")
+            if self.report:
+                self.report.warn(f"{job.notebook} {page.label}: {page.error}")
+
+    def _transcribe_pages(self, paths: List[Path]) -> List[Tuple[str, Optional[str]]]:
         """Transcribe pages, several at a time, and return them in page order.
 
         A page is one network round trip and nothing else, so running a few
@@ -2176,7 +2186,7 @@ class SyncPipeline:
             paths: Prepared page images, in page order.
 
         Returns:
-            One transcription per page, in the order given.
+            One ``(text, error)`` pair per page, in the order given.
         """
         width = min(self.settings.ocr_concurrency, len(paths))
         if width <= 1:
@@ -2188,14 +2198,18 @@ class SyncPipeline:
             # however the calls happen to finish.
             return list(pool.map(self._transcribe_page, paths))
 
-    def _transcribe_page(self, path: Path) -> str:
+    def _transcribe_page(self, path: Path) -> Tuple[str, Optional[str]]:
         """Transcribe one page, from the cache when it is there.
 
         Args:
             path: The prepared page image.
 
         Returns:
-            The page's text, or an empty string if the page read as nothing.
+            ``(text, error)``. A blank page is ``("", None)`` and a failed one
+            is ``("", "<reason>")`` — the two are indistinguishable by text
+            alone, which is the whole reason the second element exists. An
+            error here costs one page, never the document: the caller marks a
+            gap and publishes the rest.
         """
         key = self._cache_key(path)
         if key:
@@ -2204,11 +2218,18 @@ class SyncPipeline:
                 with self._cache_lock:
                     self._cache_hits += 1
                 log(f"  Cached: {path.name}")
-                return cached
+                return cached, None
             with self._cache_lock:
                 self._cache_misses += 1
 
-        return self._cached(key, self._vision_ocr_page(path))
+        try:
+            return self._cached(key, self._vision_ocr_page(path)), None
+        except Exception as e:
+            # Deliberately broad, and it does not swallow: the reason is put on
+            # the page, warned about, and counted. An unreadable image or a
+            # provider that finally gave up used to propagate out of the thread
+            # pool and fail every other page in the notebook with it.
+            return "", redact(f"{type(e).__name__}: {e}")
 
     def _cache_key(self, path: Path) -> Optional[str]:
         """Return the cache key for one page, or None if it cannot be computed.
@@ -2314,49 +2335,47 @@ class SyncPipeline:
         meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
 
         job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
-        self._write_transcript(job, job.clean_out_txt, meta, job.cleaned_texts)
+        self._write_transcript(job, job.clean_out_txt, meta)
         log(f"Cleaned OCR text saved to {job.clean_out_txt}")
 
-    def _write_transcript(
-        self,
-        job: DocumentJob,
-        path: Path,
-        meta: Dict[str, Any],
-        texts: List[str],
-    ) -> None:
+    def _write_transcript(self, job: DocumentJob, path: Path, meta: Dict[str, Any]) -> None:
         """Write one transcript: a metadata line, then a section per page.
 
         A page that produced no text keeps its header and gets no body, so the
-        page numbering still lines up with the notebook.
+        page numbering still lines up with the notebook, and a page that failed
+        says so where the missing text would have been.
+
+        Written for a person to read. Nothing in the pipeline reads it back.
 
         Args:
             job: The job being transcribed.
             path: File to write.
             meta: Metadata dict, written as the first line.
-            texts: One entry per page, in page order.
         """
         from living_ink.extract import format_page_section_header
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta) + "\n\n")
 
-            if job.extracted_doc_text and texts == [job.extracted_doc_text]:
+            if not job.pages and job.extracted_doc_text:
                 f.write(job.extracted_doc_text + "\n")
                 return
 
-            for i, text in enumerate(texts):
-                page = job.pages[i] if i < len(job.pages) else None
+            for page in job.pages:
                 header = format_page_section_header(
-                    page.number if page else job.page_number(i),
+                    page.number,
                     job.doc_file_path,
                     include_divider=True,
                     # Already read once, when the page was rendered. Letting the
                     # header re-read them reopens the PDF once per page.
-                    label=page.label if page else None,
-                    breadcrumbs=page.breadcrumbs if page else None,
+                    label=page.label,
+                    breadcrumbs=page.breadcrumbs,
                 )
-                body = (text or "").strip()
+                body = page.error if page.error else page.text.strip()
                 f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
+
+            if job.extracted_doc_text and not any(p.text.strip() for p in job.pages):
+                f.write(job.extracted_doc_text + "\n")
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 
