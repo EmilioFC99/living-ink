@@ -2669,6 +2669,7 @@ class SyncPipeline:
             self._report_interrupt(published)
             raise
         finally:
+            self._signal_outcome(outcome)
             if self.run_id is not None:
                 store.finish_run(
                     self.run_id,
@@ -2677,6 +2678,59 @@ class SyncPipeline:
                     published=published,
                     failed=failed,
                 )
+
+    def _signal_outcome(self, outcome: str) -> None:
+        """Tell the destinations themselves how the run ended.
+
+        A sync that stops working is usually discovered weeks later, by
+        noticing a notebook never arrived — the terminal it failed in was not
+        being watched, and a log file is not somewhere anybody looks. The
+        destination is, so a failed run leaves a note there and a successful
+        one takes it away again.
+
+        An interrupted run says nothing: Ctrl+C is the user's own decision and
+        does not need reporting back to them. Neither does a dry run, which is
+        contracted to change nothing.
+
+        Args:
+            outcome: The run's recorded outcome — ``success``, ``partial``,
+                ``error`` or ``interrupted``.
+        """
+        if self.dry_run or outcome == "interrupted":
+            return
+
+        for dest in self.destinations:
+            try:
+                if outcome == "success":
+                    dest.clear_failure()
+                else:
+                    dest.report_failure(self._failure_summary(outcome))
+            except Exception as e:
+                # Reporting a failure must never become a second one.
+                log(f"Could not report the run outcome to {dest.display_name}: {e}")
+
+    def _failure_summary(self, outcome: str) -> str:
+        """Phrase what went wrong for a reader who was not at the terminal.
+
+        Args:
+            outcome: The run's recorded outcome.
+
+        Returns:
+            A short paragraph naming the counts and the run's warnings.
+        """
+        seen, published, failed = self._counts
+        if outcome == "partial":
+            headline = f"{published} of {seen} notebook(s) synced; {failed} failed."
+        else:
+            headline = f"The sync stopped before it finished. {published} of {seen} published."
+
+        lines = [headline]
+        if self.report and self.report.warnings:
+            lines.append("")
+            lines.extend(f"- {warning}" for warning in self.report.warnings)
+        lines.append("")
+        lines.append(f"Run `living-ink status` for details, or see the log at {LOG_PATH}.")
+        return "\n".join(lines)
 
     def _report_interrupt(self, published: int) -> None:
         """Say what an interrupted run kept, so the user knows what it cost.
