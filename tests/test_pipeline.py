@@ -766,6 +766,15 @@ class TestConfigIsValidatedOnLoad:
 class TestTheStoredApiKeyReachesTheProvider:
     """The key is stored per provider; nothing downstream should know that."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_provider(self):
+        """Configuring a provider is module state; do not leak it."""
+        from living_ink import clean
+
+        clean._provider = None
+        yield
+        clean._provider = None
+
     def _write(self, tmp_path, body):
         """Write a private config file and return its path."""
         cfg = tmp_path / "config.yml"
@@ -773,31 +782,46 @@ class TestTheStoredApiKeyReachesTheProvider:
         cfg.chmod(0o600)
         return cfg
 
-    def test_the_key_for_the_selected_provider_is_woven_in(self, tmp_path):
+    def _provider(self):
+        """Return the provider the last load configured."""
+        from living_ink import clean
+
+        return clean._get_provider()
+
+    def test_the_key_for_the_selected_provider_reaches_it(self, tmp_path):
         """A config with no key at all still configures the provider."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
         credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert loaded["ai"]["api_key"] == "AIza-stored"
+        assert self._provider().api_key == "AIza-stored"
 
     def test_another_provider_s_key_is_not_used(self, tmp_path):
         """The keys are separate slots, not a single one with a label."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
         credentials.write_secret("ai.api_key.openai", "sk-openai", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert "api_key" not in loaded["ai"]
+        assert self._provider().api_key == ""
 
     def test_a_key_left_in_the_config_still_works(self, tmp_path):
         """An install that has not been through the wizard again must keep syncing."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n")
 
+        pipeline.load_yaml_config(cfg)
+
+        assert self._provider().api_key == "AIza-legacy"
+
+    def test_the_key_never_reaches_the_dictionary_callers_hold(self, tmp_path):
+        """It is a credential. Nothing that walks the config should meet it."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
+        credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
+
         loaded = pipeline.load_yaml_config(cfg)
 
-        assert loaded["ai"]["api_key"] == "AIza-legacy"
+        assert "api_key" not in loaded["ai"]
 
     def test_a_key_left_in_the_config_is_migrated(self, tmp_path):
         """Once, silently, on the next run — no prompt, no re-typing."""
@@ -818,14 +842,17 @@ class TestTheStoredApiKeyReachesTheProvider:
 
     def test_provider_none_looks_for_nothing(self, tmp_path):
         """Cleanup disabled means there is no key to want."""
+        from living_ink.providers import NoneProvider
+
         cfg = self._write(tmp_path, "ai:\n  provider: none\n")
+        credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert "api_key" not in loaded["ai"]
+        assert isinstance(self._provider(), NoneProvider)
 
     def test_no_ai_section_is_not_an_error(self, tmp_path):
-        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+        cfg = self._write(tmp_path, "sync:\n  limit: 5\n")
 
         assert "ai" not in pipeline.load_yaml_config(cfg)
 

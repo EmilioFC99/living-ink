@@ -23,6 +23,7 @@ from living_ink.providers import (
     get_provider,
     register_provider,
 )
+from living_ink.settings import Settings
 
 # =========================================================================
 # TextRepairProvider (ABC)
@@ -613,64 +614,61 @@ class TestGetProviderPresets:
     @pytest.mark.parametrize("preset_name", list(PROVIDER_PRESETS.keys()))
     def test_all_presets_return_universal_provider(self, preset_name):
         """Every named preset returns a UniversalChatProvider."""
-        config = {"ai": {"provider": preset_name, "api_key": "test-key"}}
-        provider = get_provider(config)
+        provider = get_provider(Settings(ai_provider=preset_name, ai_api_key="test-key"))
         assert isinstance(provider, UniversalChatProvider)
 
     @pytest.mark.parametrize("preset_name", list(PROVIDER_PRESETS.keys()))
     def test_all_presets_use_correct_base_url(self, preset_name):
         """Each preset maps to its expected base URL."""
-        config = {"ai": {"provider": preset_name, "api_key": "k"}}
-        provider = get_provider(config)
+        provider = get_provider(Settings(ai_provider=preset_name, ai_api_key="k"))
         expected_url = PROVIDER_PRESETS[preset_name]["base_url"]
         assert provider.base_url == expected_url
 
     @pytest.mark.parametrize("preset_name", list(PROVIDER_PRESETS.keys()))
     def test_all_presets_have_default_model(self, preset_name):
         """Each preset assigns a default model when none is specified."""
-        config = {"ai": {"provider": preset_name, "api_key": "k"}}
-        provider = get_provider(config)
+        provider = get_provider(Settings(ai_provider=preset_name, ai_api_key="k"))
         expected_model = PROVIDER_PRESETS[preset_name]["default_model"]
         assert provider.model == expected_model
 
     def test_gemini_preset(self):
         """Gemini preset has the correct endpoint and model."""
-        p = get_provider({"ai": {"provider": "gemini", "api_key": "AIza"}})
+        p = get_provider(Settings(ai_provider="gemini", ai_api_key="AIza"))
         assert "generativelanguage" in p.base_url
         assert p.model == "gemini-flash-latest"
         assert p.api_key == "AIza"
 
     def test_openai_preset(self):
         """OpenAI preset has the correct endpoint and model."""
-        p = get_provider({"ai": {"provider": "openai", "api_key": "sk-x"}})
+        p = get_provider(Settings(ai_provider="openai", ai_api_key="sk-x"))
         assert "api.openai.com" in p.base_url
         assert p.model == "gpt-4o-mini"
 
     def test_ollama_preset_no_auth(self):
         """Ollama preset uses localhost and no auth."""
-        p = get_provider({"ai": {"provider": "ollama"}})
+        p = get_provider(Settings(ai_provider="ollama"))
         assert "localhost" in p.base_url
         assert p.auth_header is None
 
     def test_model_override(self):
         """User-specified model overrides the preset default."""
-        p = get_provider({"ai": {"provider": "gemini", "api_key": "k", "model": "gemini-1.5-pro"}})
+        p = get_provider(Settings(ai_provider="gemini", ai_api_key="k", ai_model="gemini-1.5-pro"))
         assert p.model == "gemini-1.5-pro"
 
     def test_temperature_override(self):
         """User-specified temperature overrides the default 0.3."""
-        p = get_provider({"ai": {"provider": "openai", "api_key": "k", "temperature": 0.8}})
+        p = get_provider(Settings(ai_provider="openai", ai_api_key="k", ai_temperature=0.8))
         assert p.temperature == 0.8
 
     def test_case_insensitive_provider_name(self):
         """Provider name matching is case-insensitive."""
-        p = get_provider({"ai": {"provider": "GEMINI", "api_key": "k"}})
+        p = get_provider(Settings(ai_provider="GEMINI", ai_api_key="k"))
         assert isinstance(p, UniversalChatProvider)
         assert "generativelanguage" in p.base_url
 
     def test_provider_name_stripped(self):
         """Leading/trailing whitespace in provider name is ignored."""
-        p = get_provider({"ai": {"provider": "  openai  ", "api_key": "k"}})
+        p = get_provider(Settings(ai_provider="  openai  ", ai_api_key="k"))
         assert isinstance(p, UniversalChatProvider)
         assert "api.openai.com" in p.base_url
 
@@ -685,27 +683,17 @@ class TestGetProviderNone:
 
     def test_explicit_none(self):
         """provider: 'none' returns NoneProvider."""
-        p = get_provider({"ai": {"provider": "none"}})
+        p = get_provider(Settings(ai_provider="none"))
         assert isinstance(p, NoneProvider)
 
     def test_empty_provider_string(self):
         """Empty provider string returns NoneProvider."""
-        p = get_provider({"ai": {"provider": ""}})
+        p = get_provider(Settings(ai_provider=""))
         assert isinstance(p, NoneProvider)
 
-    def test_missing_provider_key(self):
-        """Missing provider key returns NoneProvider."""
-        p = get_provider({"ai": {}})
-        assert isinstance(p, NoneProvider)
-
-    def test_missing_ai_section(self):
-        """Missing ai section entirely returns NoneProvider."""
-        p = get_provider({})
-        assert isinstance(p, NoneProvider)
-
-    def test_empty_config(self):
-        """Fully empty config returns NoneProvider."""
-        p = get_provider({})
+    def test_no_provider_named(self):
+        """Nothing configured returns NoneProvider."""
+        p = get_provider(Settings())
         assert isinstance(p, NoneProvider)
 
 
@@ -720,15 +708,13 @@ class TestGetProviderCustom:
     def test_custom_with_all_fields(self):
         """Custom provider with all fields creates correct provider."""
         p = get_provider(
-            {
-                "ai": {
-                    "provider": "custom",
-                    "base_url": "https://my-llm.com/v1",
-                    "api_key": "my-key",
-                    "model": "my-model",
-                    "temperature": 0.7,
-                }
-            }
+            Settings(
+                ai_provider="custom",
+                ai_base_url="https://my-llm.com/v1",
+                ai_api_key="my-key",
+                ai_model="my-model",
+                ai_temperature=0.7,
+            )
         )
         assert isinstance(p, UniversalChatProvider)
         assert p.base_url == "https://my-llm.com/v1"
@@ -739,12 +725,12 @@ class TestGetProviderCustom:
     def test_custom_missing_base_url_raises(self):
         """Custom provider without base_url raises ValueError."""
         with pytest.raises(ValueError, match="base_url"):
-            get_provider({"ai": {"provider": "custom", "api_key": "k"}})
+            get_provider(Settings(ai_provider="custom", ai_api_key="k"))
 
     def test_custom_empty_base_url_raises(self):
         """Custom provider with empty base_url raises ValueError."""
         with pytest.raises(ValueError, match="base_url"):
-            get_provider({"ai": {"provider": "custom", "base_url": "", "api_key": "k"}})
+            get_provider(Settings(ai_provider="custom", ai_base_url="", ai_api_key="k"))
 
 
 # =========================================================================
@@ -756,8 +742,8 @@ class TestGetProviderLegacy:
     """Tests for backward compatibility with legacy openai config."""
 
     def test_legacy_openai_section(self):
-        """Legacy openai.api_key config creates OpenAI provider."""
-        p = get_provider({"openai": {"api_key": "sk-legacy-key"}})
+        """A key with no provider named is the pre-'ai:' config, which was OpenAI."""
+        p = get_provider(Settings(ai_api_key="sk-legacy-key"))
         assert isinstance(p, UniversalChatProvider)
         assert "api.openai.com" in p.base_url
         assert p.api_key == "sk-legacy-key"
@@ -765,22 +751,17 @@ class TestGetProviderLegacy:
 
     def test_legacy_placeholder_ignored(self):
         """Legacy config with placeholder value returns NoneProvider."""
-        p = get_provider({"openai": {"api_key": "YOUR-OPENAI-KEY-HERE"}})
+        p = get_provider(Settings(ai_api_key="YOUR-OPENAI-KEY-HERE"))
         assert isinstance(p, NoneProvider)
 
     def test_legacy_empty_key_ignored(self):
         """Legacy config with empty key returns NoneProvider."""
-        p = get_provider({"openai": {"api_key": ""}})
+        p = get_provider(Settings(ai_api_key=""))
         assert isinstance(p, NoneProvider)
 
     def test_new_ai_section_takes_precedence(self):
-        """When both ai and openai sections exist, ai wins."""
-        p = get_provider(
-            {
-                "ai": {"provider": "gemini", "api_key": "gemini-key"},
-                "openai": {"api_key": "sk-old"},
-            }
-        )
+        """A named provider is used even when the key came from an old key."""
+        p = get_provider(Settings(ai_provider="gemini", ai_api_key="gemini-key"))
         assert isinstance(p, UniversalChatProvider)
         assert "generativelanguage" in p.base_url
         assert p.api_key == "gemini-key"
@@ -797,12 +778,12 @@ class TestGetProviderErrors:
     def test_unknown_provider_raises_valueerror(self):
         """Unknown provider name raises ValueError with helpful message."""
         with pytest.raises(ValueError, match="Unknown AI provider"):
-            get_provider({"ai": {"provider": "banana"}})
+            get_provider(Settings(ai_provider="banana"))
 
     def test_unknown_provider_lists_available(self):
         """Error message for unknown provider lists available presets."""
         with pytest.raises(ValueError, match="gemini") as exc_info:
-            get_provider({"ai": {"provider": "banana"}})
+            get_provider(Settings(ai_provider="banana"))
         error_msg = str(exc_info.value)
         assert "openai" in error_msg
         assert "custom" in error_msg
@@ -811,7 +792,7 @@ class TestGetProviderErrors:
     def test_missing_api_key_for_cloud_provider_warns(self):
         """Cloud provider without API key logs a warning (not an error)."""
         # Should not raise, but should warn
-        p = get_provider({"ai": {"provider": "openai"}})
+        p = get_provider(Settings(ai_provider="openai"))
         assert isinstance(p, UniversalChatProvider)
         assert p.api_key == ""
 
@@ -874,8 +855,8 @@ class TestProviderRegistry:
                 self.suffix = suffix
 
             @classmethod
-            def from_config(cls, ai_config):
-                return cls(suffix=ai_config.get("suffix", ""))
+            def from_config(cls, settings):
+                return cls(suffix=settings.ai_model or "")
 
             def repair_text(self, raw_text: str, instructions: str) -> str:
                 return raw_text + self.suffix
@@ -890,30 +871,30 @@ class TestProviderRegistry:
         assert PROVIDER_REGISTRY["echo"] is echo_provider
 
     def test_get_provider_builds_the_registered_class(self, echo_provider):
-        provider = get_provider({"ai": {"provider": "echo", "suffix": "!"}})
+        provider = get_provider(Settings(ai_provider="echo", ai_model="!"))
 
         assert isinstance(provider, echo_provider)
         assert provider.repair_text("hi", "") == "hi!"
 
     def test_provider_name_is_case_insensitive(self, echo_provider):
-        assert isinstance(get_provider({"ai": {"provider": "ECHO"}}), echo_provider)
+        assert isinstance(get_provider(Settings(ai_provider="ECHO")), echo_provider)
 
     def test_registration_wins_over_a_preset_of_the_same_name(self, clean_registry):
         @register_provider("ollama")
         class Replacement(NoneProvider):
             @classmethod
-            def from_config(cls, ai_config):
+            def from_config(cls, settings):
                 return cls()
 
-        assert isinstance(get_provider({"ai": {"provider": "ollama"}}), Replacement)
+        assert isinstance(get_provider(Settings(ai_provider="ollama")), Replacement)
 
     def test_unknown_provider_error_lists_registered_names(self, echo_provider):
         with pytest.raises(ValueError, match="Unknown AI provider") as exc_info:
-            get_provider({"ai": {"provider": "banana"}})
+            get_provider(Settings(ai_provider="banana"))
         assert "echo" in str(exc_info.value)
 
     def test_presets_still_resolve_when_nothing_is_registered(self):
-        provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
+        provider = get_provider(Settings(ai_provider="gemini", ai_api_key="k"))
         assert isinstance(provider, UniversalChatProvider)
 
 

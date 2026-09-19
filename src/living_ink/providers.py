@@ -5,7 +5,8 @@ Architecture:
       Supports both text-only cleanup and multimodal vision OCR (reads
       handwritten images directly via the standard ``image_url`` format).
     - ``NoneProvider``: No-op, returns raw text unchanged.
-    - ``get_provider``: Factory that reads config and returns the right provider.
+    - ``get_provider``: Factory that reads the settings and returns the right
+      provider.
 
 No provider-specific code. No external SDKs required.
 Just standard HTTP to a configurable endpoint.
@@ -16,7 +17,8 @@ Supported providers (via presets):
 
 Example:
     >>> from living_ink.providers import get_provider
-    >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "..."}})
+    >>> from living_ink.settings import Settings
+    >>> provider = get_provider(Settings(ai_provider="gemini", ai_api_key="..."))
     >>> cleaned = provider.repair_text("messy OCR text", "Clean this text.")
     >>> text = provider.ocr_image("/path/to/page.png", "Transcribe this page.")
 """
@@ -32,6 +34,7 @@ import urllib.request
 from typing import Dict, Optional, Type
 
 from living_ink.redact import redact, register_secret
+from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +144,13 @@ class TextRepairProvider(abc.ABC):
     """
 
     @classmethod
-    def from_config(cls, ai_config: dict) -> "TextRepairProvider":
-        """Build this provider from the ``ai`` section of config.yml.
+    def from_config(cls, settings: "Settings") -> "TextRepairProvider":
+        """Build this provider from the resolved settings.
 
         Args:
-            ai_config: The ``ai`` section, e.g. ``{"provider": "x", "api_key": "..."}``.
+            settings: The run's settings. The ``ai_*`` fields carry everything
+                a provider is configured with, already merged from the flags,
+                the environment, the config file and the credentials store.
 
         Returns:
             A configured provider.
@@ -588,25 +593,21 @@ class UniversalChatProvider(TextRepairProvider):
 # ---------------------------------------------------------------------------
 
 
-def get_provider(config: dict) -> TextRepairProvider:
-    """Create a text repair provider from a YAML config dictionary.
+def get_provider(settings: Settings) -> TextRepairProvider:
+    """Create a text repair provider from the run's resolved settings.
 
-    Factory function that reads the ``ai`` section of the config and
-    returns the appropriate provider instance. Resolution order: a class in
+    Factory function that reads the ``ai_*`` settings and returns the
+    appropriate provider instance. Resolution order: a class in
     :data:`PROVIDER_REGISTRY`, then a name in :data:`PROVIDER_PRESETS`, then
-    ``custom`` endpoints, plus backward-compatible legacy ``openai`` config.
+    ``custom`` endpoints.
+
+    It takes :class:`~living_ink.settings.Settings` rather than the parsed
+    YAML because the key is no longer in the YAML: it is in the credentials
+    directory, under a name composed from the provider. Reading the file here
+    would see a section with no key in it.
 
     Args:
-        config: The parsed YAML configuration dictionary. Expected
-            structure::
-
-                {
-                    "ai": {
-                        "provider": "gemini",
-                        "api_key": "...",
-                        "model": "gemini-flash-latest",  # optional
-                    }
-                }
+        settings: The run's settings.
 
     Returns:
         A configured ``TextRepairProvider`` instance.
@@ -616,29 +617,26 @@ def get_provider(config: dict) -> TextRepairProvider:
             provider is missing ``base_url``.
 
     Examples:
-        >>> provider = get_provider({"ai": {"provider": "none"}})
+        >>> provider = get_provider(Settings(ai_provider="none"))
         >>> isinstance(provider, NoneProvider)
         True
 
-        >>> provider = get_provider({"ai": {"provider": "gemini", "api_key": "k"}})
+        >>> provider = get_provider(Settings(ai_provider="gemini", ai_api_key="k"))
         >>> provider.model
         'gemini-flash-latest'
     """
-    ai_config = config.get("ai", {})
-    provider_name = str(ai_config.get("provider", "")).strip().lower()
+    provider_name = str(settings.ai_provider or "").strip().lower()
+    api_key = str(settings.ai_api_key or "").strip()
+    model = str(settings.ai_model or "").strip()
 
-    # ── Backward compat: legacy 'openai' section without 'ai' ──
-    if not provider_name and "openai" in config:
-        openai_cfg = config["openai"]
-        api_key = str(openai_cfg.get("api_key", "")).strip()
-        if api_key and "YOUR" not in api_key:
-            logger.info("Using legacy 'openai' config. Consider migrating to the new 'ai' section.")
-            return UniversalChatProvider(
-                base_url="https://api.openai.com/v1",
-                api_key=api_key,
-                model="gpt-4o-mini",
-                provider_label="openai (legacy config)",
-            )
+    # ── Backward compat: a key from before there was an 'ai:' section ──
+    # The pre-0.2 config named no provider, only an ``openai:`` block; the key
+    # in it now resolves as ``ai_api_key``. A key with nothing to use it on
+    # meant OpenAI then and still does. "YOUR..." is the sample config's
+    # placeholder, which configures nothing.
+    if not provider_name and api_key and "YOUR" not in api_key:
+        logger.info("No 'ai.provider' set; using the API key with OpenAI.")
+        provider_name = "openai"
 
     # ── No provider configured → NoneProvider ──
     if not provider_name or provider_name == "none":
@@ -646,7 +644,7 @@ def get_provider(config: dict) -> TextRepairProvider:
 
     # ── Custom provider → user supplies everything ──
     if provider_name == "custom":
-        base_url = str(ai_config.get("base_url", "")).strip()
+        base_url = str(settings.ai_base_url or "").strip()
         if not base_url:
             raise ValueError(
                 "AI provider 'custom' requires 'base_url' in config.\n"
@@ -654,21 +652,20 @@ def get_provider(config: dict) -> TextRepairProvider:
                 "  ai:\n"
                 '    provider: "custom"\n'
                 '    base_url: "https://my-llm.example.com/v1"\n'
-                '    api_key: "my-key"\n'
                 '    model: "my-model"'
             )
         return UniversalChatProvider(
             base_url=base_url,
-            api_key=str(ai_config.get("api_key", "")).strip(),
-            model=str(ai_config.get("model", "")).strip(),
-            temperature=float(ai_config.get("temperature", 0.3)),
+            api_key=api_key,
+            model=model,
+            temperature=settings.ai_temperature,
             provider_label="custom",
         )
 
     # ── Registered provider class ──
     registered = PROVIDER_REGISTRY.get(provider_name)
     if registered:
-        return registered.from_config(ai_config)
+        return registered.from_config(settings)
 
     # ── Named preset ──
     preset = PROVIDER_PRESETS.get(provider_name)
@@ -678,9 +675,6 @@ def get_provider(config: dict) -> TextRepairProvider:
             f"Unknown AI provider: '{provider_name}'.\n"
             f"Available providers: {available}, 'custom', 'none'"
         )
-
-    api_key = str(ai_config.get("api_key", "")).strip()
-    model = str(ai_config.get("model", "")).strip() or preset["default_model"]
 
     # Warn for cloud providers missing API key (not local like Ollama)
     if preset.get("auth_header") and not api_key:
@@ -693,8 +687,8 @@ def get_provider(config: dict) -> TextRepairProvider:
     return UniversalChatProvider(
         base_url=preset["base_url"],
         api_key=api_key,
-        model=model,
-        temperature=float(ai_config.get("temperature", 0.3)),
+        model=model or preset["default_model"],
+        temperature=settings.ai_temperature,
         auth_header=preset.get("auth_header"),
         auth_prefix=preset.get("auth_prefix"),
         provider_label=provider_name,

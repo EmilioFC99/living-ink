@@ -1,6 +1,6 @@
 """Tests for living_ink.clean module.
 
-Covers the configure/repair integration, ENABLE_REPAIR toggle,
+Covers the configure/repair integration, the cleanup toggle,
 prompt file loading, lazy provider initialization, and backward
 compatibility with legacy environment variables.
 """
@@ -12,6 +12,7 @@ import pytest
 
 from living_ink import clean
 from living_ink.providers import NoneProvider, UniversalChatProvider
+from living_ink.settings import Settings
 
 # =========================================================================
 # Fixtures
@@ -20,13 +21,15 @@ from living_ink.providers import NoneProvider, UniversalChatProvider
 
 @pytest.fixture(autouse=True)
 def reset_provider():
-    """Reset the module-level provider before each test.
+    """Reset the module-level provider and toggle before each test.
 
     This ensures tests don't leak provider state to each other.
     """
     clean._provider = None
+    clean._repair_enabled = None
     yield
     clean._provider = None
+    clean._repair_enabled = None
 
 
 @pytest.fixture
@@ -71,37 +74,37 @@ class TestConfigure:
 
     def test_configure_with_gemini(self):
         """Configuring with Gemini creates a UniversalChatProvider."""
-        clean.configure({"ai": {"provider": "gemini", "api_key": "test"}})
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="test"))
         provider = clean._get_provider()
         assert isinstance(provider, UniversalChatProvider)
         assert "generativelanguage" in provider.base_url
 
     def test_configure_with_none(self):
         """Configuring with 'none' creates a NoneProvider."""
-        clean.configure({"ai": {"provider": "none"}})
+        clean.configure(Settings(ai_provider="none"))
         provider = clean._get_provider()
         assert isinstance(provider, NoneProvider)
 
     def test_configure_with_empty_config(self):
-        """Configuring with empty dict creates NoneProvider."""
-        clean.configure({})
+        """Configuring with nothing set creates NoneProvider."""
+        clean.configure(Settings())
         provider = clean._get_provider()
         assert isinstance(provider, NoneProvider)
 
     def test_configure_with_legacy_openai(self):
-        """Legacy openai config is accepted for backward compatibility."""
-        clean.configure({"openai": {"api_key": "sk-legacy"}})
+        """A key with no provider named is accepted, as it was before 'ai:'."""
+        clean.configure(Settings(ai_api_key="sk-legacy"))
         provider = clean._get_provider()
         assert isinstance(provider, UniversalChatProvider)
         assert "api.openai.com" in provider.base_url
 
     def test_configure_overrides_previous(self):
         """Calling configure() again replaces the previous provider."""
-        clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k"))
         p1 = clean._get_provider()
         assert "generativelanguage" in p1.base_url
 
-        clean.configure({"ai": {"provider": "openai", "api_key": "k"}})
+        clean.configure(Settings(ai_provider="openai", ai_api_key="k"))
         p2 = clean._get_provider()
         assert "api.openai.com" in p2.base_url
 
@@ -131,7 +134,7 @@ class TestGetProviderLazy:
 
     def test_caches_provider_after_first_call(self):
         """Provider is cached after first lazy initialization."""
-        clean.configure({"ai": {"provider": "none"}})
+        clean.configure(Settings(ai_provider="none"))
         p1 = clean._get_provider()
         p2 = clean._get_provider()
         assert p1 is p2
@@ -147,19 +150,19 @@ class TestRepairTextWithOpenai:
 
     def test_returns_original_when_none_provider(self):
         """With NoneProvider, original text is returned unchanged."""
-        clean.configure({"ai": {"provider": "none"}})
+        clean.configure(Settings(ai_provider="none"))
         result = clean.repair_text_with_openai("hello world")
         assert result == "hello world"
 
     def test_returns_empty_for_empty_input(self):
         """Empty string input returns empty string."""
-        clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k"))
         result = clean.repair_text_with_openai("")
         assert result == ""
 
     def test_returns_whitespace_for_whitespace_input(self):
         """Whitespace-only input is returned unchanged."""
-        clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k"))
         result = clean.repair_text_with_openai("   \n  ")
         assert result == "   \n  "
 
@@ -186,37 +189,33 @@ class TestRepairTextWithOpenai:
 
 
 # =========================================================================
-# ENABLE_REPAIR toggle
+# The cleanup toggle
 # =========================================================================
 
 
 class TestEnableRepairToggle:
-    """Tests for the ENABLE_REPAIR environment variable toggle."""
+    """Tests for turning the AI pass off entirely."""
 
     def test_disabled_returns_original(self):
-        """When ENABLE_REPAIR is false, text is returned unchanged."""
-        original_flag = clean.ENABLE_REPAIR
-        try:
-            clean.ENABLE_REPAIR = False
-            clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
-            result = clean.repair_text_with_openai("test text")
-            assert result == "test text"
-        finally:
-            clean.ENABLE_REPAIR = original_flag
+        """With cleanup off, text is returned unchanged."""
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k", repair_enabled=False))
+
+        assert clean.repair_text_with_openai("test text") == "test text"
 
     def test_enabled_processes_text(self):
-        """When ENABLE_REPAIR is true, text is processed."""
-        original_flag = clean.ENABLE_REPAIR
-        try:
-            clean.ENABLE_REPAIR = True
-            mock_provider = MagicMock(spec=UniversalChatProvider)
-            mock_provider.repair_text.return_value = "fixed"
-            clean._provider = mock_provider
+        """With cleanup on, text reaches the provider."""
+        mock_provider = MagicMock(spec=UniversalChatProvider)
+        mock_provider.repair_text.return_value = "fixed"
+        clean._provider = mock_provider
+        clean._repair_enabled = True
 
-            result = clean.repair_text_with_openai("raw")
-            assert result == "fixed"
-        finally:
-            clean.ENABLE_REPAIR = original_flag
+        assert clean.repair_text_with_openai("raw") == "fixed"
+
+    def test_the_environment_still_turns_it_off(self, monkeypatch):
+        """The one place this setting has ever been written."""
+        monkeypatch.setenv("ENABLE_REPAIR", "false")
+
+        assert clean.repair_enabled() is False
 
 
 # =========================================================================
@@ -258,22 +257,18 @@ class TestVisionOcrAvailable:
 
     def test_returns_true_when_supported_and_enabled(self):
         """Returns True when provider supports vision and repair is enabled."""
-        clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k"))
         assert clean.vision_ocr_available() is True
 
     def test_returns_false_when_repair_disabled(self):
-        """Returns False when ENABLE_REPAIR is False."""
-        original = clean.ENABLE_REPAIR
-        try:
-            clean.ENABLE_REPAIR = False
-            clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
-            assert clean.vision_ocr_available() is False
-        finally:
-            clean.ENABLE_REPAIR = original
+        """Returns False when cleanup is turned off."""
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k", repair_enabled=False))
+
+        assert clean.vision_ocr_available() is False
 
     def test_returns_false_for_none_provider(self):
         """Returns False when configured with NoneProvider."""
-        clean.configure({"ai": {"provider": "none"}})
+        clean.configure(Settings(ai_provider="none"))
         assert clean.vision_ocr_available() is False
 
 
@@ -286,18 +281,14 @@ class TestOcrAndRepair:
     """Tests for ocr_and_repair()."""
 
     def test_returns_none_when_repair_disabled(self):
-        """Returns None when ENABLE_REPAIR is False."""
-        original = clean.ENABLE_REPAIR
-        try:
-            clean.ENABLE_REPAIR = False
-            clean.configure({"ai": {"provider": "gemini", "api_key": "k"}})
-            assert clean.ocr_and_repair("/path/to/img.png") is None
-        finally:
-            clean.ENABLE_REPAIR = original
+        """Returns None when cleanup is turned off."""
+        clean.configure(Settings(ai_provider="gemini", ai_api_key="k", repair_enabled=False))
+
+        assert clean.ocr_and_repair("/path/to/img.png") is None
 
     def test_returns_none_when_provider_lacks_vision(self):
         """Returns None when provider does not support vision."""
-        clean.configure({"ai": {"provider": "none"}})
+        clean.configure(Settings(ai_provider="none"))
         assert clean.ocr_and_repair("/path/to/img.png") is None
 
     def test_calls_ocr_image_when_supported(self, mock_ocr_prompt_file):

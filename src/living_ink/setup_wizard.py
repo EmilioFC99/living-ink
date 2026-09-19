@@ -360,18 +360,19 @@ def verify_ai_provider(
         return True, "AI cleanup disabled (raw OCR text will be used)."
 
     from living_ink.providers import get_provider
+    from living_ink.settings import Settings
 
-    config = {
-        "ai": {
-            "provider": provider_clean,
-            "api_key": api_key,
-        }
-    }
-    if model:
-        config["ai"]["model"] = model
+    # Built rather than resolved: this verifies the key the user just typed,
+    # which is not stored anywhere yet and must not be overridden by whatever
+    # the environment or an existing config already holds.
+    candidate = Settings(
+        ai_provider=provider_clean,
+        ai_api_key=api_key,
+        ai_model=model or None,
+    )
 
     try:
-        provider = get_provider(config)
+        provider = get_provider(candidate)
         test_prompt = "Reply with exactly: READY"
         response = provider.repair_text("Test", test_prompt)
 
