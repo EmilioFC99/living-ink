@@ -22,10 +22,13 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 from living_ink.config import ConfigurationMissing, get_config_path
 from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only; state is imported lazily
+    from living_ink.state import SyncStatus
 
 logger = logging.getLogger(__name__)
 
@@ -652,13 +655,13 @@ def collect_status(config_path: Path) -> StatusReport:
         logger.debug("Could not read the sync inventory", exc_info=True)
         inventory = []
     if inventory:
-        from living_ink.state import STATUS_FAILING, STATUS_PENDING, STATUS_SYNCED
+        from living_ink.state import STATUS_CHANGED, STATUS_FAILED, STATUS_NEW, STATUS_UP_TO_DATE
 
         counts = count_by_status(inventory)
         report.documents_known = True
-        report.documents_synced = counts[STATUS_SYNCED]
-        report.documents_pending = counts[STATUS_PENDING]
-        report.documents_failing = counts[STATUS_FAILING]
+        report.documents_synced = counts[STATUS_UP_TO_DATE]
+        report.documents_pending = counts[STATUS_NEW] + counts[STATUS_CHANGED]
+        report.documents_failing = counts[STATUS_FAILED]
 
     try:
         for cache in all_caches():
@@ -711,23 +714,64 @@ def collect_inventory() -> list[dict[str, Any]]:
     return get_state_store().sync_overview(names)
 
 
-def count_by_status(inventory: list[dict[str, Any]]) -> dict[str, int]:
+def count_by_status(inventory: list[dict[str, Any]]) -> dict["SyncStatus", int]:
     """Total the inventory by sync status.
 
     Args:
         inventory: Rows from :func:`collect_inventory`.
 
     Returns:
-        Mapping of each of the three statuses to its count, zeros included so
-        callers can format without checking for missing keys.
+        Mapping of every :data:`~living_ink.state.SYNC_STATUSES` entry to its
+        count, zeros included so callers can format without checking for
+        missing keys. Iterating the registry rather than naming statuses is
+        what lets a new status be one entry in ``state.py`` and nothing here.
     """
-    from living_ink.state import STATUS_FAILING, STATUS_PENDING, STATUS_SYNCED
+    from living_ink.state import SYNC_STATUSES
 
-    counts = {STATUS_SYNCED: 0, STATUS_PENDING: 0, STATUS_FAILING: 0}
+    counts = {status: 0 for status in SYNC_STATUSES}
     for row in inventory:
         if row["status"] in counts:
             counts[row["status"]] += 1
     return counts
+
+
+def inventory_as_json(inventory: list[dict[str, Any]]) -> dict[str, Any]:
+    """Render the inventory as JSON-safe data.
+
+    A row's ``status`` is a :class:`~living_ink.state.SyncStatus`, which is not
+    serialisable and whose ``label`` is free to be reworded. Both the rows and
+    the counts are keyed by the stable ``key`` instead, so a script reading
+    this output survives a rename in the UI.
+
+    Args:
+        inventory: Rows from :func:`collect_inventory`.
+
+    Returns:
+        A dict with ``documents`` and ``counts``, ready for :func:`json.dumps`.
+    """
+    documents = [{**row, "status": row["status"].key} for row in inventory]
+    counts = {status.key: count for status, count in count_by_status(inventory).items()}
+    return {"documents": documents, "counts": counts}
+
+
+def tone_colour(tone: str):
+    """Map a status tone onto the colour helper that renders it.
+
+    Statuses name a tone rather than carrying a colour function so that
+    :mod:`living_ink.state` stays free of presentation imports. This is the
+    one place that translation happens.
+
+    Args:
+        tone: ``"good"``, ``"warn"``, ``"bad"`` or anything else.
+
+    Returns:
+        A callable taking a string and returning it wrapped in escape codes.
+        An unrecognised tone renders dim rather than raising — a new status
+        should never be able to crash the renderer.
+    """
+    from living_ink.setup_wizard import dim, green, red, yellow
+
+    return {"good": green, "warn": yellow, "bad": red}.get(tone, dim)
 
 
 def state_db_path() -> Path:
@@ -1215,9 +1259,7 @@ class ListCommand(BaseCommand):
         inventory = collect_inventory()
 
         if getattr(args, "json", False):
-            print(
-                json.dumps({"documents": inventory, "counts": count_by_status(inventory)}, indent=2)
-            )
+            print(json.dumps(inventory_as_json(inventory), indent=2))
             return 0
 
         self._render_console(inventory, show_all=getattr(args, "all", False))
@@ -1231,8 +1273,8 @@ class ListCommand(BaseCommand):
             inventory: Rows from :func:`collect_inventory`.
             show_all: Whether to include the up-to-date documents.
         """
-        from living_ink.setup_wizard import bold, dim, green, red, yellow
-        from living_ink.state import STATUS_FAILING, STATUS_PENDING, STATUS_SYNCED
+        from living_ink.setup_wizard import bold, dim, green
+        from living_ink.state import STATUS_UP_TO_DATE, SYNC_STATUSES
 
         if not inventory:
             print()
@@ -1240,23 +1282,20 @@ class ListCommand(BaseCommand):
             print()
             return
 
-        groups = {
-            STATUS_FAILING: ("Failing", red),
-            STATUS_PENDING: ("Pending", yellow),
-            STATUS_SYNCED: ("Synced", green),
-        }
-        wanted = list(groups) if show_all else [STATUS_FAILING, STATUS_PENDING]
+        # Driven by the registry: a status added in state.py appears here with
+        # no edit, grouped by whether a run would act on it.
+        wanted = [s for s in SYNC_STATUSES if show_all or s.needs_sync]
 
         width = min(40, max(len(row["name"] or row["id"]) for row in inventory))
         printed = 0
 
         print()
         for status in wanted:
-            rows = [row for row in inventory if row["status"] == status]
+            rows = [row for row in inventory if row["status"] is status]
             if not rows:
                 continue
-            label, colour = groups[status]
-            print(bold(colour(f"{label} ({len(rows)})")))
+            colour = tone_colour(status.tone)
+            print(bold(colour(f"{status.label.capitalize()} ({len(rows)})")))
             for row in rows:
                 print(f"  {ListCommand._format_row(row, width)}")
             print()
@@ -1266,7 +1305,7 @@ class ListCommand(BaseCommand):
         if not show_all:
             if printed == 0:
                 print(green("Everything is up to date."))
-            print(dim(f"{counts[STATUS_SYNCED]} synced (not shown; use --all)"))
+            print(dim(f"{counts[STATUS_UP_TO_DATE]} up to date (not shown; use --all)"))
             print()
 
     @staticmethod

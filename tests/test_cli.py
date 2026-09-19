@@ -24,6 +24,7 @@ from living_ink.cli import (
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
 from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
 from living_ink.setup_wizard import WizardResult
+from living_ink.state import STATUS_FAILED, STATUS_NEW, STATUS_UP_TO_DATE
 
 
 def test_find_repo_root_prefers_cwd(tmp_path):
@@ -686,7 +687,7 @@ class TestListCommand:
             "id": "doc-1",
             "name": "Meeting Notes",
             "folder": "Work",
-            "status": "pending",
+            "status": STATUS_NEW,
             "pending": ["ObsidianDestination"],
             "published": {},
             "last_error": None,
@@ -695,7 +696,7 @@ class TestListCommand:
             "id": "doc-2",
             "name": "Sketchbook",
             "folder": "Art",
-            "status": "failing",
+            "status": STATUS_FAILED,
             "pending": ["ObsidianDestination"],
             "published": {},
             "last_error": "Download timed out",
@@ -704,7 +705,7 @@ class TestListCommand:
             "id": "doc-3",
             "name": "Journal",
             "folder": None,
-            "status": "synced",
+            "status": STATUS_UP_TO_DATE,
             "pending": [],
             "published": {"ObsidianDestination": "v1"},
             "last_error": None,
@@ -731,7 +732,7 @@ class TestListCommand:
     def test_synced_documents_are_hidden_by_default(self, capsys):
         _, out = self._run(capsys)
         assert "Journal" not in out
-        assert "1 synced" in out
+        assert "1 up to date" in out
 
     def test_all_shows_everything(self, capsys):
         _, out = self._run(capsys, all=True)
@@ -758,7 +759,8 @@ class TestListCommand:
         _, out = self._run(capsys, json=True)
         payload = json.loads(out)
         assert len(payload["documents"]) == 3
-        assert payload["counts"] == {"synced": 1, "pending": 1, "failing": 1}
+        assert payload["counts"] == {"up_to_date": 1, "new": 1, "changed": 0, "failed": 1}
+        assert {row["status"] for row in payload["documents"]} == {"up_to_date", "new", "failed"}
 
     def test_a_pending_document_is_not_an_error_exit(self, capsys):
         """Scripts must not treat "someone wrote a new page" as a failure."""
