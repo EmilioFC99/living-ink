@@ -67,6 +67,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# Deselect the minutes-long tests by default so `pytest -v` stays a thing you
+# run before every commit. Pytest still prints "N deselected", so nothing is
+# hidden, and `pytest -m slow` overrides this because a command-line -m wins.
+addopts = '-m "not slow"'
 
 [dependency-groups]
 dev = [
