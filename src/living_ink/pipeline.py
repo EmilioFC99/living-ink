@@ -40,7 +40,6 @@ from living_ink.config import (
 from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
-    AppleNotesDestination,
     Destination,
     DestinationError,
     MergeUnit,
@@ -1221,17 +1220,12 @@ class SyncPipeline:
             apple_notes_folder=opts.folder or base.apple_notes_folder,
         )
 
-        # 3. Destination folder
-        for dest in self.destinations:
-            if isinstance(dest, AppleNotesDestination):
-                dest.folder_name = self.settings.apple_notes_folder
-
         # Opened by run(); every state row written during that run carries it,
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
         self.report: Optional[RunReport] = None
 
-        # 4. Transcription cache. Pages are transcribed concurrently, so the
+        # 3. Transcription cache. Pages are transcribed concurrently, so the
         # hit and miss tallies need a lock even though the entries themselves
         # are independent files.
         self.cache = TranscriptCache(

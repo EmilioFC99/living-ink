@@ -529,7 +529,7 @@ SETTINGS: Tuple[Setting, ...] = (
         field="obsidian_enabled",
         key="obsidian.enabled",
         kind=FLAG,
-        default=False,
+        default=True,
         help="Publish to an Obsidian vault.",
         env="LIVING_INK_OBSIDIAN_ENABLED",
     ),

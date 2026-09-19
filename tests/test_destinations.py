@@ -1,26 +1,22 @@
 """Tests for living_ink.destinations module.
 
-Covers Destination abstract base class, AppleNotesDestination,
-and ObsidianDestination including full folder mirroring, root folder
-configuration, attachment handling, and filename sanitization.
+Covers the Destination abstract base class and ObsidianDestination,
+including full folder mirroring, root folder configuration, attachment
+handling, and filename sanitization.
 """
 
 import datetime
 import re
 from dataclasses import replace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from PIL import Image
 
 from living_ink import notemerge, safeio
 from living_ink.core.document import PublishResult
 from living_ink.destinations import (
-    AppleNotesDestination,
     Destination,
-    DestinationError,
     DestinationStatus,
-    DestinationUnavailable,
     ObsidianDestination,
 )
 from tests.builders import make_both, make_context
@@ -323,85 +319,6 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
         assert "source: Remarkable/TagTest" in content
 
 
-# =========================================================================
-# AppleNotesDestination
-# =========================================================================
-
-
-class TestAppleNotesDestination:
-    """Tests for AppleNotesDestination."""
-
-    def test_convert_to_html(self):
-        """Converts plain text to Apple Notes HTML div format."""
-        dest = AppleNotesDestination(folder_name="Living Ink")
-        html_out = dest._convert_to_html("Line 1\n\nLine 2")
-        assert "<div>Line 1</div>" in html_out
-        assert "<div><br></div>" in html_out
-        assert "<div>Line 2</div>" in html_out
-
-    def test_convert_to_html_escapes_special_chars(self):
-        """HTML special characters are escaped."""
-        dest = AppleNotesDestination()
-        html_out = dest._convert_to_html("5 < 10 & 20 > 15")
-        assert "5 &lt; 10 &amp; 20 &gt; 15" in html_out
-
-    def test_create_opaque_image(self, tmp_path):
-        """Transparent image is composited onto white RGB."""
-        dest = AppleNotesDestination()
-
-        # Create transparent RGBA image
-        img_path = tmp_path / "test_transparent.png"
-        img = Image.new("RGBA", (50, 50), (255, 0, 0, 128))
-        img.save(img_path)
-
-        opaque = dest._create_opaque_image(img_path)
-        assert opaque.exists()
-        assert opaque.name == "opaque_test_transparent.png"
-
-        result_img = Image.open(opaque)
-        assert result_img.mode == "RGB"
-
-    @patch("living_ink.destinations.apple_notes.subprocess.run")
-    def test_publish_executes_applescript_with_top_level_folder(self, mock_run):
-        """Extracts top-level subfolder when nested path is provided."""
-        mock_run.return_value = MagicMock(return_code=0, returncode=0, stderr="")
-
-        dest = AppleNotesDestination(folder_name="Living Ink")
-        success = dest.publish(*make_both("Plan", "Plan text", folder=("Projects", "Q1")))
-
-        assert success.ok is True
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        script = cmd[2]  # osascript -e <script>
-
-        # Verify root folder
-        assert '"Living Ink"' in script
-        # Verify only the top-level segment of sub_folder is passed
-        assert '"Projects"' in script
-        assert "Projects/Q1" not in script
-
-    @patch("living_ink.destinations.apple_notes.subprocess.run")
-    def test_publish_handles_applescript_failure(self, mock_run):
-        """Raises DestinationUnavailable after exhausting retries."""
-        mock_run.return_value = MagicMock(returncode=1, stderr="AppleScript Error")
-
-        dest = AppleNotesDestination()
-        with patch("living_ink.destinations.apple_notes.time.sleep"):
-            with pytest.raises(DestinationUnavailable) as exc_info:
-                dest.publish(*make_both("Failed Note", "Content"))
-
-        assert "AppleScript Error" in str(exc_info.value)
-        assert mock_run.call_count == 3
-
-    @patch("living_ink.destinations.apple_notes.subprocess.run")
-    def test_publish_reports_missing_osascript(self, mock_run):
-        """A non-macOS host is reported as unavailable, not as a generic failure."""
-        mock_run.side_effect = FileNotFoundError("osascript")
-
-        with pytest.raises(DestinationUnavailable, match="osascript not found"):
-            AppleNotesDestination().publish(*make_both("Note", "Content"))
-
-
 class TestObsidianFailureReporting:
     """An unwritable vault is a reported failure, not a traceback."""
 
@@ -421,10 +338,6 @@ class TestObsidianFailureReporting:
         assert result.ok is False
         assert "Could not write" in result.detail
         assert "denied" in result.detail
-
-    def test_destination_unavailable_is_a_destination_error(self):
-        """Callers can catch the base class and handle both cases."""
-        assert issubclass(DestinationUnavailable, DestinationError)
 
 
 # =========================================================================
@@ -660,76 +573,6 @@ class TestObsidianPreservesUserEdits:
         written = note.read_text(encoding="utf-8")
         assert written.count("living-ink:begin") == 1
         assert written.count("Transcript v") == 1
-
-
-class TestAppleNotesIdentifiesNotesById:
-    """Deleting by title destroyed notes the user had written themselves."""
-
-    def _run(self, tmp_path, returncode=0, stdout="x-coredata://Store/ICNote/p7", **kwargs):
-        dest = AppleNotesDestination(folder_name="reMarkable")
-        with patch("living_ink.destinations.apple_notes.subprocess.run") as run:
-            run.return_value = MagicMock(returncode=returncode, stdout=stdout, stderr="")
-            result = dest.publish(*make_both("Meeting Notes", "body", **kwargs))
-        return dest, result, run.call_args[0][0][2]
-
-    def test_a_first_publish_deletes_nothing(self, tmp_path):
-        """With no recorded id, a matching title might be somebody else's note."""
-        _, result, script = self._run(tmp_path)
-
-        assert result.ok is True
-        assert "delete note" not in script
-        assert "delete (every" not in script
-
-    def test_a_recorded_id_is_deleted_by_id(self, tmp_path):
-        _, _, script = self._run(tmp_path, existing_external_id="x-coredata://Store/ICNote/p3")
-
-        assert "delete note id" in script
-        assert "x-coredata://Store/ICNote/p3" in script
-        assert "whose name is noteName" not in script
-
-    def test_an_id_falls_back_to_searching_the_folder(self, tmp_path):
-        """`note id` fails if the note moved; the whose-clause still matches by id."""
-        _, _, script = self._run(tmp_path, existing_external_id="x-coredata://Store/ICNote/p3")
-
-        assert "whose id is" in script
-
-    def test_title_matching_needs_explicit_permission(self, tmp_path):
-        """Only granted when sync state proves we published this note before."""
-        _, _, script = self._run(tmp_path, adopt_by_name=True)
-
-        assert "whose name is noteName" in script
-
-    def test_an_id_outranks_title_matching(self, tmp_path):
-        _, _, script = self._run(
-            tmp_path, existing_external_id="x-coredata://Store/ICNote/p3", adopt_by_name=True
-        )
-
-        assert "whose name is noteName" not in script
-
-    def test_the_new_note_id_is_reported_back(self, tmp_path):
-        _, result, script = self._run(tmp_path)
-
-        assert "return id of newNote" in script
-        assert result.external_id == "x-coredata://Store/ICNote/p7"
-
-    def test_an_empty_reply_records_no_id(self, tmp_path):
-        """Better no id than an empty string that would look like one."""
-        _, result, _ = self._run(tmp_path, stdout="\n")
-
-        assert result.external_id is None
-
-    def test_the_note_id_never_lands_on_the_destination(self, tmp_path):
-        """It used to, and a failed publish then left the previous note's id there."""
-        dest, _, _ = self._run(tmp_path)
-
-        assert not hasattr(dest, "last_external_id")
-        assert not hasattr(dest, "last_target")
-
-    def test_an_id_with_a_quote_is_escaped(self, tmp_path):
-        """AppleScript is assembled as text, so every value has to be quoted."""
-        _, _, script = self._run(tmp_path, existing_external_id='weird" id')
-
-        assert '\\"' in script
 
 
 class TestObsidianIgnoresIdentityArguments:

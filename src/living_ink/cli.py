@@ -736,7 +736,7 @@ def collect_status(config_path: Path) -> StatusReport:
 
     # Obsidian
     obs_cfg = cfg.get("obsidian", {})
-    report.obsidian_enabled = obs_cfg.get("enabled", False)
+    report.obsidian_enabled = obs_cfg.get("enabled", True)
     vault = Path(obs_cfg.get("vault_path", ""))
     report.obsidian_vault = str(vault)
     report.obsidian_root_folder = obs_cfg.get("root_folder", "")
@@ -787,10 +787,10 @@ def short_destination(class_name: str) -> str:
     """Turn a destination class name into something worth printing.
 
     Args:
-        class_name: e.g. ``AppleNotesDestination``.
+        class_name: e.g. ``FakeApiDestination``.
 
     Returns:
-        e.g. ``Apple Notes``.
+        e.g. ``Fake Api``.
     """
     import re
 

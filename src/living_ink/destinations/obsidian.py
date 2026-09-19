@@ -63,7 +63,10 @@ def _iso_date(moment: Optional[datetime.datetime]) -> Optional[str]:
     return moment.date().isoformat() if moment else None
 
 
-@register_destination("obsidian")
+# Enabled without being asked for: 1.0 ships exactly one destination, so it
+# cannot be the one you opt into. A config that never mentions it still
+# publishes, and a config with no vault fails preflight naming vault_path.
+@register_destination("obsidian", enabled_by_default=True)
 class ObsidianDestination(FileSystemDestination):
     """Publishes notes to a local Obsidian Vault as Markdown files.
 

@@ -29,8 +29,8 @@ class FakeApiDestination(Destination):
     :attr:`PublishResult.external_id` → the ``external_id`` column of
     ``publications`` → back into the next publish as ``existing_id``. Obsidian
     identifies notes by frontmatter and reports no id at all, and Apple Notes —
-    the only destination that does — does not survive 1.0, so without this the
-    round trip would be dead code the day that destination is deleted.
+    the only destination that ever did — has been deleted, so without this the
+    round trip is dead code until an API-shaped destination arrives.
 
     Attributes:
         objects: Every id this destination has handed out, newest last.

@@ -323,7 +323,7 @@ class Settings:
     max_notebooks_per_run: int = DEFAULT_MAX_NOTEBOOKS_PER_RUN
     prune: bool = False
 
-    obsidian_enabled: bool = False
+    obsidian_enabled: bool = True
     obsidian_vault_path: Optional[str] = None
     obsidian_root_folder: Optional[str] = None
     obsidian_mirror_folders: bool = True

@@ -5,7 +5,7 @@ import zipfile
 from unittest.mock import MagicMock
 
 from living_ink.api import FallbackClient, get_document_tags
-from living_ink.destinations import AppleNotesDestination, ObsidianDestination
+from living_ink.destinations import ObsidianDestination
 from living_ink.extract import (
     extract_tags_from_dict,
     extract_tags_from_zip,
@@ -133,31 +133,6 @@ class TestObsidianFrontmatterTags:
         note_file = tmp_path / "Note.md"
         content = note_file.read_text(encoding="utf-8")
         assert "tags:\n  - remarkable\n  - handwritten\n  - custom" in content
-
-
-class TestAppleNotesTags:
-    """Test tag badge handling in AppleNotesDestination."""
-
-    def test_tags_appended_as_hashtags(self, tmp_path, monkeypatch):
-        dest = AppleNotesDestination(folder_name="Living Ink")
-        captured_script = []
-
-        def mock_run(*args, **kwargs):
-            captured_script.append(args[0][2])
-            res = MagicMock()
-            res.returncode = 0
-            return res
-
-        import subprocess
-
-        monkeypatch.setattr(subprocess, "run", mock_run)
-
-        dest.publish(*make_both("Test Note", "Body text", tags=["data-engineering", "python"]))
-
-        assert len(captured_script) == 1
-        script = captured_script[0]
-        assert "#data-engineering" in script
-        assert "#python" in script
 
 
 class TestClientTagHelpers:

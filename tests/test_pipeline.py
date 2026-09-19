@@ -19,7 +19,6 @@ from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
 from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations import (
-    AppleNotesDestination,
     Destination,
     DestinationError,
     DestinationStatus,
@@ -159,16 +158,6 @@ def test_sync_pipeline_properties_ssh_and_cloud():
     pipeline_cloud = SyncPipeline(SyncOptions(cloud=True))
     assert pipeline_cloud.preferred_connection == "cloud"
     assert pipeline_cloud.use_ssh is False
-
-
-def test_sync_pipeline_folder_override(monkeypatch):
-    """SyncPipeline(folder=...) overrides AppleNotes folder in environment and destination."""
-    monkeypatch.delenv("APPLE_NOTES_FOLDER", raising=False)
-    an_dest = AppleNotesDestination(folder_name="InitialFolder")
-    pipeline = SyncPipeline(SyncOptions(folder="WorkNotes"), destinations=[an_dest])
-
-    assert pipeline.folder == "WorkNotes"
-    assert an_dest.folder_name == "WorkNotes"
 
 
 def test_sync_pipeline_discover_documents_filtering():
@@ -928,7 +917,7 @@ class TestConfigIsValidatedOnLoad:
 
     def test_a_registered_destination_section_is_not_a_typo(self, tmp_path, capsys):
         """Every shipped destination's own section must pass its own check."""
-        cfg = self._write(tmp_path, "apple_notes:\n  enabled: true\n")
+        cfg = self._write(tmp_path, "obsidian:\n  enabled: true\n")
         pipeline.load_yaml_config(cfg)
         assert "unknown section" not in capsys.readouterr().out
 
@@ -1062,10 +1051,10 @@ class TestProcessedLog:
         assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v2"}
 
     def test_destinations_do_not_share_state(self, tmp_path, monkeypatch):
-        """A notebook can be published to Obsidian and still pending for Notes."""
+        """A notebook can be published to one destination and pending for another."""
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
-        assert pipeline.load_processed_log("AppleNotes") == {}
+        assert pipeline.load_processed_log("Notion") == {}
 
     def test_state_survives_a_restart(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
@@ -1201,21 +1190,17 @@ class TestExternalIdRoundTrip:
         pipeline.reset_state_store()
 
     def test_an_id_is_stored_with_the_publication(self):
-        pipeline.add_to_processed_log(
-            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
-        )
-        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
-        assert record["external_id"] == "x-coredata://p7"
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
+        record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
+        assert record["external_id"] == "obj-7"
 
     def test_a_later_sync_without_an_id_keeps_the_old_one(self):
         """A destination that fails to report an id must not erase the record."""
-        pipeline.add_to_processed_log(
-            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
-        )
-        pipeline.add_to_processed_log("AppleNotesDestination", "doc-1", "v2")
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v2")
 
-        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
-        assert record["external_id"] == "x-coredata://p7"
+        record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
+        assert record["external_id"] == "obj-7"
         assert record["version"] == "v2"
 
 

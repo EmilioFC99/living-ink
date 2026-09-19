@@ -837,7 +837,7 @@ class TestDestinationLabels:
     def test_the_suffix_is_dropped_and_words_separated(self):
         from living_ink.cli import short_destination
 
-        assert short_destination("AppleNotesDestination") == "Apple Notes"
+        assert short_destination("FakeApiDestination") == "Fake Api"
 
     def test_a_single_word_is_left_alone(self):
         from living_ink.cli import short_destination
@@ -948,11 +948,11 @@ class TestStateCommand:
         assert code == 0
 
     def test_forget_can_target_one_destination(self, store, capsys):
-        store.record_publication("id-1", "AppleNotesDestination", "v1")
+        store.record_publication("id-1", "FakeApiDestination", "v1")
 
         self._run(capsys, forget="id-1", destination="ObsidianDestination")
 
-        assert store.published_versions("AppleNotesDestination") == {"id-1": "v1"}
+        assert store.published_versions("FakeApiDestination") == {"id-1": "v1"}
 
     def test_forget_refuses_an_unknown_document(self, store, capsys):
         code, out = self._run(capsys, forget="nope")
