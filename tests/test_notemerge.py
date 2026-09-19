@@ -250,3 +250,44 @@ class TestReadExisting:
         path = tmp_path / "note.md"
         path.write_bytes(b"\xff\xfe\x00binary")
         assert notemerge.read_existing(path) is None
+
+
+class TestInspectExisting:
+    """Absent, readable, and unreadable are three answers, not two."""
+
+    def test_nothing_there(self, tmp_path):
+        seen = notemerge.inspect_existing(tmp_path / "gone.md")
+        assert seen.text is None
+        assert seen.unreadable is False
+        assert seen.occupied is False
+
+    def test_a_note_we_can_read(self, tmp_path):
+        note = tmp_path / "note.md"
+        note.write_text("hello", encoding="utf-8")
+
+        seen = notemerge.inspect_existing(note)
+
+        assert seen.text == "hello"
+        assert seen.unreadable is False
+        assert seen.occupied is True
+
+    def test_bytes_that_are_not_utf_8(self, tmp_path):
+        note = tmp_path / "note.md"
+        note.write_bytes(b"\xff\xfe\x00")
+
+        seen = notemerge.inspect_existing(note)
+
+        assert seen.text is None
+        assert seen.unreadable is True
+        assert seen.occupied is True
+
+    def test_a_directory_wearing_the_name(self, tmp_path):
+        (tmp_path / "note.md").mkdir()
+        assert notemerge.inspect_existing(tmp_path / "note.md").unreadable is True
+
+    def test_read_existing_still_flattens_both_to_none(self, tmp_path):
+        # Kept for callers that only want the text; the point of the split is
+        # that the ones deciding whether to overwrite no longer use it.
+        (tmp_path / "bad.md").write_bytes(b"\xff")
+        assert notemerge.read_existing(tmp_path / "bad.md") is None
+        assert notemerge.read_existing(tmp_path / "gone.md") is None

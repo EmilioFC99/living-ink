@@ -11,7 +11,7 @@ import stat
 
 import pytest
 
-from living_ink.destinations.filesystem import NoteLayout
+from living_ink.destinations.filesystem import AttachmentPolicy, NoteLayout
 from living_ink.destinations.obsidian import ObsidianDestination
 from tests.builders import make_both, make_context, make_document, make_page
 
@@ -203,3 +203,98 @@ class TestTheStageContract:
         link = "Ink/_attachments/Work/Note/page-1.png"
         assert f"![[{link}|Page 1]]" in body
         assert (vault / link).is_file()
+
+
+class TestAnUnreadableNote:
+    """A file we cannot read is occupied, not free."""
+
+    def test_it_is_stepped_around_rather_than_overwritten(self, vault):
+        # notemerge.read_existing answered None for "absent" and for
+        # "there but unreadable" alike, and _claim_name read that as a free
+        # name. A .md holding invalid UTF-8 was destroyed without a word.
+        dest = ObsidianDestination(vault_path=str(vault))
+        mine = vault / "Note.md"
+        mine.write_bytes(b"\xff\xfe not utf-8 at all")
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert result.ok is True
+        assert result.target == "Note (2).md"
+        assert mine.read_bytes() == b"\xff\xfe not utf-8 at all"
+
+    def test_the_user_is_told_which_file_was_left_alone(self, vault):
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").write_bytes(b"\xff\xfe")
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert any("Note.md" in w and "could not be read" in w for w in result.warnings)
+
+    def test_a_directory_in_the_way_is_not_a_free_name_either(self, vault):
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").mkdir()
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert result.ok is True
+        assert result.target == "Note (2).md"
+        assert (vault / "Note.md").is_dir()
+
+    def test_an_unreadable_note_does_not_stop_the_documents_own_note(self, vault):
+        # Stepping around is only correct if the notebook still gets published.
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").write_bytes(b"\xff\xfe")
+
+        result = dest.publish(*make_both("Note", "Body text"))
+
+        assert "Body text" in (vault / result.target).read_text(encoding="utf-8")
+
+
+class TestTheAttachmentPolicy:
+    """One question, asked once, instead of four readings of a blank string."""
+
+    def test_a_named_folder_is_one_we_own(self, vault):
+        dest = ObsidianDestination(vault_path=str(vault), attachments_folder="_attachments")
+        assert dest.attachment_policy is AttachmentPolicy.OWNED
+
+    def test_a_blank_folder_means_beside_the_note(self, vault):
+        # Blank is a value, not an omission: "put them next to the note".
+        dest = ObsidianDestination(vault_path=str(vault), attachments_folder="")
+        assert dest.attachment_policy is AttachmentPolicy.BESIDE
+
+    def test_beside_the_note_the_filename_carries_the_notes_name(self, vault, tmp_path):
+        # Nothing else owns that directory, so page-1.png would collide with
+        # the next notebook's first page.
+        image = tmp_path / "page-1.png"
+        image.write_bytes(b"png")
+        doc = make_document("Note", pages=[make_page(1, "Text", image=image)])
+        dest = ObsidianDestination(vault_path=str(vault), attachments_folder="")
+
+        dest.publish(doc, make_context(doc_id=doc.doc_id))
+
+        assert (vault / "Note_page-1.png").is_file()
+
+    def test_in_our_own_folder_the_filename_does_not(self, vault, tmp_path):
+        image = tmp_path / "page-1.png"
+        image.write_bytes(b"png")
+        doc = make_document("Note", pages=[make_page(1, "Text", image=image)])
+        dest = ObsidianDestination(vault_path=str(vault), attachments_folder="_attachments")
+
+        dest.publish(doc, make_context(doc_id=doc.doc_id))
+
+        assert (vault / "_attachments" / "Note" / "page-1.png").is_file()
+
+    def test_unpublish_never_deletes_a_directory_it_does_not_own(self, vault, tmp_path):
+        image = tmp_path / "page-1.png"
+        image.write_bytes(b"png")
+        doc = make_document("Note", pages=[make_page(1, "Text", image=image)])
+        dest = ObsidianDestination(vault_path=str(vault), attachments_folder="")
+        published = dest.publish(doc, make_context(doc_id=doc.doc_id))
+        keepsake = vault / "something-of-mine.md"
+        keepsake.write_text("mine", encoding="utf-8")
+
+        removed = dest.unpublish(make_context(doc_id=doc.doc_id, existing_target=published.target))
+
+        assert removed.ok is True
+        assert keepsake.is_file()
+        assert vault.is_dir()

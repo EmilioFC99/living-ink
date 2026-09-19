@@ -23,6 +23,7 @@ somebody else's, and its content is kept above the block Living Ink adds.
 """
 
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 #: Delimiters around the region Living Ink regenerates. HTML comments, so
@@ -204,8 +205,55 @@ def render(
     return f"{head}{prefix}{managed}{tail}".rstrip("\n") + "\n"
 
 
+@dataclass(frozen=True)
+class ExistingNote:
+    """What is at a note's path right now.
+
+    Three states, not two. "There is no file" and "there is a file I cannot
+    read" are the same answer to :func:`read_existing` and were the same answer
+    to every caller: the name is free, write over it. A ``.md`` holding invalid
+    UTF-8, or one the user has locked, was destroyed without a warning.
+
+    Attributes:
+        text: The note's content, or None when there is nothing readable there.
+        unreadable: True when a file exists but could not be read. A caller
+            must treat this as occupied, never as free.
+    """
+
+    text: Optional[str] = None
+    unreadable: bool = False
+
+    @property
+    def occupied(self) -> bool:
+        """True when something is at that path, readable or not."""
+        return self.text is not None or self.unreadable
+
+
+def inspect_existing(path) -> ExistingNote:
+    """Look at a note's path and say which of the three states it is in.
+
+    Args:
+        path: Note file.
+
+    Returns:
+        An :class:`ExistingNote` describing what is there.
+    """
+    try:
+        return ExistingNote(text=path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ExistingNote()
+    except (OSError, UnicodeDecodeError):
+        # A directory, a permission denial, a broken symlink, bytes that are
+        # not UTF-8 — all of them mean something is there and we cannot judge
+        # whether it is ours.
+        return ExistingNote(unreadable=True)
+
+
 def read_existing(path) -> Optional[str]:
     """Read a note if it is there, treating an unreadable one as absent.
+
+    Prefer :func:`inspect_existing` anywhere the answer decides whether a file
+    gets overwritten; this is for callers that only want the text.
 
     Args:
         path: Note file.
@@ -213,10 +261,7 @@ def read_existing(path) -> Optional[str]:
     Returns:
         The note text, or None when it does not exist or cannot be decoded.
     """
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+    return inspect_existing(path).text
 
 
 def owned_frontmatter_lines(values: Dict[str, object]) -> List[str]:

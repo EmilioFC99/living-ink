@@ -33,6 +33,7 @@ import abc
 import logging
 import shutil
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import ClassVar, Dict, List, Optional
 
@@ -41,6 +42,29 @@ from living_ink.destinations.base import Destination, DestinationError
 from living_ink.safeio import PathEscapesRoot, contained_path, write_text_atomic
 
 logger = logging.getLogger(__name__)
+
+
+class AttachmentPolicy(str, Enum):
+    """Whether a note's attachments get a directory of their own.
+
+    One question with four consequences, and they were four separate readings
+    of one overloaded blank string. ``attachments_folder = ""`` meant "beside
+    the note", *and* silently disabled relocating attachments when a note moved,
+    *and* disabled deleting them on unpublish, *and* changed the image filename
+    to a note-prefixed form. Four booleans in a trench coat: the combinations
+    nothing handles are the ones a reader cannot see are impossible.
+
+    They are all the same question. In ``OWNED`` the directory holds this note's
+    attachments and nothing else, so it can be moved wholesale, deleted
+    wholesale, and its filenames need no prefix to stay unique. In ``BESIDE``
+    the directory is the note's own folder, shared with every other note and
+    with whatever else the user keeps there, so none of those three are safe.
+
+    A ``str`` mixin because the floor is Python 3.10, which has no ``StrEnum``.
+    """
+
+    OWNED = "owned"
+    BESIDE = "beside"
 
 
 @dataclass
@@ -130,6 +154,17 @@ class FileSystemDestination(Destination):
             The notes directory. The containment root, unless overridden.
         """
         return self.root_path
+
+    @property
+    def attachment_policy(self) -> AttachmentPolicy:
+        """Whether this destination owns the directory a note's images land in.
+
+        Returns:
+            :attr:`AttachmentPolicy.OWNED` unless overridden. A destination that
+            can put attachments in a directory it does not own says so here
+            once, rather than at each of the places that would be unsafe.
+        """
+        return AttachmentPolicy.OWNED
 
     @abc.abstractmethod
     def resolve_location(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> None:
