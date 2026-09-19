@@ -1804,7 +1804,10 @@ class SyncPipeline:
                     rm_name = p_info["rm_file_name"]
                     rm_data = zf.read(rm_name) if rm_name in names else b""
                     comp_bytes = render_composite_pdf_page(
-                        job.doc_file_path, p_info["pdf_page_index"], rm_data
+                        job.doc_file_path,
+                        p_info["pdf_page_index"],
+                        rm_data,
+                        screen=self.device.info.screen,
                     )
                     if comp_bytes:
                         self._save_page(job, p_info["page_num"], comp_bytes, "Saved annotated page")
@@ -1879,10 +1882,14 @@ class SyncPipeline:
         # stage tell "this page changed" from "the renderer changed".
         source_hashes = get_page_source_hashes(tmp_zip)
         job.source_hashes = source_hashes
-        # The background is chosen per run rather than baked into the build,
-        # so it belongs in the key rather than in the renderer fingerprint.
+        # The background and the panel size are chosen per run rather than
+        # baked into the build, so they belong in the key rather than in the
+        # renderer fingerprint. The panel matters because plugging in a
+        # different tablet changes the size a boundless page renders at, and a
+        # cache that ignored it would serve the other device's geometry.
+        screen = self.device.info.screen
         fingerprint = (
-            f"{renderer_fingerprint()}:{get_background_color()}"
+            f"{renderer_fingerprint()}:{get_background_color()}:{screen[0]}x{screen[1]}"
             if source_hashes and self.renders.enabled
             else ""
         )
@@ -1894,7 +1901,7 @@ class SyncPipeline:
 
             if png_bytes is None:
                 try:
-                    png_bytes = render_page_from_document_zip(tmp_zip, page)
+                    png_bytes = render_page_from_document_zip(tmp_zip, page, screen=screen)
                 except RenderError as e:
                     # Named rather than counted: a page that renders to nothing
                     # used to publish as an empty note with no error anywhere.

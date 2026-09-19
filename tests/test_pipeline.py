@@ -1140,10 +1140,12 @@ class TestRenderCaching:
         )
         return calls
 
-    def _pipeline(self, tmp_path, enabled=True):
+    def _pipeline(self, tmp_path, enabled=True, device=None):
         from living_ink.cache import RenderCache
+        from living_ink.devices import default_reading
 
         pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.device = device or default_reading()
         pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
         pipe.report = RunReport()
         pipe.saved = []
@@ -2016,3 +2018,120 @@ class TestThePreviewAndTheRunAgree:
 
         assert len(to_process) == 1
         assert set(needs_update) == {"doc-new", "doc-changed", "doc-settled"}
+
+
+class TestRenderGeometryFollowsTheDevice:
+    """A page with no content bounds is a sheet of *this* tablet, not of a rM2."""
+
+    def _reading(self, model):
+        """A live USB reading for one known model."""
+        from living_ink.devices import DEVICE_PROFILES, SOURCE_USB, DeviceReading
+        from living_ink.transport import DeviceInfo
+
+        profile = DEVICE_PROFILES[model]
+        return DeviceReading(
+            info=DeviceInfo(
+                model=profile.name, firmware="3.0", screen=profile.screen, color=profile.color
+            ),
+            source=SOURCE_USB,
+        )
+
+    def test_the_panel_is_taken_from_the_profile_table(self):
+        from living_ink.devices import DEVICE_PROFILES
+
+        assert DEVICE_PROFILES["reMarkable Paper Pro"].screen == (1620, 2160)
+        assert DEVICE_PROFILES["reMarkable 2"].screen == (1404, 1872)
+
+    def test_the_default_stands_in_when_no_device_is_known(self):
+        from living_ink.devices import DEFAULT_PROFILE, default_reading
+
+        assert default_reading().info.screen == DEFAULT_PROFILE.screen
+
+    def test_a_different_tablet_does_not_reuse_the_other_ones_renders(self, tmp_path, monkeypatch):
+        """The panel is in the cache key, so swapping tablets re-renders."""
+        from living_ink.cache import RenderCache
+
+        calls = []
+
+        def fake_render(zip_path, page, **kwargs):
+            calls.append(kwargs.get("screen"))
+            return b"png"
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", fake_render, raising=True
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
+        )
+        monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
+        monkeypatch.setattr(
+            "living_ink.extract.get_background_color", lambda: "white", raising=True
+        )
+
+        def pipe_for(model):
+            pipe = SyncPipeline.__new__(SyncPipeline)
+            pipe.device = self._reading(model)
+            pipe.renders = RenderCache(tmp_path / "renders", enabled=True)
+            pipe.report = RunReport()
+            pipe._save_page = lambda job, page, data, label="Saved": None
+            return pipe
+
+        job = DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+        )
+
+        pipe_for("reMarkable 2")._render_zip_pages(job, tmp_path / "doc.zip", 1)
+        pipe_for("reMarkable Paper Pro")._render_zip_pages(job, tmp_path / "doc.zip", 1)
+        # Same page, same renderer, same background — only the tablet differs.
+        pipe_for("reMarkable 2")._render_zip_pages(job, tmp_path / "doc.zip", 1)
+
+        assert calls == [(1404, 1872), (1620, 2160)]
+
+    def test_the_device_panel_reaches_the_renderer(self, tmp_path, monkeypatch):
+        """The screen is passed down, not just used for the cache key."""
+        from living_ink.cache import RenderCache
+
+        seen = {}
+
+        def fake_render(zip_path, page, **kwargs):
+            seen.update(kwargs)
+            return b"png"
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", fake_render, raising=True
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
+        )
+
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.device = self._reading("reMarkable Paper Pro")
+        pipe.renders = RenderCache(tmp_path / "renders", enabled=False)
+        pipe.report = RunReport()
+        pipe._save_page = lambda job, page, data, label="Saved": None
+
+        pipe._render_zip_pages(
+            DocumentJob(
+                item={},
+                notebook="Notes",
+                notebook_id="doc-1",
+                doc_type="notebook",
+                version="v1",
+                safe_name="Notes",
+                folder_path="",
+                display_title="Notes",
+                keep_temp=False,
+            ),
+            tmp_path / "doc.zip",
+            1,
+        )
+
+        assert seen["screen"] == (1620, 2160)
