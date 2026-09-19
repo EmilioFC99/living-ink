@@ -8,10 +8,17 @@ A fake implements the real contract, so changing that contract breaks the fake.
 A ``MagicMock`` would return a Mock for a newly added method and keep passing.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations.base import Destination, DestinationStatus
+from living_ink.destinations.markup import (
+    Block,
+    BlockKind,
+    Degradation,
+    MarkupWriter,
+    WriteContext,
+)
 from living_ink.settings import Settings
 
 
@@ -107,3 +114,55 @@ class FakeApiDestination(Destination):
         self.objects.remove(external_id)
         self.deleted.append(external_id)
         return PublishResult(ok=True, target=target, external_id=external_id, detail="Deleted.")
+
+
+class PlainTextWriter(MarkupWriter):
+    """A writer that can render exactly one kind, so everything else degrades.
+
+    The only thing in 1.0 that exercises :meth:`MarkupWriter.degrade`.
+    ``ObsidianWriter`` handles all eleven kinds natively and therefore never
+    calls it, which would leave the contract's most important promise — that a
+    writer can never lose content silently — unrun until the second writer
+    landed and discovered it did not work.
+
+    Deliberately minimal and deliberately lossy: the point is not to be a good
+    plain-text renderer, it is to be a writer that *cannot* represent most of
+    the vocabulary and must say so every time.
+    """
+
+    format: ClassVar[str] = "text"
+    handles: ClassVar[frozenset] = frozenset({BlockKind.PARAGRAPH})
+
+    #: What each unhandled kind turns into, and whether that loses anything.
+    #: A divider becomes a rule of dashes, which is a restyling; a table
+    #: flattened to its cell text is a real loss.
+    _FALLBACKS: ClassVar[Dict[BlockKind, Tuple[str, bool]]] = {
+        BlockKind.HEADING: ("a bare line", False),
+        BlockKind.DIVIDER: ("a row of dashes", False),
+        BlockKind.IMAGE: ("its caption", True),
+        BlockKind.TABLE: ("its cell text", True),
+    }
+
+    def paragraph(self, block: Block, ctx: WriteContext) -> str:
+        """Render the one kind this writer knows."""
+        return block.text
+
+    def degrade(self, block: Block, ctx: WriteContext) -> Tuple[object, Degradation]:
+        """Flatten anything that is not a paragraph, and say what was given up.
+
+        Args:
+            block: The block with no native representation.
+            ctx: The writer's context.
+
+        Returns:
+            The flattened text and the record of the loss.
+        """
+        rendered_as, lossy = self._FALLBACKS.get(block.kind, ("plain text", True))
+        text = block.text or " ".join(child.text for child in block.children)
+        if block.kind is BlockKind.DIVIDER:
+            text = "-" * 8
+        return text, Degradation(kind=block.kind, rendered_as=rendered_as, lossy=lossy)
+
+    def assemble(self, parts: Sequence[object], ctx: WriteContext) -> str:
+        """Join the rendered blocks with a blank line between them."""
+        return "\n\n".join(str(part) for part in parts if str(part).strip())
