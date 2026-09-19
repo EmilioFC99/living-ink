@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 
 # Prompt file — provider-agnostic instructions for text cleanup
 PROMPT_FILE = Path(__file__).parent / "cleanup_prompt.txt"
-# Fallback to legacy name if new file doesn't exist yet
-if not PROMPT_FILE.exists():
-    PROMPT_FILE = Path(__file__).parent / "openai_cleanup_prompt.txt"
 
 # Prompt file — instructions for vision-based OCR from images
 OCR_PROMPT_FILE = Path(__file__).parent / "ocr_prompt.txt"
