@@ -55,28 +55,59 @@ SSH_OPTIONS = [
 ]
 
 
+def _unused(base: Path, stem: str) -> Path:
+    """Return a path under ``base`` that nothing occupies yet.
+
+    The suffix is zero-padded so that the newest of a day's captures is also
+    the last in sort order, which is how the ``device_corpus`` fixture picks
+    one.
+
+    Args:
+        base: The directory to name a child of.
+        stem: The preferred name.
+
+    Returns:
+        ``base/stem``, or ``base/stem-02``, ``-03`` and so on if taken.
+    """
+    candidate = base / stem
+    counter = 2
+    while candidate.exists():
+        candidate = base / f"{stem}-{counter:02d}"
+        counter += 1
+    return candidate
+
+
 def next_capture_dir(base: Path) -> Path:
     """Pick a capture directory that does not exist yet.
 
     Never returns a path that is already occupied, so a capture can never
-    overwrite an earlier one. The suffix is zero-padded so that the newest
-    capture is also the last one in sort order, which is how the
-    ``device_corpus`` fixture finds it.
+    overwrite an earlier one.
 
     Args:
         base: The directory holding all captures.
 
     Returns:
-        A fresh ``device-YYYYMMDD`` path, suffixed ``-02``, ``-03`` and so on
-        if that name is taken.
+        A fresh ``device-YYYYMMDD`` path.
     """
-    stamp = date.today().strftime("%Y%m%d")
-    candidate = base / f"device-{stamp}"
-    counter = 2
-    while candidate.exists():
-        candidate = base / f"device-{stamp}-{counter:02d}"
-        counter += 1
-    return candidate
+    return _unused(base, f"device-{date.today().strftime('%Y%m%d')}")
+
+
+def staging_dir(destination: Path) -> Path:
+    """Pick the scratch directory a capture streams into before it is named.
+
+    Also never reuses an occupied path. That matters more than it looks:
+    because this script deletes nothing, a fixed staging name would mean the
+    leftovers of one failed capture block every retry until someone cleans up
+    by hand. A tablet that is merely asleep is the common case, so a retry has
+    to just work.
+
+    Args:
+        destination: The final capture directory.
+
+    Returns:
+        A fresh sibling ``.partial-<name>`` path.
+    """
+    return _unused(destination.parent, f".partial-{destination.name}")
 
 
 def capture(host: str, user: str, port: int, destination: Path) -> Path:
@@ -92,7 +123,8 @@ def capture(host: str, user: str, port: int, destination: Path) -> Path:
     asleep, the cable pulled — therefore never leaves a ``device-*`` directory
     behind for the test fixture to pick up as the newest capture and then find
     empty. The partial directory is left where it is rather than removed,
-    because this script deletes nothing.
+    because this script deletes nothing; :func:`staging_dir` is what keeps that
+    leftover from blocking the retry.
 
     Args:
         host: Tablet address.
@@ -106,7 +138,7 @@ def capture(host: str, user: str, port: int, destination: Path) -> Path:
     Raises:
         RuntimeError: If either side of the pipe fails.
     """
-    staging = destination.with_name(f".partial-{destination.name}")
+    staging = staging_dir(destination)
     staging.mkdir(parents=True)
 
     remote = subprocess.Popen(
