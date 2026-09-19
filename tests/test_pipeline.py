@@ -650,12 +650,23 @@ class TestConfigIsValidatedOnLoad:
         cfg.chmod(0o600)
         return cfg
 
-    def test_a_misspelled_section_is_reported_and_the_run_continues(self, tmp_path, capsys):
+    def test_a_misspelled_section_stops_the_run_with_a_suggestion(self, tmp_path):
         """The old behaviour was silence, then "0 notebooks published"."""
         cfg = self._write(tmp_path, "obsidain:\n  vault_path: /tmp/v\n")
-        loaded = pipeline.load_yaml_config(cfg)
-        assert loaded == {"obsidain": {"vault_path": "/tmp/v"}}
-        assert "did you mean obsidian?" in capsys.readouterr().out
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            pipeline.load_yaml_config(cfg)
+        assert "did you mean obsidian?" in str(excinfo.value)
+
+    def test_every_problem_is_listed_at_once(self, tmp_path):
+        """Reporting one per run means as many runs as the user made mistakes."""
+        cfg = self._write(
+            tmp_path, "obsidain:\n  vault_path: /tmp/v\nsync:\n  max_notebooks_per_run: many\n"
+        )
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            pipeline.load_yaml_config(cfg)
+        message = str(excinfo.value)
+        assert "2 problems" in message
+        assert "obsidain" in message and "max_notebooks_per_run" in message
 
     def test_an_unusable_value_stops_the_run(self, tmp_path):
         """Proceeding would silently substitute the default for what was asked."""

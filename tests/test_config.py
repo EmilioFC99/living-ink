@@ -6,6 +6,7 @@ from living_ink.config import (
     ERROR,
     SCHEMA_VERSION,
     WARNING,
+    ConfigProblem,
     split_problems,
     validate_config,
 )
@@ -33,28 +34,30 @@ class TestConfigSchema:
         )
         assert validate_config(yaml.safe_load(content)) == []
 
-    def test_a_misspelled_section_warns_with_a_suggestion(self):
-        """``obsidain:`` parses fine and is ignored — the whole reason for this."""
+    def test_a_misspelled_section_is_refused_with_a_suggestion(self):
+        """``obsidain:`` parses fine and does nothing — the whole reason for this."""
         problems = validate_config({"obsidain": {"vault_path": "/tmp/v"}})
-        assert [p.level for p in problems] == [WARNING]
+        assert [p.level for p in problems] == [ERROR]
         assert "did you mean obsidian?" in problems[0].describe()
 
-    def test_a_misspelled_key_warns_with_a_suggestion(self):
+    def test_a_misspelled_key_is_refused_with_a_suggestion(self):
         """A typo inside a real section is the same failure one level down."""
         problems = validate_config({"obsidian": {"vault-path": "/tmp/v"}})
-        assert [p.level for p in problems] == [WARNING]
+        assert [p.level for p in problems] == [ERROR]
         assert problems[0].path == "obsidian.vault-path"
         assert "vault_path" in problems[0].hint
 
-    def test_an_unrecognisable_key_warns_without_a_guess(self):
+    def test_an_unrecognisable_key_is_refused_without_a_guess(self):
         """Suggesting the nearest key for something unrelated would mislead."""
         problems = validate_config({"obsidian": {"zzzzzzz": 1}})
+        assert [p.level for p in problems] == [ERROR]
         assert problems[0].hint == ""
 
-    def test_an_unknown_key_is_never_an_error(self):
-        """An old config, or one holding a plugin's key, must keep working."""
+    def test_every_unknown_key_is_reported_not_just_the_first(self):
+        """One slip usually means several; fixing them one run at a time is misery."""
         problems = validate_config({"nonsense": {"a": 1}, "sync": {"whatever": 2}})
-        assert {p.level for p in problems} == {WARNING}
+        assert [p.path for p in problems] == ["nonsense", "sync.whatever"]
+        assert {p.level for p in problems} == {ERROR}
 
     def test_a_value_nothing_can_read_is_an_error(self):
         """Left as a warning this becomes a silent fallback to the default."""
@@ -95,9 +98,13 @@ class TestConfigSchema:
         assert validate_config({"destination": {"type": "obsidian", "path": "/tmp"}}) == []
 
     def test_a_registered_destination_section_is_known(self):
-        """Adding a destination must not make its own config look like a typo."""
+        """Adding a destination must not make its own config look like a typo.
+
+        The escape hatch that makes strictness affordable: a section this build
+        was not shipped with is legitimate exactly when something registered it.
+        """
         assert validate_config({"notion": {"token": "x"}}, extra_sections=("notion",)) == []
-        assert [p.level for p in validate_config({"notion": {"token": "x"}})] == [WARNING]
+        assert [p.level for p in validate_config({"notion": {"token": "x"}})] == [ERROR]
 
     def test_a_newer_schema_version_is_refused(self):
         """Running an old build over a new file would ignore half of it."""
@@ -110,8 +117,22 @@ class TestConfigSchema:
         assert validate_config({"sync": {"sync_pdfs": True}}) == []
 
     def test_split_problems_separates_by_level(self):
-        """Callers act on the two levels differently, so they arrive separated."""
+        """Callers act on the two levels differently, so they arrive separated.
+
+        Built by hand rather than through validate_config: nothing in the
+        schema warns today, because WARNING is held for deprecations rather
+        than spent on keys that cannot be read at all.
+        """
         errors, warnings = split_problems(
-            validate_config({"typo": 1, "sync": {"ocr_concurrency": "lots"}})
+            [
+                ConfigProblem(ERROR, "sync.ocr_concurrency", "expected whole number"),
+                ConfigProblem(WARNING, "destination", "deprecated"),
+            ]
         )
-        assert len(errors) == 1 and len(warnings) == 1
+        assert [p.path for p in errors] == ["sync.ocr_concurrency"]
+        assert [p.path for p in warnings] == ["destination"]
+
+    def test_nothing_in_the_schema_warns_today(self):
+        """A key that cannot be read is refused, never downgraded to a warning."""
+        problems = validate_config({"typo": 1, "obsidian": {"nope": 2, "enabled": "maybe"}})
+        assert problems and all(p.level == ERROR for p in problems)

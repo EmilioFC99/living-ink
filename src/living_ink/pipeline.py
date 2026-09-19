@@ -139,10 +139,11 @@ def ensure_runtime_dirs() -> None:
 def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
     """Validate a parsed config and act on what the schema found.
 
-    Warnings are printed and logged; the run continues, because an unknown key
-    is as likely to be a plugin's or a newer build's as it is a typo. Errors
-    stop the run: a value nothing can read would otherwise be replaced by a
-    default, and the user would get a result their config does not explain.
+    Errors stop the run, which is every unknown key and every unreadable value:
+    a config Living Ink cannot fully read is one it cannot obey, and syncing
+    anyway means doing something other than what the file asks and calling it
+    success. Warnings — deprecations, settings still honoured but on their way
+    out — are printed and logged, and the run continues.
 
     Sections belonging to registered destinations are passed through as known,
     so adding a destination does not make its own config section look like a
@@ -154,7 +155,10 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
             user knows which of the eight candidate paths actually won.
 
     Raises:
-        ConfigurationMissing: If any value is unusable as written.
+        ConfigurationMissing: If the config holds anything this build cannot
+            read, listing every such problem rather than only the first — one
+            slip usually means several, and fixing them one run at a time is
+            its own small misery.
     """
     errors, warnings = split_problems(
         validate_config(config, extra_sections=tuple(DESTINATION_REGISTRY))
@@ -168,9 +172,10 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
     if not errors:
         return
 
-    detail = "; ".join(problem.describe() for problem in errors)
+    noun = "problem" if len(errors) == 1 else "problems"
+    detail = "\n".join(f"  - {problem.describe()}" for problem in errors)
     raise ConfigurationMissing(
-        f"{cfg_path} has {len(errors)} unusable value(s): {detail}",
+        f"{cfg_path} has {len(errors)} {noun}:\n{detail}",
         hint=f"edit {cfg_path}",
     )
 

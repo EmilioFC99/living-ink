@@ -195,10 +195,11 @@ _FALSEY = {"0", "false", "no", "off"}
 #: What a ``config.yml`` may contain.
 #:
 #: A mapping means a section and lists the keys that section accepts; a marker
-#: means a bare top-level key. Anything not named here is a warning rather than
-#: an error: an old config, or one carrying keys for a destination this build
-#: was not shipped with, must keep working. Sections belonging to a registered
-#: destination are exempt from key checking entirely — see the
+#: means a bare top-level key. Anything not named here is rejected, so this
+#: table has to stay complete: a key some module reads but this forgets is a
+#: working config that no longer loads. Every legacy spelling still honoured
+#: elsewhere in the package therefore appears here too. Sections belonging to a
+#: registered destination are exempt from key checking entirely — see the
 #: ``extra_sections`` argument to :func:`validate_config`.
 CONFIG_SCHEMA: Dict[str, Union[str, Dict[str, str]]] = {
     "schema_version": WHOLE,
@@ -253,7 +254,14 @@ CONFIG_SCHEMA: Dict[str, Union[str, Dict[str, str]]] = {
     "destination": {},
 }
 
+#: The run cannot proceed: the config does not say what its author meant.
 ERROR = "error"
+#: The config is understood, but names something on its way out.
+#:
+#: Reserved for deprecations — a key that is still read and still works, but
+#: will stop being read in a future release. It is deliberately *not* what an
+#: unrecognised key gets: an unrecognised key is not understood at all, and
+#: there is no honest way to both warn about it and act on it.
 WARNING = "warning"
 
 
@@ -263,7 +271,7 @@ class ConfigProblem:
 
     Attributes:
         level: :data:`ERROR` (the run cannot proceed) or :data:`WARNING`
-            (the value is ignored but everything else still works).
+            (the setting still works but is on its way out).
         path: Dotted location of the offending key, e.g. ``obsidian.vault_path``.
         message: What is wrong, in one sentence.
         hint: The suggested fix, or an empty string when there is nothing
@@ -386,9 +394,7 @@ def _check_section(name: str, section: Any, allowed: Dict[str, str]) -> List[Con
         kind = allowed.get(str(key))
         if kind is None:
             problems.append(
-                ConfigProblem(
-                    WARNING, path, "unknown key, ignored", _did_you_mean(str(key), allowed)
-                )
+                ConfigProblem(ERROR, path, "unknown key", _did_you_mean(str(key), allowed))
             )
         elif value is not None and not _reads_as(value, kind):
             problems.append(ConfigProblem(ERROR, path, f"expected {kind}, found {value!r}"))
@@ -400,12 +406,20 @@ def validate_config(
 ) -> List[ConfigProblem]:
     """Check a parsed ``config.yml`` against :data:`CONFIG_SCHEMA`.
 
-    Two kinds of problem, treated differently on purpose. An unknown key is a
-    *warning*: it is almost always a typo, but it may equally be a setting a
-    newer build added or one a plugin reads, and refusing to run over it would
-    make every upgrade a breaking change. A value of the wrong type is an
-    *error*: nothing downstream can use it, so the run would proceed on the
-    default and report a result the config does not explain.
+    Anything the schema does not recognise is an error, the way ``gcloud``
+    rejects ``--quyery`` rather than running without it. A config is a
+    statement of intent, and a key Living Ink cannot read is intent it cannot
+    honour; continuing would mean doing something other than what the file
+    says, then reporting success. The sympathetic-looking alternative — warn
+    and carry on — is how ``obsidain:`` turns into "0 notebooks published" with
+    the reason ten thousand log lines back, which is the failure this exists to
+    end.
+
+    Being strict obliges the schema to be complete, so the two ways a config
+    can legitimately hold a key this build does not define both have an
+    explicit route through: ``extra_sections`` for a destination registered at
+    runtime, and ``schema_version`` for a file written by a newer Living Ink,
+    which is refused as a version rather than misread as a pile of typos.
 
     Args:
         config: Parsed config contents. ``None`` and ``{}`` are valid — every
@@ -415,8 +429,8 @@ def validate_config(
             registered at runtime. Their shape is still checked.
 
     Returns:
-        Every problem found, errors and warnings interleaved in file order.
-        An empty list means the config is usable as written.
+        Every problem found, in file order. An empty list means the config is
+        usable as written.
     """
     if not config:
         return []
@@ -452,9 +466,7 @@ def validate_config(
                 problems.extend(_check_section(key, value, {}))
             else:
                 problems.append(
-                    ConfigProblem(
-                        WARNING, key, "unknown section, ignored", _did_you_mean(key, known)
-                    )
+                    ConfigProblem(ERROR, key, "unknown section", _did_you_mean(key, known))
                 )
         elif isinstance(schema, dict):
             problems.extend(_check_section(key, value, schema))
