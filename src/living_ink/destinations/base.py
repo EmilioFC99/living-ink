@@ -6,6 +6,7 @@ write is retried — all of that is the destination's own business.
 """
 
 import abc
+import enum
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,28 @@ from living_ink.core.document import PublishResult
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class MergeUnit(str, enum.Enum):
+    """How much of an already-published note a destination has to rewrite.
+
+    A closed pair. A third member would have to name a granularity between
+    "one page" and "the whole thing" that some destination actually offers,
+    and the split is really between targets that expose stable in-content
+    anchors and targets that do not.
+
+    ``str`` mixin rather than ``enum.StrEnum``: this package supports Python
+    3.10, where the latter does not exist.
+    """
+
+    PAGE = "page"
+    """One page can be replaced and the rest of the note — including text the
+    user wrote themselves — left alone."""
+
+    DOCUMENT = "document"
+    """Only the whole note can be replaced. The default, because it is the
+    assumption that is never unsafe: a destination with nowhere to anchor a
+    reader-invisible page marker cannot promise anything narrower."""
 
 
 @dataclass(frozen=True)
@@ -111,12 +134,19 @@ class Destination(abc.ABC):
         display_name: What the destination is called in a log line, the run
             summary and an error message. Free to change; ``state_key`` is not.
             Defaults to ``config_key`` when the class does not set one.
+        merge_unit: The smallest thing this destination can rewrite without
+            disturbing its neighbours. It is what a preview promises the user
+            *before* the run — "pages 12 and 77 will be updated, anything you
+            wrote between them is kept" is a different promise from "the whole
+            note will be rewritten", and the pipeline reads this rather than
+            branching on a class name to decide which one to make.
     """
 
     config_key: ClassVar[str] = ""
     enabled_by_default: ClassVar[bool] = False
     state_key: ClassVar[str] = ""
     display_name: ClassVar[str] = ""
+    merge_unit: ClassVar[MergeUnit] = MergeUnit.DOCUMENT
 
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:

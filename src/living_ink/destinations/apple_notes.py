@@ -22,6 +22,7 @@ from living_ink.destinations.base import (
     Destination,
     DestinationStatus,
     DestinationUnavailable,
+    MergeUnit,
     register_destination,
 )
 from living_ink.settings import Settings
@@ -40,6 +41,10 @@ class AppleNotesDestination(Destination):
     # The class name, because that is what every existing state.db row says.
     state_key: ClassVar[str] = "AppleNotesDestination"
     display_name: ClassVar[str] = "Apple Notes"
+
+    # Inherent, not a limitation of this code: one osascript call sets one note
+    # body, and Apple Notes strips anything that could mark a page boundary.
+    merge_unit: ClassVar[MergeUnit] = MergeUnit.DOCUMENT
 
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> "Destination":

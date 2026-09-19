@@ -43,6 +43,7 @@ from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
     DestinationError,
+    MergeUnit,
     build_destinations,
 )
 from living_ink.devices import default_reading
@@ -2374,6 +2375,11 @@ class SyncPipeline:
         Nothing is sent and no processed-log entry is written, so the same
         notebook is still pending afterwards and a later real run picks it up.
 
+        Each destination also says how much of an existing note it would
+        rewrite. "The whole note is replaced" is the fact a user needs before
+        the run rather than after, and it is read from
+        :attr:`Destination.merge_unit` rather than inferred from a class name.
+
         Args:
             job: The processed job.
             targets: The destinations a real run would have published to.
@@ -2388,6 +2394,10 @@ class SyncPipeline:
             )
             where = f" under '{sub_folder}'" if sub_folder else ""
             log(f"   Would publish to {dest.describe()}{where}")
+            if dest.merge_unit is MergeUnit.DOCUMENT:
+                log("      Replaces the whole note, including anything you added to it.")
+            else:
+                log("      Replaces only the pages that changed; your own text is kept.")
         log(f"   Transcript: {job.clean_out_txt}")
         if job.imgs:
             log(f"   {len(job.imgs)} page image(s) in {WHITE_DIR}")

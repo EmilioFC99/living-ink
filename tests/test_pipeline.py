@@ -23,6 +23,7 @@ from living_ink.destinations import (
     Destination,
     DestinationError,
     DestinationStatus,
+    MergeUnit,
     ObsidianDestination,
 )
 from living_ink.pipeline import (
@@ -558,6 +559,26 @@ class TestDryRun:
 
         assert "Dry run" in out
         assert str(job.clean_out_txt) in out
+
+    def test_it_says_how_much_of_an_existing_note_would_be_rewritten(self, tmp_path, capsys):
+        """The whole-note promise is what a user needs before the run, not after."""
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert "Replaces the whole note" in capsys.readouterr().out
+
+    def test_a_page_level_destination_promises_something_different(self, tmp_path, capsys):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        with patch.object(type(dest), "merge_unit", MergeUnit.PAGE):
+            pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        out = capsys.readouterr().out
+        assert "only the pages that changed" in out
+        assert "whole note" not in out
 
     def test_a_normal_run_still_publishes(self, tmp_path):
         dest = MockDestination("MockDest")

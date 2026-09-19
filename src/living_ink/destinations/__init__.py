@@ -26,6 +26,7 @@ from living_ink.destinations.base import (
     DestinationError,
     DestinationStatus,
     DestinationUnavailable,
+    MergeUnit,
     register_destination,
 )
 from living_ink.destinations.obsidian import ObsidianDestination
@@ -40,6 +41,7 @@ __all__ = [
     "DestinationError",
     "DestinationStatus",
     "DestinationUnavailable",
+    "MergeUnit",
     "ObsidianDestination",
     "build_destinations",
     "register_destination",

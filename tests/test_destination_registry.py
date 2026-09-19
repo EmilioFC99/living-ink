@@ -11,6 +11,7 @@ from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
     DestinationStatus,
+    MergeUnit,
     ObsidianDestination,
     build_destinations,
     register_destination,
@@ -255,3 +256,23 @@ class TestTheStateKeyIsDeclared:
     def test_the_shipped_display_names_are_what_a_user_calls_them(self):
         assert AppleNotesDestination.display_name == "Apple Notes"
         assert ObsidianDestination.display_name == "Obsidian"
+
+
+class TestMergeUnit:
+    """How much of an existing note a destination rewrites is declared, not guessed."""
+
+    def test_both_shipped_destinations_replace_the_whole_note(self):
+        """Neither can anchor a page boundary a reader cannot see — yet."""
+        assert AppleNotesDestination.merge_unit is MergeUnit.DOCUMENT
+        assert ObsidianDestination.merge_unit is MergeUnit.DOCUMENT
+
+    def test_the_default_is_the_assumption_that_is_never_unsafe(self, clean_registry):
+        @register_destination("quiet")
+        class QuietDestination(AppleNotesDestination):
+            state_key = "QuietDestination"
+
+        assert QuietDestination.merge_unit is MergeUnit.DOCUMENT
+
+    def test_it_is_a_string_so_it_survives_json(self):
+        assert MergeUnit.PAGE == "page"
+        assert MergeUnit.DOCUMENT == "document"

@@ -19,6 +19,7 @@ from living_ink.destinations.base import (
     Destination,
     DestinationError,
     DestinationStatus,
+    MergeUnit,
     register_destination,
 )
 from living_ink.safeio import write_text_atomic
@@ -44,6 +45,12 @@ class ObsidianDestination(Destination):
     # The class name, because that is what every existing state.db row says.
     state_key: ClassVar[str] = "ObsidianDestination"
     display_name: ClassVar[str] = "Obsidian"
+
+    # A note is one managed region today, so a re-publish rewrites all of it.
+    # This becomes PAGE once the region is split into a marked block per source
+    # page; until then, claiming PAGE would promise the user something the
+    # write path does not honour.
+    merge_unit: ClassVar[MergeUnit] = MergeUnit.DOCUMENT
 
     # Characters forbidden in filenames across macOS, Windows, Linux, and Obsidian
     FORBIDDEN_CHARS_REGEX = re.compile(r'[/\\:*?"<>|#^\[\]]')
