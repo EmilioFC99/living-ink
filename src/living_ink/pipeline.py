@@ -1090,7 +1090,6 @@ class DocumentJob:
     transcribed_pages: int = 0
     cached_pages: int = 0
     failed_pages: int = 0
-    reused_transcript: bool = False
     published_to: List[str] = field(default_factory=list)
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
@@ -1573,10 +1572,9 @@ class SyncPipeline:
         try:
             self._acquire_pages(job, client)
             self._collect_tags(job, client)
-            if not self._reuse_transcript(job):
-                self._preprocess_images(job)
-                self._ocr_pages(job)
-                self._write_transcripts(job)
+            self._preprocess_images(job)
+            self._ocr_pages(job)
+            self._write_transcripts(job)
             success = self._publish(job, needs_update)
         except _StopProcessing as stop:
             if stop.reason:
@@ -1624,7 +1622,6 @@ class SyncPipeline:
                 transcribed=job.transcribed_pages,
                 cached=job.cached_pages,
                 pages_failed=job.failed_pages,
-                reused_transcript=job.reused_transcript,
                 destinations=list(job.published_to or job.would_publish_to),
                 reason=(
                     None
@@ -2286,42 +2283,6 @@ class SyncPipeline:
 
         log(f"  AI Vision returned empty for {path.name}")
         return ""
-
-    # ── Stages 4-6, skipped: an existing transcript ──────────────────────
-
-    def _reuse_transcript(self, job: DocumentJob) -> bool:
-        """Adopt a transcript from an earlier run instead of re-transcribing.
-
-        Transcribing is the only part of a sync that costs money, and it is
-        pure with respect to the page images: the same pages produce the same
-        text. A transcript newer than every page it was made from is therefore
-        still correct, and re-running OCR over it would be paying twice.
-
-        This only comes up when the transcript survived the last run — after
-        ``--dry-run`` or ``--keep-temp``, or when a run got as far as
-        transcribing and then failed to publish. The usual auto-purge removes
-        transcripts, so an ordinary repeat sync still transcribes afresh.
-
-        Args:
-            job: The job about to be transcribed; ``clean_out_txt`` is set when
-                an existing transcript is adopted.
-
-        Returns:
-            True if a current transcript was adopted and OCR can be skipped.
-        """
-        existing = OCR_DIR / f"{job.safe_name}_clean.txt"
-        if not job.imgs or not existing.exists() or not existing.stat().st_size:
-            return False
-
-        transcribed_at = existing.stat().st_mtime
-        if any(p.stat().st_mtime > transcribed_at for p in job.imgs):
-            log(f"Pages for {job.notebook} are newer than their transcript; transcribing again.")
-            return False
-
-        log(f"Reusing the existing transcript for {job.notebook}: {existing}")
-        job.clean_out_txt = existing
-        job.reused_transcript = True
-        return True
 
     # ── Stage 6: transcripts ─────────────────────────────────────────────
 
