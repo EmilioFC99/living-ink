@@ -222,7 +222,7 @@ def test_sync_pipeline_filter_pending_documents_limit():
 
 def test_sync_pipeline_run_no_notebooks():
     """SyncPipeline.run returns True gracefully when no items need updating."""
-    pipeline = SyncPipeline(destinations=[])
+    pipeline = SyncPipeline(destinations=[MockDestination()])
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
@@ -234,7 +234,9 @@ def test_sync_pipeline_run_no_notebooks():
 
 def test_sync_pipeline_run_targeted_not_found():
     """SyncPipeline.run returns False when a targeted notebook is not in the library."""
-    pipeline = SyncPipeline(SyncOptions(notebook="NonExistentBook"), destinations=[])
+    pipeline = SyncPipeline(
+        SyncOptions(notebook="NonExistentBook"), destinations=[MockDestination()]
+    )
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
@@ -253,7 +255,7 @@ def test_sync_pipeline_run_targeted_user_cancelled():
         "hash": "h1",
     }
     id_map = {"doc-123": doc_item}
-    pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[])
+    pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect"):
