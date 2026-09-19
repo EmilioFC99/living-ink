@@ -29,6 +29,7 @@ from living_ink.clean import (
 )
 from living_ink.config import (
     ConfigurationMissing,
+    apply_status,
     find_repo_root,
     get_config_path,
     get_data_dir,
@@ -302,7 +303,12 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     except ImportError:
         pass
 
-    return yaml_config
+    # Last, so that everything above sees the file as the user wrote it and
+    # everything downstream sees only spellings this build still knows: dead
+    # sections are gone and deprecated keys have been copied onto their
+    # replacements. The AI provider is configured above from the raw dict
+    # because it handles the legacy ``openai:`` section itself.
+    return apply_status(yaml_config)
 
 
 _default_config: Optional[Dict[str, Any]] = None

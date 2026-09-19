@@ -7,6 +7,7 @@ from living_ink.config import (
     SCHEMA_VERSION,
     WARNING,
     ConfigProblem,
+    apply_status,
     split_problems,
     validate_config,
 )
@@ -88,23 +89,14 @@ class TestConfigSchema:
         assert validate_config({"sync": None}) == []
 
     def test_an_empty_value_is_valid(self):
-        """An older wizard wrote ``credentials_path:`` blank; not a type error."""
-        assert validate_config({"google_vision": {"credentials_path": None}}) == []
-
-    def test_a_section_this_build_no_longer_reads_still_loads(self):
-        """The second OCR backend is gone; the configs naming it are not.
-
-        Every config the wizard has ever written carries ``google_vision:``.
-        Dropping it from the schema the same day the code stopped reading it
-        would turn "this setting does nothing now" into "your config does not
-        load" for every existing install. It keeps validating until the
-        deprecation mechanism can say so properly.
-        """
-        assert validate_config({"google_vision": {"credentials_path": "/tmp/creds.json"}}) == []
+        """A key written with nothing after it is unset, not mistyped."""
+        assert validate_config({"obsidian": {"vault_path": None}}) == []
 
     def test_the_legacy_destination_block_is_not_policed(self):
         """Its keys belong to whichever destination it names, not to this schema."""
-        assert validate_config({"destination": {"type": "obsidian", "path": "/tmp"}}) == []
+        problems = validate_config({"destination": {"type": "obsidian", "path": "/tmp"}})
+        assert [p.path for p in problems] == ["destination"]
+        assert problems[0].level == WARNING
 
     def test_a_registered_destination_section_is_known(self):
         """Adding a destination must not make its own config look like a typo.
@@ -126,12 +118,7 @@ class TestConfigSchema:
         assert validate_config({"sync": {"sync_pdfs": True}}) == []
 
     def test_split_problems_separates_by_level(self):
-        """Callers act on the two levels differently, so they arrive separated.
-
-        Built by hand rather than through validate_config: nothing in the
-        schema warns today, because WARNING is held for deprecations rather
-        than spent on keys that cannot be read at all.
-        """
+        """Callers act on the two levels differently, so they arrive separated."""
         errors, warnings = split_problems(
             [
                 ConfigProblem(ERROR, "sync.ocr_concurrency", "expected whole number"),
@@ -141,7 +128,113 @@ class TestConfigSchema:
         assert [p.path for p in errors] == ["sync.ocr_concurrency"]
         assert [p.path for p in warnings] == ["destination"]
 
-    def test_nothing_in_the_schema_warns_today(self):
-        """A key that cannot be read is refused, never downgraded to a warning."""
+    def test_an_unreadable_key_is_never_downgraded_to_a_warning(self):
+        """WARNING is for a setting on its way out, not one that cannot be read."""
         problems = validate_config({"typo": 1, "obsidian": {"nope": 2, "enabled": "maybe"}})
         assert problems and all(p.level == ERROR for p in problems)
+
+
+class TestStatus:
+    """A setting can be retired without the next run refusing to start.
+
+    An unknown section is a hard ERROR, so deleting one from the schema on the
+    day its code is deleted breaks every config that names it. ``status`` is
+    the alternative: the schema keeps the entry, says what happened to it, and
+    the loader acts on that.
+    """
+
+    def test_a_removed_section_warns_instead_of_aborting(self):
+        """The whole point: a dead section is a sentence, not a stack trace."""
+        problems = validate_config({"google_vision": {"credentials_path": "/tmp/creds.json"}})
+        assert [p.level for p in problems] == [WARNING]
+        assert "no longer used" in problems[0].message
+        assert "ai:" in problems[0].hint
+
+    def test_a_removed_section_is_dropped_before_anything_reads_it(self):
+        """Downstream code must not have to remember that dead keys can appear."""
+        loaded = apply_status({"google_vision": {"credentials_path": "/x"}, "sync": {}})
+        assert "google_vision" not in loaded
+        assert "sync" in loaded
+
+    def test_a_key_inside_a_removed_section_is_not_policed(self):
+        """The section is already reported; naming its keys adds noise.
+
+        It must also not be an ERROR. A stray key in a section that is about to
+        be discarded has no business stopping a run.
+        """
+        problems = validate_config({"google_vision": {"anything_at_all": 1}})
+        assert [p.level for p in problems] == [WARNING]
+        assert problems[0].path == "google_vision"
+
+    def test_a_deprecated_section_names_its_replacement(self):
+        """ "Deprecated" without "use this instead" is a dead end."""
+        problems = validate_config({"openai": {"api_key": "sk-x"}})
+        assert {p.level for p in problems} == {WARNING}
+        section = next(p for p in problems if p.path == "openai")
+        assert section.hint == "use ai"
+
+    def test_a_deprecated_key_names_its_replacement(self):
+        """Status lives on keys too, not only on whole sections."""
+        problems = validate_config({"use_ssh": True})
+        assert [p.level for p in problems] == [WARNING]
+        assert problems[0].path == "use_ssh"
+        assert problems[0].hint == "use remarkable.use_ssh"
+
+    def test_a_deprecated_key_is_read_under_its_new_name(self):
+        """Mapped in memory, so nothing downstream learns the old spelling."""
+        loaded = apply_status({"use_ssh": False})
+        assert loaded["remarkable"]["use_ssh"] is False
+
+    def test_the_current_spelling_wins_when_a_config_names_both(self):
+        """A file naming both is stating a preference, and it is the new one."""
+        loaded = apply_status({"use_ssh": False, "remarkable": {"use_ssh": True}})
+        assert loaded["remarkable"]["use_ssh"] is True
+
+    def test_a_deprecated_key_is_left_where_the_user_wrote_it(self):
+        """No config file is ever rewritten, and the in-memory copy says so.
+
+        Living Ink migrates nothing: rewriting ``config.yml`` in place would
+        lose the comments and the ordering, and a ``.bak`` is no mitigation for
+        that. The old key is copied forward, never moved.
+        """
+        loaded = apply_status({"use_ssh": False})
+        assert loaded["use_ssh"] is False
+
+    def test_the_original_config_is_not_modified(self):
+        """Callers hold on to what they parsed; this returns a new dict."""
+        original = {"google_vision": {"credentials_path": "/x"}, "use_ssh": True}
+        apply_status(original)
+        assert original == {"google_vision": {"credentials_path": "/x"}, "use_ssh": True}
+
+    def test_a_deprecated_value_that_cannot_be_read_is_still_an_error(self):
+        """Renaming a key the run cannot parse anyway would waste the trip."""
+        problems = validate_config({"use_ssh": "maybe"})
+        assert [p.level for p in problems] == [ERROR]
+
+    def test_an_unknown_section_is_still_refused(self):
+        """Status is for what this build retired, not for what it never had."""
+        assert [p.level for p in validate_config({"nonsense": {}})] == [ERROR]
+
+    def test_a_config_using_only_current_spellings_is_silent(self):
+        """The mechanism must cost nothing to a config that needs none of it."""
+        assert (
+            validate_config({"ai": {"provider": "gemini"}, "remarkable": {"use_ssh": True}}) == []
+        )
+
+    def test_a_0_2_0_config_loads_with_warnings_and_no_errors(self):
+        """The one stale config in existence: four sections, zero aborts."""
+        stale = {
+            "openai": {"api_key": "sk-x", "model": "gpt-4o-mini"},
+            "google_vision": {"credentials_path": "/tmp/creds.json"},
+            "destination": {"type": "obsidian"},
+            "use_ssh": True,
+            "obsidian": {"vault_path": "/tmp/vault"},
+        }
+        errors, warnings = split_problems(validate_config(stale))
+        assert errors == []
+        assert warnings
+        loaded = apply_status(stale)
+        assert "google_vision" not in loaded
+        assert loaded["ai"]["api_key"] == "sk-x"
+        assert loaded["ai"]["model"] == "gpt-4o-mini"
+        assert loaded["remarkable"]["use_ssh"] is True
