@@ -22,9 +22,6 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# reMarkable tablet screen dimensions (in pixels) - used as fallback
-REMARKABLE_WIDTH = 1404
-REMARKABLE_HEIGHT = 1872
 
 # Standard reMarkable background color (light cream/gray)
 # Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
@@ -409,6 +406,7 @@ def render_composite_pdf_page(
     page_index: int,
     rm_bytes: bytes,
     dpi: int = 150,
+    screen: Optional[Tuple[int, int]] = None,
 ) -> Optional[bytes]:
     """Render a PDF page with handwritten .rm strokes composited on top.
 
@@ -417,6 +415,8 @@ def render_composite_pdf_page(
         page_index: 0-indexed page number in the PDF.
         rm_bytes: Raw bytes of the .rm pen stroke file.
         dpi: Resolution for rendering the PDF page.
+        screen: Panel size of the tablet that drew the annotations. See
+            :func:`render_rm_file_to_png`.
 
     Returns:
         PNG image bytes of the composite page, or None if rendering failed.
@@ -440,7 +440,7 @@ def render_composite_pdf_page(
             tmp_rm = Path(f.name)
 
         try:
-            rm_png = render_rm_file_to_png(tmp_rm)
+            rm_png = render_rm_file_to_png(tmp_rm, screen=screen)
         except RenderError as e:
             # The PDF page underneath is still worth having, and still worth
             # transcribing. Losing the annotation layer is not losing the page.
@@ -598,8 +598,45 @@ def _patch_rmc() -> None:
         logger.debug("Could not patch rmc", exc_info=True)
 
 
+def output_size(
+    bounds: Optional[Tuple[float, float, float, float]],
+    screen: Optional[Tuple[int, int]] = None,
+) -> Tuple[int, int]:
+    """Decide how large a rendered page should be, in pixels.
+
+    Content bounds win when the SVG has them: a page holding two words should
+    not be rasterised as a whole empty sheet. When it has none, the page is
+    sized as a sheet of the tablet that drew it — which is why this takes a
+    panel rather than reading a module constant. A Paper Pro page is
+    1620×2160, and rendering it at reMarkable 2 size is how a page comes back
+    squashed.
+
+    Args:
+        bounds: ``(x, y, width, height)`` of the ink in the SVG, or None when
+            the SVG declares none.
+        screen: Panel size of the device that drew the page. Defaults to
+            :data:`~living_ink.devices.DEFAULT_PROFILE`'s panel, which is named
+            rather than assumed.
+
+    Returns:
+        ``(width, height)`` in pixels.
+    """
+    if bounds:
+        _, _, content_width, content_height = bounds
+        return (
+            int(content_width) + 2 * CONTENT_MARGIN,
+            int(content_height) + 2 * CONTENT_MARGIN,
+        )
+
+    from living_ink.devices import DEFAULT_PROFILE
+
+    return screen or DEFAULT_PROFILE.screen
+
+
 def render_rm_file_to_png(
-    rm_file_path: Path, background_color: Optional[str] = None
+    rm_file_path: Path,
+    background_color: Optional[str] = None,
+    screen: Optional[Tuple[int, int]] = None,
 ) -> Optional[bytes]:
     """
     Render a .rm file to PNG image bytes.
@@ -612,6 +649,11 @@ def render_rm_file_to_png(
         background_color: Background color (e.g., "#FFFFFF", "transparent", None).
                          None means transparent. Use REMARKABLE_BACKGROUND_COLOR
                          for the standard reMarkable paper color.
+        screen: Panel size of the tablet that drew the page, as
+            ``(width, height)``. Only used when the SVG carries no content
+            bounds to size the output from — a blank-ish page is then a whole
+            sheet of *that* device rather than of a reMarkable 2. Defaults to
+            :data:`~living_ink.devices.DEFAULT_PROFILE`'s panel.
 
     Returns:
         PNG image bytes, or None if rendering failed
@@ -678,16 +720,9 @@ def render_rm_file_to_png(
                 )
 
         # Get content bounds from SVG
-        bounds = _get_svg_content_bounds(tmp_svg_path)
-        if bounds:
-            # Use content bounds with margin
-            _, _, content_width, content_height = bounds
-            output_width = int(content_width) + 2 * CONTENT_MARGIN
-            output_height = int(content_height) + 2 * CONTENT_MARGIN
-        else:
-            # Fallback to standard reMarkable dimensions
-            output_width = REMARKABLE_WIDTH
-            output_height = REMARKABLE_HEIGHT
+        output_width, output_height = output_size(
+            _get_svg_content_bounds(tmp_svg_path), screen=screen
+        )
 
         # Convert SVG to PNG using PyMuPDF (fitz) to avoid system dependencies like cairo
         try:
@@ -853,7 +888,10 @@ def _open_document_zip(zip_path: Path) -> Iterator[Path]:
 
 
 def render_page_from_document_zip(
-    zip_path: Path, page: int = 1, background_color: Optional[str] = None
+    zip_path: Path,
+    page: int = 1,
+    background_color: Optional[str] = None,
+    screen: Optional[Tuple[int, int]] = None,
 ) -> Optional[bytes]:
     """
     Render a specific page from a reMarkable document zip to PNG.
@@ -863,6 +901,8 @@ def render_page_from_document_zip(
         page: Page number (1-indexed)
         background_color: Background color (e.g., "#FFFFFF", None for transparent).
                          Use REMARKABLE_BACKGROUND_COLOR for the standard paper color.
+        screen: Panel size of the tablet that drew the page. See
+            :func:`render_rm_file_to_png`.
 
     Returns:
         PNG image bytes, or None if rendering failed or page doesn't exist
@@ -876,7 +916,9 @@ def render_page_from_document_zip(
 
         # Render the requested page
         target_rm_file = rm_files[page - 1]
-        return render_rm_file_to_png(target_rm_file, background_color=background_color)
+        return render_rm_file_to_png(
+            target_rm_file, background_color=background_color, screen=screen
+        )
 
 
 def get_page_source_hashes(zip_path: Path) -> List[str]:

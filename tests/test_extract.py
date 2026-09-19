@@ -425,3 +425,41 @@ class TestQuietMupdf:
                     pass
 
         assert any("MuPDF said" in record.message for record in caplog.records)
+
+
+class TestOutputSize:
+    """How large a page renders is a decision, not a constant."""
+
+    def test_content_bounds_win_and_get_a_margin(self):
+        from living_ink.extract import CONTENT_MARGIN, output_size
+
+        assert output_size((0, 0, 200, 300)) == (
+            200 + 2 * CONTENT_MARGIN,
+            300 + 2 * CONTENT_MARGIN,
+        )
+
+    def test_a_page_with_no_bounds_is_a_sheet_of_the_device(self):
+        from living_ink.extract import output_size
+
+        assert output_size(None, screen=(1620, 2160)) == (1620, 2160)
+
+    def test_an_unknown_device_falls_back_to_the_named_default(self):
+        """Not a bare constant: the default is a profile with a name on it."""
+        from living_ink.devices import DEFAULT_PROFILE
+        from living_ink.extract import output_size
+
+        assert output_size(None) == DEFAULT_PROFILE.screen
+        assert DEFAULT_PROFILE.name == "reMarkable 2"
+
+    def test_the_device_only_matters_when_there_are_no_bounds(self):
+        from living_ink.extract import output_size
+
+        bounded = output_size((0, 0, 100, 100), screen=(1620, 2160))
+        assert bounded == output_size((0, 0, 100, 100), screen=(1404, 1872))
+
+    def test_extract_no_longer_hardcodes_a_panel(self):
+        """The geometry lives in devices.py; a stray constant would drift."""
+        from living_ink import extract
+
+        assert not hasattr(extract, "REMARKABLE_WIDTH")
+        assert not hasattr(extract, "REMARKABLE_HEIGHT")
