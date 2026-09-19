@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from living_ink import safeio
+from living_ink.config import SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -593,6 +594,10 @@ def generate_config_yaml(
         or colons round-trip correctly.
     """
     sections: List[Tuple[str, Dict[str, Any]]] = [
+        (
+            "Config format version — do not edit",
+            {"schema_version": SCHEMA_VERSION},
+        ),
         (
             "1. AI Handwriting OCR & Text Cleanup",
             {
