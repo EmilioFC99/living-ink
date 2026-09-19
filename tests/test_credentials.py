@@ -54,6 +54,19 @@ class TestWhereCredentialsLive:
 
         assert (tmp_path / "elsewhere" / "credentials" / credentials.CLOUD_TOKEN).exists()
 
+    def test_the_default_directory_stays_inside_the_sandbox(self, isolated_home):
+        """A guard on the suite itself, not on the code.
+
+        ``get_config_path()`` prefers ``$XDG_CONFIG_HOME`` over the home
+        directory. A Linux session sets it and macOS does not, so redirecting
+        only ``$HOME`` left every unqualified credential write landing in one
+        real shared directory on CI — tests read each other's tokens, and a
+        developer's own store was one ``unset`` away from being overwritten.
+        """
+        credentials.write_secret(credentials.CLOUD_TOKEN, "tok")
+
+        assert credentials_dir().is_relative_to(isolated_home)
+
 
 class TestRoundTrip:
     """Writing and reading one secret."""

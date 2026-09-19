@@ -62,6 +62,15 @@ def isolated_home(tmp_path_factory, monkeypatch):
     tests that walk ``tmp_path`` (vault scans, stray-temp-file checks) would
     otherwise find it and fail.
 
+    ``$HOME`` alone is not enough. ``get_config_path()`` prefers
+    ``$XDG_CONFIG_HOME``, which a Linux session sets and macOS does not — so on
+    CI the credentials directory resolved to a real, *shared* path that the
+    redirected home never covered. Every test that stored a secret then wrote
+    it there, and the next test read the previous test's token. The XDG
+    variables are redirected here so the two platforms isolate identically.
+    The same goes for ``LIVING_INK_CONFIG``: a developer with one exported
+    would otherwise have the suite read their own profile.
+
     Args:
         tmp_path_factory: Pytest's temporary directory factory.
         monkeypatch: Pytest's environment patcher.
@@ -71,6 +80,10 @@ def isolated_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.delenv("LIVING_INK_CONFIG", raising=False)
+    monkeypatch.delenv("LIVING_INK_CONFIG_DIR", raising=False)
     yield home
 
 
