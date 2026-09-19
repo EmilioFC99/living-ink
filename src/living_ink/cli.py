@@ -517,6 +517,11 @@ class StatusReport:
             "obsidian": {
                 "enabled": self.obsidian_enabled,
                 "vault_path": self.obsidian_vault,
+                # The console renderer builds the target path from this
+                # (see _render_console), so omitting it here made the two
+                # renderers describe different things — the exact divergence
+                # this dataclass was introduced to remove.
+                "root_folder": self.obsidian_root_folder,
                 "valid": self.obsidian_valid,
             },
             "apple_notes": {
