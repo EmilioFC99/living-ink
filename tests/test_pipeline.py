@@ -40,6 +40,9 @@ from living_ink.settings import Settings
 class MockDestination(Destination):
     """Mock destination for testing."""
 
+    state_key = "MockDestination"
+    display_name = "MockDestination"
+
     def __init__(self, name: str = "Mock"):
         self.name = name
         self.published = []

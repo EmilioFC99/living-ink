@@ -12,7 +12,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from PIL import Image
 
@@ -34,6 +34,10 @@ class AppleNotesDestination(Destination):
     Attributes:
         folder_name: The root folder in Apple Notes where notes are stored.
     """
+
+    # The class name, because that is what every existing state.db row says.
+    state_key: ClassVar[str] = "AppleNotesDestination"
+    display_name: ClassVar[str] = "Apple Notes"
 
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> "Destination":

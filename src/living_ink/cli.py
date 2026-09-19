@@ -880,7 +880,7 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
             }
         )
 
-    names = [type(dest).__name__ for dest in get_default_destinations()]
+    names = [dest.state_key for dest in get_default_destinations()]
     rows, orphans = get_state_store().compare_with_listing(listing, names)
     return rows, orphans, device
 

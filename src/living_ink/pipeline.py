@@ -1424,7 +1424,7 @@ class SyncPipeline:
             Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
         """
         active_dests = self.destinations or get_default_destinations()
-        by_name = {type(dest).__name__: dest for dest in active_dests}
+        by_name = {dest.state_key: dest for dest in active_dests}
 
         listing = []
         for item in notebooks:
@@ -2301,12 +2301,12 @@ class SyncPipeline:
                 result = self._publish_to(dest, job, clean_text)
                 self._report_destination_warnings(dest, result)
                 if result.ok:
-                    job.published_to.append(type(dest).__name__)
+                    job.published_to.append(dest.state_key)
                     if result.detail:
                         log(f"   {result.detail}")
                     # Update state for THIS destination immediately.
                     add_to_processed_log(
-                        type(dest).__name__,
+                        dest.state_key,
                         job.notebook_id,
                         job.version,
                         run_id=self.run_id,
@@ -2315,7 +2315,7 @@ class SyncPipeline:
                     )
                 else:
                     all_success = False
-                    log(f"⚠️ Failed to publish to {type(dest).__name__}")
+                    log(f"⚠️ Failed to publish to {dest.display_name}")
 
             return all_success
         except Exception as e:
@@ -2339,7 +2339,7 @@ class SyncPipeline:
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
-        job.would_publish_to = [type(dest).__name__ for dest in targets]
+        job.would_publish_to = [dest.state_key for dest in targets]
         for dest in targets:
             sub_folder = (
                 job.top_level_subfolder()
@@ -2368,7 +2368,7 @@ class SyncPipeline:
         if self.report is None:
             return
         for warning in result.warnings:
-            self.report.warn(f"{type(dest).__name__}: {warning}")
+            self.report.warn(f"{dest.display_name}: {warning}")
 
     def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> PublishResult:
         """Publish one note to one destination.
@@ -2387,7 +2387,7 @@ class SyncPipeline:
             What the destination reported, or a refusal carrying the reason it
             could not be asked.
         """
-        dest_name = type(dest).__name__
+        dest_name = dest.display_name
         log(f"Publishing to {dest_name}...")
 
         # Apple Notes only supports 1 level of sub-folder under rootFolder.
@@ -2509,9 +2509,9 @@ class SyncPipeline:
 
         Args:
             doc_id: reMarkable document id.
-            rows: Its publication rows, keyed by destination class name.
+            rows: Its publication rows, keyed by destination state key.
         """
-        by_name = {type(d).__name__: d for d in (self.destinations or get_default_destinations())}
+        by_name = {d.state_key: d for d in (self.destinations or get_default_destinations())}
         label = self._orphan_label(doc_id)
 
         for dest_name, row in rows.items():
@@ -2526,11 +2526,11 @@ class SyncPipeline:
                     doc_id=doc_id,
                 )
             except DestinationError as e:
-                log(f"  ⚠️ {dest_name}: {e}")
+                log(f"  ⚠️ {dest.display_name}: {e}")
                 continue
             self._report_destination_warnings(dest, result)
             verb = "deleted from" if result.ok else "left alone in"
-            log(f"  {label}: {verb} {dest_name}.")
+            log(f"  {label}: {verb} {dest.display_name}.")
 
         try:
             get_state_store().forget(doc_id)

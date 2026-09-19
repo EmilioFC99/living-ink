@@ -47,11 +47,25 @@ def register_destination(config_key: str, enabled_by_default: bool = False):
 
     Returns:
         The class decorator.
+
+    Raises:
+        TypeError: The class did not declare its own :attr:`Destination.state_key`.
+            Inheriting one would make two destinations share a row in the
+            publications table; forgetting one entirely would go unnoticed until
+            somebody renamed the class.
     """
 
     def decorator(cls: Type["Destination"]) -> Type["Destination"]:
+        if "state_key" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} must declare its own state_key; it is the name its "
+                "sync state is filed under and cannot be inherited or inferred."
+            )
         cls.config_key = config_key
         cls.enabled_by_default = enabled_by_default
+        # Read from __dict__, not the attribute: a subclass that says nothing
+        # should be named after its own section, not after its parent.
+        cls.display_name = cls.__dict__.get("display_name") or config_key
         DESTINATION_REGISTRY[config_key] = cls
         return cls
 
@@ -72,10 +86,20 @@ class Destination(abc.ABC):
             :func:`register_destination`.
         enabled_by_default: Whether the destination is active when its section
             says nothing about ``enabled``.
+        state_key: The name this destination's publications are filed under in
+            ``state.db``. Declared, never derived: it used to be the class name,
+            so renaming the class silently made every document look new — every
+            note rewritten, every ``first_published`` date restarted. Changing
+            this string is a state migration and nothing less.
+        display_name: What the destination is called in a log line, the run
+            summary and an error message. Free to change; ``state_key`` is not.
+            Defaults to ``config_key`` when the class does not set one.
     """
 
     config_key: ClassVar[str] = ""
     enabled_by_default: ClassVar[bool] = False
+    state_key: ClassVar[str] = ""
+    display_name: ClassVar[str] = ""
 
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
@@ -98,7 +122,7 @@ class Destination(abc.ABC):
         Returns:
             The destination's name and the setting a user would want confirmed.
         """
-        return self.config_key or type(self).__name__
+        return self.display_name or self.config_key or type(self).__name__
 
     @abc.abstractmethod
     def publish(
@@ -181,6 +205,6 @@ class Destination(abc.ABC):
         Raises:
             DestinationError: Removal failed for an expected reason.
         """
-        name = type(self).__name__
+        name = self.display_name or type(self).__name__
         logger.info("%s does not support removing notes.", name)
         return PublishResult(ok=False, detail=f"{name} cannot remove notes.")

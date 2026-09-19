@@ -10,7 +10,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from living_ink import notemerge
 from living_ink.core.document import PublishResult
@@ -38,6 +38,10 @@ class ObsidianDestination(Destination):
         root_folder: Optional folder prefix inside the vault.
         mirror_folders: Whether to replicate reMarkable folder hierarchy.
     """
+
+    # The class name, because that is what every existing state.db row says.
+    state_key: ClassVar[str] = "ObsidianDestination"
+    display_name: ClassVar[str] = "Obsidian"
 
     # Characters forbidden in filenames across macOS, Windows, Linux, and Obsidian
     FORBIDDEN_CHARS_REGEX = re.compile(r'[/\\:*?"<>|#^\[\]]')

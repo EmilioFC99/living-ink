@@ -165,6 +165,8 @@ class TestAddingADestination:
     def test_registered_subclass_is_built_from_its_own_section(self, clean_registry):
         @register_destination("notion")
         class NotionDestination(Destination):
+            state_key = "NotionDestination"
+
             def __init__(self, database_id: str) -> None:
                 self.database_id = database_id
 
@@ -197,14 +199,54 @@ class TestAddingADestination:
     def test_registered_subclass_is_off_unless_enabled(self, clean_registry):
         @register_destination("ghost")
         class GhostDestination(AppleNotesDestination):
-            pass
+            state_key = "GhostDestination"
 
         assert [type(d) for d in build({"apple_notes": {"enabled": False}})] == []
 
     def test_default_describe_falls_back_to_the_config_key(self, clean_registry):
         @register_destination("plain", enabled_by_default=True)
         class PlainDestination(AppleNotesDestination):
-            pass
+            state_key = "PlainDestination"
 
         assert PlainDestination(folder_name="x").config_key == "plain"
         assert Destination.describe(PlainDestination(folder_name="x")) == "plain"
+
+
+class TestTheStateKeyIsDeclared:
+    """Sync state is filed under a name the class states, never under its own.
+
+    It used to be ``type(dest).__name__``, which made renaming a class a silent
+    data migration: every document looks unpublished, every note is rewritten,
+    and every ``first_published`` date restarts at today.
+    """
+
+    def test_the_shipped_keys_are_the_names_already_in_state_db(self):
+        assert AppleNotesDestination.state_key == "AppleNotesDestination"
+        assert ObsidianDestination.state_key == "ObsidianDestination"
+
+    def test_a_destination_without_one_cannot_register(self, clean_registry):
+        with pytest.raises(TypeError, match="state_key"):
+
+            @register_destination("keyless")
+            class KeylessDestination(Destination):
+                def publish(self, *args, **kwargs):
+                    return None
+
+    def test_an_inherited_key_does_not_count(self, clean_registry):
+        """Two destinations sharing a key would share each other's rows."""
+        with pytest.raises(TypeError, match="state_key"):
+
+            @register_destination("borrowed")
+            class BorrowedDestination(AppleNotesDestination):
+                pass
+
+    def test_the_display_name_defaults_to_the_section(self, clean_registry):
+        @register_destination("notion")
+        class NotionDestination(AppleNotesDestination):
+            state_key = "NotionDestination"
+
+        assert NotionDestination.display_name == "notion"
+
+    def test_the_shipped_display_names_are_what_a_user_calls_them(self):
+        assert AppleNotesDestination.display_name == "Apple Notes"
+        assert ObsidianDestination.display_name == "Obsidian"
