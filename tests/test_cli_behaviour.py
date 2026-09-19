@@ -52,6 +52,7 @@ import argparse
 import itertools
 import json
 import os
+import platform
 import socket
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -212,6 +213,51 @@ COMMAND_SURFACE: dict[str, set[str]] = {
 #: must still be rejected as usage errors rather than half-working, and this
 #: list is what makes their absence a stated fact instead of an oversight.
 UNBUILT_COMMANDS = ("info", "config", "uninstall")
+
+
+# ---------------------------------------------------------------------------
+# Table 5 — the setup conversation
+# ---------------------------------------------------------------------------
+
+#: A full Cloud walkthrough, as (fragment of the prompt, reply), in order.
+#:
+#: Keyed on what the wizard *asks* rather than on position, because the
+#: alternative — a bare list of twelve answers — cannot tell "the wizard grew a
+#: step" apart from "the wizard reordered two" apart from "the answers slipped
+#: by one", and all three produce a config that looks plausible. Matching the
+#: prompt makes each reply answer a named question.
+CLOUD_WALKTHROUGH: tuple[tuple[str, str], ...] = (
+    ("Select preferred connection", "2"),
+    ("Use existing reMarkable pairing", "y"),
+    ("Configure USB SSH as an automatic backup", "n"),
+    ("Select provider", "1"),
+    ("Gemini API key", "AIzaTestKey"),
+    ("Enable Obsidian sync", "y"),
+    ("Select vault", "1"),
+    ("Choose folder", "1"),
+    ("Mirror complete nested", "y"),
+    ("Enable Apple Notes sync", "n"),
+    ("Automatically sync notes in background", "n"),
+    ("run your first sync now", "n"),
+)
+
+#: Steps the wizard only offers on macOS, because there is nothing behind them
+#: anywhere else: Apple Notes is driven through ``osascript`` and background
+#: sync installs a launchd plist. Linux therefore gets a walkthrough that is
+#: genuinely two questions shorter — which CI discovered, because the first
+#: version of this table assumed everyone was on a Mac.
+MACOS_ONLY_STEPS = frozenset({"Enable Apple Notes sync", "Automatically sync notes in background"})
+
+
+def walkthrough_for_this_platform() -> list[tuple[str, str]]:
+    """Return the conversation the wizard actually holds on this machine.
+
+    Returns:
+        :data:`CLOUD_WALKTHROUGH` with the macOS-only steps removed when not
+        running on macOS.
+    """
+    on_macos = platform.system() == "Darwin"
+    return [step for step in CLOUD_WALKTHROUGH if on_macos or step[0] not in MACOS_ONLY_STEPS]
 
 
 # ---------------------------------------------------------------------------
@@ -1331,22 +1377,42 @@ class TestSetupWritesOnlyWhatItWasTold:
             wizard_module, "get_existing_remarkable_token", lambda: "existing-token"
         )
 
-        def _run(answers: list[str]):
-            """Run the wizard against a fixed script.
+        def _run(script: list[tuple[str, str]] | None = None):
+            """Run the wizard against an expected conversation.
 
             Args:
-                answers: One reply per prompt, in order.
+                script: Pairs of (expected fragment of the prompt, reply).
+                    Defaults to the walkthrough for this platform.
 
             Returns:
                 A tuple of the wizard result, the prompts it asked, and the
                 paths it left behind under ``tmp_path``.
             """
+            steps = iter(script if script is not None else walkthrough_for_this_platform())
             asked: list[str] = []
-            replies = iter(answers)
 
             def _input(prompt: str = "") -> str:
+                """Answer one prompt, checking it is the one expected next.
+
+                Args:
+                    prompt: What the wizard asked.
+
+                Returns:
+                    The scripted reply.
+
+                Raises:
+                    AssertionError: If the wizard asked something unscripted.
+                """
                 asked.append(prompt)
-                return next(replies)
+                try:
+                    fragment, reply = next(steps)
+                except StopIteration:
+                    raise AssertionError(
+                        f"The wizard asked a question the script does not cover: {prompt!r}. "
+                        "Add it to CLOUD_WALKTHROUGH."
+                    ) from None
+                assert fragment in prompt, f"expected a question about {fragment!r}, got {prompt!r}"
+                return reply
 
             result = wizard_module.run_wizard(
                 input_func=_input,
@@ -1363,11 +1429,6 @@ class TestSetupWritesOnlyWhatItWasTold:
 
         return _run
 
-    #: A complete Cloud walkthrough: connection, provider, Obsidian, and three
-    #: declined extras. Mirrors the flow ``test_setup_wizard.py`` exercises, so
-    #: a divergence between the two files is itself a signal.
-    CLOUD_ANSWERS = ["2", "y", "n", "1", "AIzaTestKey", "y", "1", "1", "y", "n", "n", "n"]
-
     def test_it_leaves_exactly_two_files_behind(self, wizard):
         """The config, and an executable wrapper the user was never asked about.
 
@@ -1381,7 +1442,7 @@ class TestSetupWritesOnlyWhatItWasTold:
         Pinned as a list rather than "config exists" so a third artefact cannot
         appear unnoticed.
         """
-        _, _, written = wizard(self.CLOUD_ANSWERS)
+        _, _, written = wizard()
         assert written == ["bin/living-ink", "config/config.yml"]
 
     def test_everything_it_writes_lives_under_one_removable_root(self, wizard, tmp_path):
@@ -1393,22 +1454,46 @@ class TestSetupWritesOnlyWhatItWasTold:
         to a fifth place would make that impossible before the command is even
         written.
         """
-        _, _, written = wizard(self.CLOUD_ANSWERS)
+        _, _, written = wizard()
         assert all(path.split("/")[0] in {"config", "bin"} for path in written), written
 
-    def test_it_asks_exactly_the_questions_the_script_answers(self, wizard):
-        """No unscripted prompt, and no answer left unused.
+    def test_it_asks_exactly_the_questions_the_table_lists(self, wizard):
+        """Every prompt is a known step, in the listed order, and no others.
 
-        The iterator raises ``StopIteration`` on an extra question and the
-        length check catches a question that disappeared, so this is the
-        "prompts the right menu and nothing more" guarantee in both directions.
+        Three failures in one assertion, which is why the script matches on
+        prompt text: an added step hits the "question the script does not
+        cover" error, a reordered one fails the fragment check inside the
+        harness, and a removed one is caught by the count here.
         """
-        _, asked, _ = wizard(self.CLOUD_ANSWERS)
-        assert len(asked) == len(self.CLOUD_ANSWERS)
+        _, asked, _ = wizard()
+        expected = walkthrough_for_this_platform()
+
+        assert len(asked) == len(expected), asked
+        for prompt, (fragment, _reply) in zip(asked, expected):
+            assert fragment in prompt
+
+    @pytest.mark.skipif(platform.system() != "Darwin", reason="launchd and Apple Notes are macOS")
+    def test_the_macos_only_steps_are_offered_on_macos(self, wizard):
+        """Both platform-specific questions are asked here."""
+        _, asked, _ = wizard()
+        for fragment in MACOS_ONLY_STEPS:
+            assert any(fragment in prompt for prompt in asked), fragment
+
+    @pytest.mark.skipif(platform.system() == "Darwin", reason="checks the non-macOS walkthrough")
+    def test_the_macos_only_steps_are_skipped_elsewhere(self, wizard):
+        """Neither is asked, rather than asked and then quietly ignored.
+
+        Offering to install a launchd agent on Linux would be a question whose
+        answer cannot be honoured, and a wizard that asks those trains people
+        to distrust the ones that matter.
+        """
+        _, asked, _ = wizard()
+        for fragment in MACOS_ONLY_STEPS:
+            assert not any(fragment in prompt for prompt in asked), fragment
 
     def test_declining_every_extra_still_saves(self, wizard):
         """Saying no to Apple Notes, background sync and the first sync works."""
-        result, _, _ = wizard(self.CLOUD_ANSWERS)
+        result, _, _ = wizard()
         assert result.saved is True
         assert result.run_sync_requested is False
 
@@ -1423,7 +1508,7 @@ class TestSetupWritesOnlyWhatItWasTold:
         )
         monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("wizard opened a socket"))
 
-        wizard(self.CLOUD_ANSWERS)
+        wizard()
 
     def test_a_declined_destination_is_recorded_as_disabled_not_omitted(self, wizard, tmp_path):
         """Saying no writes ``enabled: false`` rather than leaving the key out.
@@ -1434,7 +1519,7 @@ class TestSetupWritesOnlyWhatItWasTold:
         """
         import yaml
 
-        wizard(self.CLOUD_ANSWERS)
+        wizard()
         cfg = yaml.safe_load((tmp_path / "config" / "config.yml").read_text(encoding="utf-8"))
         assert cfg["apple_notes"]["enabled"] is False
 
@@ -1451,7 +1536,7 @@ class TestSetupWritesOnlyWhatItWasTold:
         from living_ink import cli as cli_module
         from living_ink import setup_wizard as wizard_module
 
-        wizard(self.CLOUD_ANSWERS)
+        wizard()
         monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
         monkeypatch.setattr(api_module, "resolve_stored_token", lambda: "")
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "OK"))
