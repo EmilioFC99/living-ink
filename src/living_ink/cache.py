@@ -268,8 +268,8 @@ class TranscriptCache(FileCache):
     suffix = ".json"
     noun = "transcribed page"
 
-    def get(self, key: str) -> Optional[Tuple[str, str]]:
-        """Return the cached (raw, cleaned) pair for ``key``, if there is one.
+    def get(self, key: str) -> Optional[str]:
+        """Return the cached text for ``key``, if there is one.
 
         A hit refreshes the entry's last-used time, so :meth:`prune` measures
         how long an entry has gone *unused* rather than how long ago it was
@@ -279,7 +279,7 @@ class TranscriptCache(FileCache):
             key: A key from :meth:`FileCache.key`.
 
         Returns:
-            The cached pair, or None on a miss or an unreadable entry.
+            The cached text, or None on a miss or an unreadable entry.
         """
         data = self._read(key)
         if data is None:
@@ -287,24 +287,26 @@ class TranscriptCache(FileCache):
 
         try:
             payload = json.loads(data.decode("utf-8"))
-            return str(payload["raw"]), str(payload["clean"])
+            return str(payload["text"])
         except (ValueError, TypeError, KeyError):
             # A truncated or hand-edited entry is indistinguishable from a
-            # miss, and treating it as one repairs it on the way past.
+            # miss, and treating it as one repairs it on the way past. An entry
+            # written by a build with two OCR backends lands here too: its
+            # payload is a raw/clean pair, and re-reading the page is the only
+            # honest way to say which of the two this build would have produced.
             path = self._path_for(key)
             logger.debug("Discarding a malformed cache entry: %s", path, exc_info=True)
             self._discard(path)
             return None
 
-    def put(self, key: str, raw: str, cleaned: str) -> None:
+    def put(self, key: str, text: str) -> None:
         """Store one page's transcription.
 
         Args:
             key: A key from :meth:`FileCache.key`.
-            raw: The raw OCR text.
-            cleaned: The cleaned text, as published.
+            text: The page's text, as published.
         """
-        payload = json.dumps({"raw": raw, "clean": cleaned}, ensure_ascii=False)
+        payload = json.dumps({"text": text}, ensure_ascii=False)
         self._write(key, payload.encode("utf-8"))
 
 

@@ -99,6 +99,10 @@ CONFIG_SCHEMA: Dict[str, Union[str, Dict[str, str]]] = {
         "render_cache": FLAG,
         "cache_max_age_days": WHOLE,
     },
+    # Nothing reads this any more: there is one OCR backend. It stays in the
+    # schema because an unknown section is a hard error, and every config the
+    # wizard has ever written names this one — dropping it here would stop
+    # those configs loading at all instead of merely ignoring the section.
     "google_vision": {
         "credentials_path": TEXT,
         "credentials_json": TEXT,

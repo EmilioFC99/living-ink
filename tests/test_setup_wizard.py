@@ -314,7 +314,13 @@ class TestConfigGeneration:
         yaml_str = generate_config_yaml(ai_provider="gemini", ai_model="gemini-flash-latest")
         assert "# Living Ink Configuration" in yaml_str
         assert "# 1. AI Handwriting OCR & Text Cleanup" in yaml_str
-        assert "# 6. Apple Notes Destination" in yaml_str
+        assert "# 5. Apple Notes Destination" in yaml_str
+
+    def test_generate_config_yaml_offers_no_second_ocr_backend(self):
+        """There is one way to read a page, so the config stops implying two."""
+        yaml_str = generate_config_yaml(ai_provider="gemini", ai_model="gemini-flash-latest")
+        assert "google_vision" not in yaml_str
+        assert "google_vision" not in yaml.safe_load(yaml_str)
 
 
 # =========================================================================

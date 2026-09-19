@@ -18,8 +18,8 @@ Precedence, highest first:
 4. The defaults in this module.
 
 Environment variables stay meaningful for third-party SDKs that read them
-directly (``OPENAI_API_KEY``, ``GOOGLE_APPLICATION_CREDENTIALS``); those are
-still exported by :func:`living_ink.pipeline.load_yaml_config`. What no longer
+directly (``OPENAI_API_KEY``); those are still exported by
+:func:`living_ink.pipeline.load_yaml_config`. What no longer
 happens is Living Ink talking to *itself* through the environment.
 """
 

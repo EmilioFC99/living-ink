@@ -40,17 +40,17 @@ class TestStoringAndReading:
         assert cache.get("nothing-here") is None
 
     def test_a_stored_page_is_returned(self, cache):
-        cache.put("k", "raw text", "clean text")
-        assert cache.get("k") == ("raw text", "clean text")
+        cache.put("k", "clean text")
+        assert cache.get("k") == "clean text"
 
     def test_unicode_survives_the_round_trip(self, cache):
-        cache.put("k", "café — naïve", "café — naïve")
-        assert cache.get("k") == ("café — naïve", "café — naïve")
+        cache.put("k", "café — naïve")
+        assert cache.get("k") == "café — naïve"
 
     def test_storing_again_replaces_the_entry(self, cache):
-        cache.put("k", "old", "old")
-        cache.put("k", "new", "new")
-        assert cache.get("k") == ("new", "new")
+        cache.put("k", "old")
+        cache.put("k", "new")
+        assert cache.get("k") == "new"
 
     def test_nothing_is_written_until_something_is_stored(self, cache):
         """Merely asking about the cache must not create it."""
@@ -58,11 +58,11 @@ class TestStoringAndReading:
         assert not cache.root.exists()
 
     def test_entries_are_sharded_rather_than_piled_in_one_directory(self, cache):
-        cache.put("abcdef", "raw", "clean")
+        cache.put("abcdef", "text")
         assert (cache.root / "ab" / "abcdef.json").exists()
 
     def test_no_temporary_files_are_left_behind(self, cache):
-        cache.put("abcdef", "raw", "clean")
+        cache.put("abcdef", "text")
         assert list(cache.root.glob("*/*.tmp")) == []
 
 
@@ -71,14 +71,14 @@ class TestDisabled:
 
     def test_nothing_is_read(self, tmp_path):
         writable = TranscriptCache(tmp_path / "t")
-        writable.put("k", "raw", "clean")
+        writable.put("k", "text")
 
         disabled = TranscriptCache(tmp_path / "t", enabled=False)
         assert disabled.get("k") is None
 
     def test_nothing_is_written(self, tmp_path):
         disabled = TranscriptCache(tmp_path / "t", enabled=False)
-        disabled.put("k", "raw", "clean")
+        disabled.put("k", "text")
         assert not disabled.root.exists()
 
 
@@ -86,19 +86,20 @@ class TestDamagedEntries:
     """A cache that cannot be read degrades to a miss, never to a failure."""
 
     def test_a_truncated_entry_reads_as_a_miss(self, cache):
-        cache.put("abcdef", "raw", "clean")
+        cache.put("abcdef", "text")
         (cache.root / "ab" / "abcdef.json").write_text("{not json")
         assert cache.get("abcdef") is None
 
     def test_a_truncated_entry_is_discarded_on_the_way_past(self, cache):
-        cache.put("abcdef", "raw", "clean")
+        cache.put("abcdef", "text")
         (cache.root / "ab" / "abcdef.json").write_text("{not json")
         cache.get("abcdef")
         assert not (cache.root / "ab" / "abcdef.json").exists()
 
     def test_an_entry_missing_its_fields_reads_as_a_miss(self, cache):
-        cache.put("abcdef", "raw", "clean")
-        (cache.root / "ab" / "abcdef.json").write_text('{"raw": "only"}')
+        """A pair written by the two-backend era is a miss, not half an answer."""
+        cache.put("abcdef", "text")
+        (cache.root / "ab" / "abcdef.json").write_text('{"raw": "only", "clean": "only"}')
         assert cache.get("abcdef") is None
 
 
@@ -109,8 +110,8 @@ class TestStats:
         assert cache.stats() == (0, 0)
 
     def test_entries_are_counted(self, cache):
-        cache.put("aa", "raw", "clean")
-        cache.put("bb", "raw", "clean")
+        cache.put("aa", "text")
+        cache.put("bb", "text")
         count, total = cache.stats()
         assert count == 2
         assert total > 0
@@ -120,13 +121,13 @@ class TestClearing:
     """Clearing removes the entries and the directories holding them."""
 
     def test_every_entry_is_removed(self, cache):
-        cache.put("aa", "raw", "clean")
-        cache.put("bb", "raw", "clean")
+        cache.put("aa", "text")
+        cache.put("bb", "text")
         assert cache.clear() == 2
         assert cache.stats() == (0, 0)
 
     def test_empty_shards_do_not_linger(self, cache):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         cache.clear()
         assert list(cache.root.iterdir()) == []
 
@@ -144,32 +145,32 @@ class TestPruning:
         os.utime(path, (old, old))
 
     def test_a_fresh_entry_survives(self, cache):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         assert cache.prune(30) == 0
         assert cache.get("aa") is not None
 
     def test_a_stale_entry_is_dropped(self, cache):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         self._age(cache, "aa", 120)
         assert cache.prune(90) == 1
         assert cache.get("aa") is None
 
     def test_reading_an_entry_keeps_it_alive(self, cache):
         """Age is time since last use, so a page synced weekly stays free."""
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         self._age(cache, "aa", 120)
         cache.get("aa")
         assert cache.prune(90) == 0
 
     def test_the_configured_age_is_used_by_default(self, tmp_path):
         cache = TranscriptCache(tmp_path / "t", max_age_days=1)
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         self._age(cache, "aa", 5)
         assert cache.prune() == 1
 
     def test_an_age_of_zero_prunes_nothing(self, cache):
         """Zero would otherwise mean 'expire everything on write'."""
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         assert cache.prune(0) == 0
         assert cache.get("aa") is not None
 
@@ -236,7 +237,7 @@ class TestRenderCache:
         """A transcript and a render can collide on key; they must not on path."""
         transcripts = TranscriptCache(tmp_path / "transcripts")
         renders = RenderCache(tmp_path / "renders")
-        transcripts.put("aa", "raw", "clean")
+        transcripts.put("aa", "text")
         renders.put("aa", b"png")
-        assert transcripts.get("aa") == ("raw", "clean")
+        assert transcripts.get("aa") == "text"
         assert renders.get("aa") == b"png"

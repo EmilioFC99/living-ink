@@ -24,7 +24,6 @@ from living_ink.cache import CACHE_DIRNAME, RENDER_CACHE_DIRNAME, RenderCache, T
 from living_ink.clean import configure as configure_ai_provider
 from living_ink.clean import (
     ocr_and_repair,
-    repair_text_with_openai,
     transcription_fingerprint,
     vision_ocr_available,
 )
@@ -228,9 +227,9 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Load configuration from YAML and export the credentials third parties read.
 
     Only settings that another library picks up from the environment on its own
-    are exported (``OPENAI_API_KEY``, ``GOOGLE_APPLICATION_CREDENTIALS``).
-    Living Ink's own settings are not: they are resolved from this dictionary by
-    :class:`living_ink.settings.Settings` and passed explicitly.
+    are exported (``OPENAI_API_KEY``). Living Ink's own settings are not: they
+    are resolved from this dictionary by :class:`living_ink.settings.Settings`
+    and passed explicitly.
 
     Args:
         config_path: Path to YAML config file. Defaults to get_config_path().
@@ -276,48 +275,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                         "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
                     )
 
-                # 2. Google Vision (Handle JSON content directly or file path)
-                if "google_vision" in yaml_config:
-                    gv = yaml_config["google_vision"]
-
-                    # Option A: Path to JSON file (Preferred for humans)
-                    if "credentials_path" in gv and gv["credentials_path"]:
-                        path_str = str(gv["credentials_path"]).strip()
-                        # Handle typical user paths like ~/Documents
-                        expanded_path = os.path.expanduser(path_str)
-
-                        if os.path.exists(expanded_path):
-                            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
-                        else:
-                            print(
-                                f"❌ Config Error: credentials_path file not found at: {path_str}"
-                            )
-
-                    # Option B: Embedded JSON content
-                    elif "credentials_json" in gv:
-                        creds_content = gv["credentials_json"]
-
-                        # Validate if it looks like JSON
-                        if isinstance(creds_content, str):
-                            creds_content = creds_content.strip()
-                            if not creds_content.startswith("{"):
-                                print(
-                                    "⚠️ Warning: 'credentials_json' in config.yml does not start with '{'. Did you forget the indentation?"
-                                )
-
-                        if isinstance(creds_content, dict):
-                            creds_content = json.dumps(creds_content)
-
-                        # Write to config/google_creds.json
-                        creds_path = cfg_path.parent / "google_creds.json"
-                        try:
-                            if not creds_path.exists() or creds_path.read_text() != creds_content:
-                                creds_path.write_text(creds_content)
-                            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_path)
-                        except OSError as weave_err:
-                            print(f"❌ Error writing google_creds.json: {weave_err}")
-
-                # 3. AI Provider — initialize from new 'ai' section or legacy 'openai' section
+                # 2. AI Provider — initialize from new 'ai' section or legacy 'openai' section
                 _weave_stored_ai_key(yaml_config, cfg_path)
                 configure_ai_provider(yaml_config)
 
@@ -499,58 +457,6 @@ def preprocess_image(in_path: Path, out_path: Path):
     im.save(out_path, quality=95)
 
 
-# --- Google Vision OCR using API key (legacy) ---
-def google_vision_available() -> bool:
-    """Check if Google Cloud Vision credentials are configured and valid.
-
-    Returns:
-        bool: True if Google Cloud Vision service account credentials exist.
-    """
-    creds_env = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if creds_env and Path(creds_env).exists():
-        try:
-            content = Path(creds_env).read_text(encoding="utf-8")
-            if "your-project-id" not in content and "BEGIN PRIVATE KEY" in content:
-                return True
-        except (OSError, UnicodeDecodeError):
-            pass
-    secrets_dir = ROOT / "secrets"
-    if secrets_dir.exists() and list(secrets_dir.glob("*.json")):
-        return True
-    return False
-
-
-# --- Google Vision OCR using service account (preferred) ---
-def vision_ocr_image_service_account(png_path: Path):
-    try:
-        from google.cloud import vision
-    except ImportError:
-        print("google-cloud-vision not installed. Please run: uv add google-cloud-vision")
-        return None
-
-    try:
-        client = vision.ImageAnnotatorClient()
-        with open(png_path, "rb") as f:
-            content = f.read()
-        image = vision.Image(content=content)
-        response = client.document_text_detection(image=image)
-        if response.error.message:
-            print(f"Vision API error: {response.error.message}")
-            return None
-        if response.full_text_annotation and response.full_text_annotation.text:
-            return response.full_text_annotation.text.strip()
-        return ""
-    except Exception as e:
-        # Deliberately broad. Vision raises out of google.api_core, whose
-        # exception hierarchy only exists when the optional dependency is
-        # installed, so it cannot be named here. OCR through this path is a
-        # fallback anyway: any failure means "no text from Vision", not a
-        # failed run.
-        print(f"Google Cloud Vision error: {e}")
-        logging.debug("Google Cloud Vision OCR failed for %s", png_path, exc_info=True)
-        return None
-
-
 def sanitize_filename(name: str) -> str:
     """Make a notebook name safe for a temporary working-file path.
 
@@ -658,8 +564,7 @@ def validate_environment():
         ConfigurationMissing: If configuration is absent or invalid. Offering
             the setup wizard is the CLI's decision, not this function's.
     """
-    docs_path = ROOT / "docs" / "SETUP_GUIDE.md"
-    docs_hint = f"See {docs_path} for instructions."
+    docs_hint = "run: living-ink setup"
 
     errors = []
     warnings = []
@@ -676,45 +581,15 @@ def validate_environment():
             "To enable, add an 'ai' section to config.yml."
         )
 
-    # 2. Check Google Credentials
-    # The config loader above sets GOOGLE_APPLICATION_CREDENTIALS if a key exists in config.yml
-    # Or users might have put a file in secrets/ (legacy)
-    has_creds = False
-
-    # Check env var (set by config.yml loader or system)
-    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        # Check if it points to a file with default placeholder content
-        p = Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
-        if p.exists():
-            content = p.read_text()
-            if "your-project-id" in content or "BEGIN PRIVATE KEY" not in content:
-                errors.append(
-                    "❌ Google Credentials JSON still has default placeholder values. Please edit config.yml."
-                )
-            else:
-                has_creds = True
-        else:
-            errors.append(f"❌ Google Credentials file defined but not found at {p}")
-
-    # Check Legacy Secrets Dir
-    if not has_creds:
-        secrets_dir = ROOT / "secrets"
-        if secrets_dir.exists() and list(secrets_dir.glob("*.json")):
-            has_creds = True
-
-    if not has_creds:
-        if vision_ocr_available():
-            # AI vision OCR available — Google Vision not needed
-            warnings.append(
-                "ℹ️ No Google Cloud Vision credentials found. "
-                "Using AI vision OCR instead (reads images directly)."
-            )
-        else:
-            errors.append(
-                "❌ No OCR method available. Either:\n"
-                "   • Add an AI provider with vision support (e.g., Gemini) to config.yml, OR\n"
-                "   • Add Google Cloud Vision credentials (see SETUP_GUIDE.md)."
-            )
+    # 2. Check that something can read a page. There is one OCR backend — a
+    # multimodal call to the configured provider — so a provider without
+    # vision is not a degraded run, it is a run that transcribes nothing.
+    if not vision_ocr_available():
+        errors.append(
+            "❌ No OCR method available. Set 'ai.provider' in config.yml to a "
+            "provider with vision support (e.g. gemini, openai, or ollama for a "
+            "local model)."
+        )
 
     # Print warnings (non-fatal). log() already reaches the console; the bare
     # print that used to follow it printed every warning twice and bypassed
@@ -1212,7 +1087,6 @@ class DocumentJob:
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
-    raw_texts: List[str] = field(default_factory=list)
     cleaned_texts: List[str] = field(default_factory=list)
     clean_out_txt: Optional[Path] = None
 
@@ -2186,21 +2060,15 @@ class SyncPipeline:
     # ── Stage 5: OCR ─────────────────────────────────────────────────────
 
     def _ocr_pages(self, job: DocumentJob) -> None:
-        """Transcribe every prepared page into raw and cleaned text.
+        """Transcribe every prepared page.
 
-        Prefers single-step AI vision OCR, which reads and cleans in one call,
-        and falls back per page to Google Cloud Vision plus AI text repair. If
-        no page yielded text but the document carried extractable text (an
-        unannotated PDF, an EPUB), that text is used instead.
+        There is one way to read a page: a single multimodal call that reads
+        and cleans in one step. If no page yielded text but the document
+        carried extractable text (an unannotated PDF, an EPUB), that text is
+        used instead.
         """
-        use_vision_ocr = vision_ocr_available()
-        if use_vision_ocr:
-            log("Using AI vision OCR (single-step: reads image + cleans text)")
-        else:
-            log("Using Google Cloud Vision OCR + AI text cleanup")
-
         before = self._cache_hits
-        results = self._transcribe_pages(job.pre_paths, use_vision_ocr)
+        job.cleaned_texts = self._transcribe_pages(job.pre_paths)
         reused = self._cache_hits - before
         if reused:
             log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
@@ -2208,14 +2076,10 @@ class SyncPipeline:
         job.transcribed_pages = len(job.pre_paths) - reused
         job.cached_pages = reused
 
-        job.raw_texts = [raw for raw, _ in results]
-        job.cleaned_texts = [cleaned for _, cleaned in results]
-
         if not any(t.strip() for t in job.cleaned_texts) and job.extracted_doc_text:
-            job.raw_texts = [job.extracted_doc_text]
             job.cleaned_texts = [job.extracted_doc_text]
 
-    def _transcribe_pages(self, paths: List[Path], use_vision_ocr: bool) -> List[Tuple[str, str]]:
+    def _transcribe_pages(self, paths: List[Path]) -> List[str]:
         """Transcribe pages, several at a time, and return them in page order.
 
         A page is one network round trip and nothing else, so running a few
@@ -2225,34 +2089,30 @@ class SyncPipeline:
 
         Args:
             paths: Prepared page images, in page order.
-            use_vision_ocr: Whether single-step AI vision OCR is available.
 
         Returns:
-            One (raw text, cleaned text) pair per page, in the order given.
+            One transcription per page, in the order given.
         """
         width = min(self.settings.ocr_concurrency, len(paths))
         if width <= 1:
-            return [self._transcribe_page(p, use_vision_ocr) for p in paths]
+            return [self._transcribe_page(p) for p in paths]
 
         log(f"Transcribing {len(paths)} pages, {width} at a time...")
         with ThreadPoolExecutor(max_workers=width) as pool:
             # ``map`` yields in submission order, so pages stay in page order
             # however the calls happen to finish.
-            return list(pool.map(lambda p: self._transcribe_page(p, use_vision_ocr), paths))
+            return list(pool.map(self._transcribe_page, paths))
 
-    def _transcribe_page(self, path: Path, use_vision_ocr: bool) -> Tuple[str, str]:
-        """Transcribe one page, preferring vision OCR and falling back to Vision.
+    def _transcribe_page(self, path: Path) -> str:
+        """Transcribe one page, from the cache when it is there.
 
         Args:
             path: The prepared page image.
-            use_vision_ocr: Whether single-step AI vision OCR is available.
 
         Returns:
-            A (raw text, cleaned text) pair. In vision mode both are the same
-            text: the model reads and cleans in one call, so there is no
-            separate raw transcript.
+            The page's text, or an empty string if the page read as nothing.
         """
-        key = self._cache_key(path, use_vision_ocr)
+        key = self._cache_key(path)
         if key:
             cached = self.cache.get(key)
             if cached is not None:
@@ -2263,25 +2123,16 @@ class SyncPipeline:
             with self._cache_lock:
                 self._cache_misses += 1
 
-        if use_vision_ocr:
-            cleaned_text = self._vision_ocr_page(path)
-            if cleaned_text:
-                return self._cached(key, cleaned_text, cleaned_text)
+        return self._cached(key, self._vision_ocr_page(path))
 
-        raw, cleaned = self._google_ocr_page(path)
-        return self._cached(key, raw, cleaned)
-
-    def _cache_key(self, path: Path, use_vision_ocr: bool) -> Optional[str]:
+    def _cache_key(self, path: Path) -> Optional[str]:
         """Return the cache key for one page, or None if it cannot be computed.
 
-        The key covers the page image, the model and prompts behind it, and
-        which of the two OCR routes produced it — the same page read by vision
-        and read by Google Vision are different answers and must not share an
-        entry.
+        The key covers the page image and the model and prompts behind it, so
+        editing a prompt or switching provider correctly misses.
 
         Args:
             path: The prepared page image.
-            use_vision_ocr: Which OCR route is about to run.
 
         Returns:
             A cache key, or None when caching is off or the page is unreadable.
@@ -2293,10 +2144,9 @@ class SyncPipeline:
         except OSError:
             # No page to hash means nothing to key on; transcribe uncached.
             return None
-        route = "vision" if use_vision_ocr else "google"
-        return self.cache.key(image_bytes, f"{route}:{transcription_fingerprint()}")
+        return self.cache.key(image_bytes, transcription_fingerprint())
 
-    def _cached(self, key: Optional[str], raw: str, cleaned: str) -> Tuple[str, str]:
+    def _cached(self, key: Optional[str], text: str) -> str:
         """Store a freshly transcribed page and return it unchanged.
 
         An empty result is not stored. A page that read as nothing is usually a
@@ -2305,15 +2155,14 @@ class SyncPipeline:
 
         Args:
             key: The cache key, or None if this page is not cacheable.
-            raw: The raw OCR text.
-            cleaned: The cleaned text.
+            text: The page's text.
 
         Returns:
-            The ``(raw, cleaned)`` pair it was given.
+            The text it was given.
         """
-        if key and cleaned.strip():
-            self.cache.put(key, raw, cleaned)
-        return raw, cleaned
+        if key and text.strip():
+            self.cache.put(key, text)
+        return text
 
     def _vision_ocr_page(self, path: Path) -> str:
         """Read and clean one page in a single AI vision call.
@@ -2330,30 +2179,7 @@ class SyncPipeline:
             return cleaned_text
 
         log(f"  AI Vision returned empty for {path.name}")
-        if google_vision_available():
-            log("  Falling back to Google Cloud Vision...")
         return ""
-
-    def _google_ocr_page(self, path: Path) -> Tuple[str, str]:
-        """Read one page with Google Cloud Vision, then repair the text with AI.
-
-        Args:
-            path: The prepared page image.
-
-        Returns:
-            A (raw text, cleaned text) pair; both empty if Vision is unavailable.
-        """
-        if not google_vision_available():
-            log(f"  Google Cloud Vision not configured for {path.name}.")
-            return "", ""
-
-        log(f"  Google Vision OCR: {path.name}...")
-        txt = vision_ocr_image_service_account(path)
-        if txt is None:
-            log(f"  Vision failed for {path}")
-
-        log(f"  Cleaning text with AI for {path.name}...")
-        return txt or "", repair_text_with_openai(txt or "")
 
     # ── Stages 4-6, skipped: an existing transcript ──────────────────────
 
@@ -2394,21 +2220,16 @@ class SyncPipeline:
     # ── Stage 6: transcripts ─────────────────────────────────────────────
 
     def _write_transcripts(self, job: DocumentJob) -> None:
-        """Write the raw and cleaned transcripts to the output directory.
+        """Write the transcript to the output directory.
 
-        The cleaned file is the one that gets published; the raw file exists so
-        a user can see what OCR actually read before the AI tidied it.
+        One file, because there is one transcription: the model reads and
+        cleans the page in the same call, so there is no earlier, rawer text
+        for a second file to hold.
         """
         meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
 
-        raw_out_txt = OCR_DIR / f"{job.safe_name}_raw.txt"
-        self._write_transcript(job, raw_out_txt, meta, job.raw_texts, pad_empty_pages=True)
-        log(f"Raw OCR text saved to {raw_out_txt}")
-
         job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
-        self._write_transcript(
-            job, job.clean_out_txt, meta, job.cleaned_texts, pad_empty_pages=False
-        )
+        self._write_transcript(job, job.clean_out_txt, meta, job.cleaned_texts)
         log(f"Cleaned OCR text saved to {job.clean_out_txt}")
 
     def _write_transcript(
@@ -2417,17 +2238,17 @@ class SyncPipeline:
         path: Path,
         meta: Dict[str, Any],
         texts: List[str],
-        pad_empty_pages: bool,
     ) -> None:
         """Write one transcript: a metadata line, then a section per page.
+
+        A page that produced no text keeps its header and gets no body, so the
+        page numbering still lines up with the notebook.
 
         Args:
             job: The job being transcribed.
             path: File to write.
             meta: Metadata dict, written as the first line.
             texts: One entry per page, in page order.
-            pad_empty_pages: Whether a page that produced no text still gets a
-                blank body under its header.
         """
         from living_ink.extract import format_page_section_header
 
@@ -2443,10 +2264,7 @@ class SyncPipeline:
                     job.page_number(i), job.doc_file_path, include_divider=True
                 )
                 body = (text or "").strip()
-                if body or pad_empty_pages:
-                    f.write(f"{header}\n\n{body}\n\n")
-                else:
-                    f.write(f"{header}\n\n")
+                f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 

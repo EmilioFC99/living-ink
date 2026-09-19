@@ -13,7 +13,6 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
     *   **OpenAI** (GPT-4o / GPT-4o-mini with vision OCR)
     *   **Ollama** (100% local, no API key needed)
     *   **Groq, OpenRouter, Mistral, Together AI**, or any custom OpenAI-compatible endpoint
-    *   **Google Cloud Vision** as an optional traditional OCR fallback
     *   Option to disable AI cleanup entirely for raw OCR text
 *   **Apple Notes Integration**: Creates formatted notes containing cleaned text and original handwritten page images.
 *   **Obsidian Integration**: Exports notes as Markdown files with YAML frontmatter, WikiLinked page attachments, and **full folder hierarchy mirroring** inside your vault (or a configurable root folder).
@@ -21,7 +20,7 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
 
 ## 📚 Documentation
 
-*   **[Setup Guide](docs/SETUP_GUIDE.md)**: How to get your API keys (Google Gemini / OpenAI, Google Cloud Vision, reMarkable) and configure the app.
+*   **[Setup Guide](docs/SETUP_GUIDE.md)**: How to get your API keys (Google Gemini / OpenAI, reMarkable) and configure the app.
 *   **[User Manual](docs/USER_MANUAL.md)**: How to use the application in Automatic or Manual modes.
 *   **[AGENTS.md](AGENTS.md)**: Architecture and contributor guide for AI coding assistants.
 
@@ -79,9 +78,8 @@ If you are developing or prefer a local clone:
 
 1.  **Download**: Fetches modified notebooks from reMarkable Cloud (or USB SSH).
 2.  **Render**: Converts vector strokes into high-resolution white-background PNG images.
-3.  **Read**: Google Cloud Vision extracts raw text from handwriting.
-4.  **Refine**: Your configured AI provider cleans up OCR artifacts and structures paragraphs.
-5.  **Publish**: Dispatches structured notes and page images to your enabled destinations.
+3.  **Read**: Your configured AI provider reads the handwriting and returns clean, structured text — one multimodal call per page, no separate OCR service.
+4.  **Publish**: Dispatches structured notes and page images to your enabled destinations.
 
 ## 🧪 Running Tests
 
