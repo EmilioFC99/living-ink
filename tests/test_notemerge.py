@@ -1,14 +1,28 @@
 """Tests for splicing generated content into a note without destroying it."""
 
 from living_ink import notemerge
-from living_ink.notemerge import MANAGED_BEGIN, MANAGED_END
 
 
 def build(body="Transcript.", **front):
     """Render a note the way ObsidianDestination would."""
     values = {"source": "Remarkable/Work/Notes", "tags": ["remarkable"]}
     values.update(front)
-    return notemerge.owned_frontmatter_lines(values), body
+    return notemerge.owned_frontmatter_lines(values), [("page-1", body)]
+
+
+def text(front, blocks, existing=None):
+    """Render and drop the warnings, for tests that are not about them."""
+    return notemerge.render(front, blocks, existing)[0]
+
+
+def begin(block_id="page-1"):
+    """The begin marker for a block, without its digest."""
+    return f"<!-- living-ink:begin {block_id}"
+
+
+def end(block_id="page-1"):
+    """The end marker for a block."""
+    return notemerge.end_marker(block_id)
 
 
 class TestSplitFrontmatter:
@@ -76,32 +90,81 @@ class TestRenderNewNote:
     """With no existing file the output is straightforward."""
 
     def test_the_body_is_wrapped_in_markers(self):
-        front, body = build()
-        out = notemerge.render(front, body)
-        assert MANAGED_BEGIN in out and MANAGED_END in out
+        front, blocks = build()
+        out = text(front, blocks)
+        assert begin() in out and end() in out
         assert "Transcript." in out
 
+    def test_every_block_gets_its_own_pair(self):
+        front, _ = build()
+        out = text(front, [("page-1", "One"), ("page-2", "Two")])
+        assert out.count("living-ink:begin") == 2
+        assert out.index(end("page-1")) < out.index(begin("page-2"))
+
+    def test_a_block_carries_the_digest_of_its_own_content(self):
+        front, _ = build()
+        out = text(front, [("page-1", "One")])
+        assert f"h={notemerge.block_digest('One')}" in out
+
     def test_the_frontmatter_is_fenced(self):
-        front, body = build()
-        out = notemerge.render(front, body)
+        front, blocks = build()
+        out = text(front, blocks)
         assert out.startswith("---\n")
         assert "source: Remarkable/Work/Notes" in out
 
     def test_a_list_value_becomes_a_yaml_sequence(self):
         front, _ = build(tags=["remarkable", "work"])
-        out = notemerge.render(front, "x")
+        out = text(front, [("page-1", "x")])
         assert "tags:\n  - remarkable\n  - work" in out
 
     def test_empty_values_are_omitted(self):
         front, _ = build(type=None, document="")
-        out = notemerge.render(front, "x")
+        out = text(front, [("page-1", "x")])
         assert "type:" not in out
         assert "document:" not in out
 
     def test_the_file_ends_with_one_newline(self):
-        front, body = build()
-        assert notemerge.render(front, body).endswith("\n")
-        assert not notemerge.render(front, body).endswith("\n\n")
+        front, blocks = build()
+        assert text(front, blocks).endswith("\n")
+        assert not text(front, blocks).endswith("\n\n")
+
+    def test_no_blocks_at_all_still_produces_a_note(self):
+        front, _ = build()
+        out = text(front, [])
+        assert out.startswith("---\n")
+        assert "living-ink:begin" not in out
+
+
+class TestTheDigestIsDeterministic:
+    """§20.3 F4: the one failure mode worse than the problem blocks solve."""
+
+    def test_the_same_content_digests_the_same_way_every_time(self):
+        assert notemerge.block_digest("Page 1") == notemerge.block_digest("Page 1")
+
+    def test_surrounding_whitespace_is_not_content(self):
+        assert notemerge.block_digest("  Page 1\n\n") == notemerge.block_digest("Page 1")
+
+    def test_different_content_digests_differently(self):
+        assert notemerge.block_digest("Page 1") != notemerge.block_digest("Page 2")
+
+    def test_merging_twice_is_merging_once(self):
+        # If anything run-to-run variable reached the digest, the second merge
+        # would read every block as user-edited and park a duplicate of it —
+        # on every sync, forever.
+        front, _ = build()
+        blocks = [("page-1", "One"), ("page-2", "Two")]
+        once = text(front, blocks)
+        twice = text(front, blocks, once)
+        assert twice == once
+
+    def test_merging_twice_is_merging_once_with_user_text_in_between(self):
+        front, _ = build()
+        blocks = [("page-1", "One"), ("page-2", "Two")]
+        once = text(front, blocks)
+        annotated = once.replace(end("page-1"), f"{end('page-1')}\n\nMy thought.")
+        twice = text(front, blocks, annotated)
+        assert text(front, blocks, twice) == twice
+        assert "My thought." in twice
 
 
 class TestRenderPreservesUserContent:
@@ -109,16 +172,17 @@ class TestRenderPreservesUserContent:
 
     def _existing(self, before="", after=""):
         front, _ = build()
-        return (
-            notemerge.render(front, "Old transcript.")
-            .replace(MANAGED_BEGIN, f"{before}{MANAGED_BEGIN}")
-            .replace(MANAGED_END, f"{MANAGED_END}{after}")
-        )
+        out = text(front, [("page-1", "Old transcript.")])
+        if before:
+            out = out.replace(begin(), f"{before}{begin()}", 1)
+        if after:
+            out = out.replace(end(), f"{end()}{after}", 1)
+        return out
 
     def test_text_above_the_block_survives(self):
         existing = self._existing(before="My own intro.\n\n")
         front, _ = build()
-        out = notemerge.render(front, "New transcript.", existing)
+        out = text(front, [("page-1", "New transcript.")], existing)
 
         assert "My own intro." in out
         assert "New transcript." in out
@@ -127,7 +191,7 @@ class TestRenderPreservesUserContent:
     def test_text_below_the_block_survives(self):
         existing = self._existing(after="\n\n## My follow-up\n\nThoughts.")
         front, _ = build()
-        out = notemerge.render(front, "New transcript.", existing)
+        out = text(front, [("page-1", "New transcript.")], existing)
 
         assert "## My follow-up" in out
         assert "Thoughts." in out
@@ -135,7 +199,7 @@ class TestRenderPreservesUserContent:
     def test_text_on_both_sides_survives(self):
         existing = self._existing(before="Above.\n\n", after="\n\nBelow.")
         front, _ = build()
-        out = notemerge.render(front, "New.", existing)
+        out = text(front, [("page-1", "New.")], existing)
 
         assert out.index("Above.") < out.index("New.") < out.index("Below.")
 
@@ -143,7 +207,7 @@ class TestRenderPreservesUserContent:
         existing = self._existing()
         existing = existing.replace("---\n", "---\naliases:\n  - Standup\n", 1)
         front, _ = build()
-        out = notemerge.render(front, "New.", existing)
+        out = text(front, [("page-1", "New.")], existing)
 
         assert "aliases:" in out
         assert "  - Standup" in out
@@ -152,70 +216,194 @@ class TestRenderPreservesUserContent:
         """Owned keys come from this run, not from both runs."""
         existing = self._existing()
         front, _ = build(created="2020-01-01", updated="2026-09-17")
-        out = notemerge.render(front, "New.", existing)
+        out = text(front, [("page-1", "New.")], existing)
 
         assert out.count("created:") == 1
         assert "created: 2020-01-01" in out
 
 
-class TestRenderAdoptsOlderNotes:
-    """Notes written before markers existed have to be handled without guessing."""
+class TestTextBetweenBlocks:
+    """Everything between one block's end and the next block's begin is theirs."""
 
-    def test_a_generated_note_without_markers_is_regenerated(self):
+    def _annotated(self):
+        front, _ = build()
+        out = text(front, [("page-1", "One"), ("page-2", "Two")])
+        return front, out.replace(end("page-1"), f"{end('page-1')}\n\nRe page 1: see [[DMBOK]].")
+
+    def test_it_stays_with_the_page_it_is_about(self):
+        front, existing = self._annotated()
+        out = text(front, [("page-1", "One v2"), ("page-2", "Two v2")], existing)
+
+        assert out.index("One v2") < out.index("Re page 1") < out.index("Two v2")
+
+    def test_a_page_inserted_between_two_others_does_not_split_it(self):
+        # The reason a new block goes in before the *next* block rather than
+        # straight after the previous one.
+        front, existing = self._annotated()
+        out = text(
+            front,
+            [("page-1", "One"), ("page-1b", "Inserted"), ("page-2", "Two")],
+            existing,
+        )
+
+        assert out.index("Re page 1") < out.index("Inserted") < out.index("Two")
+
+    def test_a_page_appended_at_the_end_goes_last(self):
+        front, _ = build()
+        existing = text(front, [("page-1", "One")])
+        out = text(front, [("page-1", "One"), ("page-2", "Two")], existing)
+
+        assert out.index("One") < out.index("Two")
+
+    def test_free_text_is_never_rewritten(self):
+        front, existing = self._annotated()
+        out = text(front, [("page-1", "One v2"), ("page-2", "Two v2")], existing)
+
+        assert "Re page 1: see [[DMBOK]]." in out
+
+
+class TestABlockThisRunDidNotGenerate:
+    """A page that failed must not erase the commentary underneath it."""
+
+    def test_it_is_left_exactly_as_it_was(self):
+        front, _ = build()
+        existing = text(front, [("page-1", "One"), ("page-2", "Two")])
+        out = text(front, [("page-1", "One v2")], existing)
+
+        assert "Two" in out
+        assert "One v2" in out
+
+    def test_the_user_is_told(self):
+        front, _ = build()
+        existing = text(front, [("page-1", "One"), ("page-2", "Two")])
+        _, warnings = notemerge.render(front, [("page-1", "One v2")], existing)
+
+        assert any("page-2" in w and "not part of this sync" in w for w in warnings)
+
+
+class TestAnEditInsideABlock:
+    """A mistake, but not one that should cost the user anything."""
+
+    def _edited(self):
+        front, _ = build()
+        existing = text(front, [("page-1", "Machine text.")])
+        return front, existing.replace("Machine text.", "Machine text. And mine.")
+
+    def test_both_versions_survive(self):
+        front, edited = self._edited()
+        out = text(front, [("page-1", "Machine text.")], edited)
+
+        assert "Machine text. And mine." in out
+        assert out.count("Machine text.") == 2
+
+    def test_the_users_version_is_parked_below_as_free_text(self):
+        front, edited = self._edited()
+        out = text(front, [("page-1", "Machine text.")], edited)
+
+        assert notemerge.PARKED_PREFIX in out
+        assert out.index(end("page-1")) < out.index("And mine.")
+
+    def test_the_parked_copy_is_not_reclaimed_on_the_next_sync(self):
+        front, edited = self._edited()
+        once = text(front, [("page-1", "Machine text.")], edited)
+        twice = text(front, [("page-1", "Machine text.")], once)
+
+        assert twice == once
+        assert twice.count("And mine.") == 1
+
+    def test_the_user_is_told(self):
+        front, edited = self._edited()
+        _, warnings = notemerge.render(front, [("page-1", "Machine text.")], edited)
+
+        assert any("page-1" in w and "edited inside" in w for w in warnings)
+
+    def test_an_untouched_block_is_not_parked(self):
+        front, _ = build()
+        existing = text(front, [("page-1", "Machine text.")])
+        out, warnings = notemerge.render(front, [("page-1", "Newer text.")], existing)
+
+        assert notemerge.PARKED_PREFIX not in out
+        assert warnings == []
+
+
+class TestParseSegments:
+    """Turning a note body back into ordered segments."""
+
+    def test_a_body_with_nothing_of_ours(self):
+        assert notemerge.parse_segments("plain") == [notemerge.Segment(content="plain")]
+
+    def test_a_block_is_recognised_with_its_digest(self):
+        body = f"a\n{begin()} h=abc123 -->\nmine\n{end()}\nb"
+        segments = notemerge.parse_segments(body)
+
+        assert [s.block_id for s in segments] == [None, "page-1", None]
+        assert segments[1].content == "mine"
+        assert segments[1].written_hash == "abc123"
+
+    def test_a_block_without_a_digest_is_still_a_block(self):
+        segments = notemerge.parse_segments(f"{begin()} -->\nmine\n{end()}")
+        assert segments[0].block_id == "page-1"
+        assert segments[0].written_hash is None
+
+    def test_an_unterminated_block_is_kept_as_text(self):
+        # A begin with no end means something truncated the file. Keeping every
+        # line is the only answer that cannot lose a sentence.
+        segments = notemerge.parse_segments(f"a\n{begin()} -->\nhalf")
+        assert [s.block_id for s in segments] == [None]
+        assert "half" in segments[0].content
+
+    def test_segments_round_trip(self):
+        body = f"above\n\n{begin()} h=abc123 -->\nmine\n{end()}\n\nbelow"
+        segments = notemerge.parse_segments(body)
+        assert notemerge.parse_segments(notemerge.render_segments(segments)) == segments
+
+    def test_a_duplicated_id_is_reported_and_only_the_first_is_updated(self):
+        segments = notemerge.parse_segments(
+            f"{begin()} -->\nfirst\n{end()}\n{begin()} -->\nsecond\n{end()}"
+        )
+        merged, warnings = notemerge.merge_segments(segments, [("page-1", "fresh")])
+
+        assert [s.content for s in merged if s.block_id] == ["fresh", "second"]
+        assert any("more than once" in w for w in warnings)
+
+
+class TestRenderAdoptsOlderNotes:
+    """Notes written before blocks existed have to be handled without guessing."""
+
+    def test_a_generated_note_without_blocks_is_regenerated(self):
         """`source: Remarkable/` means Living Ink wrote every line of it."""
         existing = (
             "---\ncreated: 2020-01-01\nsource: Remarkable/Work/Notes\n---\n\nOld transcript.\n"
         )
         front, _ = build()
-        out = notemerge.render(front, "New transcript.", existing)
+        out = text(front, [("page-1", "New transcript.")], existing)
 
         assert "Old transcript." not in out
         assert "New transcript." in out
-        assert MANAGED_BEGIN in out
+        assert begin() in out
 
-    def test_a_foreign_note_is_kept_above_the_block(self):
+    def test_a_foreign_note_is_kept_above_the_blocks(self):
         """A file that is not ours must survive a name collision intact."""
         existing = "# Somebody else's note\n\nImportant.\n"
         front, _ = build()
-        out = notemerge.render(front, "Transcript.", existing)
+        out = text(front, [("page-1", "Transcript.")], existing)
 
         assert "Somebody else's note" in out
         assert "Important." in out
-        assert out.index("Important.") < out.index(MANAGED_BEGIN)
+        assert out.index("Important.") < out.index(begin())
 
     def test_a_foreign_note_keeps_its_frontmatter(self):
         existing = "---\nauthor: Someone\n---\n\nTheir words.\n"
         front, _ = build()
-        out = notemerge.render(front, "Transcript.", existing)
+        out = text(front, [("page-1", "Transcript.")], existing)
 
         assert "author: Someone" in out
         assert "Their words." in out
 
     def test_an_empty_file_is_treated_as_new(self):
         front, _ = build()
-        out = notemerge.render(front, "Transcript.", "")
-        assert out.count(MANAGED_BEGIN) == 1
-
-
-class TestSplitManagedRegion:
-    """Locating the block Living Ink owns."""
-
-    def test_no_markers(self):
-        assert notemerge.split_managed_region("plain") == ("plain", None, "")
-
-    def test_content_is_returned(self):
-        body = f"a\n{MANAGED_BEGIN}\nmine\n{MANAGED_END}\nb"
-        before, current, after = notemerge.split_managed_region(body)
-        assert before == "a\n"
-        assert current.strip() == "mine"
-        assert after.strip() == "b"
-
-    def test_an_unterminated_block_is_regenerated(self):
-        """A begin with no end means a truncated file, not user content."""
-        before, current, after = notemerge.split_managed_region(f"a\n{MANAGED_BEGIN}\nhalf")
-        assert before == "a\n"
-        assert current == ""
-        assert after == ""
+        out = text(front, [("page-1", "Transcript.")], "")
+        assert out.count("living-ink:begin") == 1
 
 
 class TestLooksGenerated:

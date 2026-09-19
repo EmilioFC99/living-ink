@@ -31,6 +31,7 @@ from living_ink.destinations.base import (
 from living_ink.destinations.filesystem import (
     AttachmentPolicy,
     FileSystemDestination,
+    NoteBlock,
     NoteLayout,
 )
 from living_ink.destinations.markup import (
@@ -44,6 +45,9 @@ from living_ink.destinations.markup import (
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+#: Block id for a PDF or EPUB's own text layer, which belongs to no one page.
+_BODY_BLOCK = "body"
 
 
 def _iso_date(moment: Optional[datetime.datetime]) -> Optional[str]:
@@ -77,11 +81,9 @@ class ObsidianDestination(FileSystemDestination):
     state_key: ClassVar[str] = "ObsidianDestination"
     display_name: ClassVar[str] = "Obsidian"
 
-    # A note is one managed region today, so a re-publish rewrites all of it.
-    # This becomes PAGE once the region is split into a marked block per source
-    # page; until then, claiming PAGE would promise the user something the
-    # write path does not honour.
-    merge_unit: ClassVar[MergeUnit] = MergeUnit.DOCUMENT
+    # One managed block per source page, so a re-publish rewrites the page that
+    # changed and leaves the note the user wrote under it exactly where it is.
+    merge_unit: ClassVar[MergeUnit] = MergeUnit.PAGE
 
     # Characters forbidden in filenames across macOS, Windows, Linux, and Obsidian
     FORBIDDEN_CHARS_REGEX = re.compile(r'[/\\:*?"<>|#^\[\]]')
@@ -551,7 +553,7 @@ class ObsidianDestination(FileSystemDestination):
             layout.attachment_links[page.index] = f"{link_prefix}{filename}"
 
     def render_body(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> None:
-        """Stage 5 — assemble the note's content through the Markdown writer.
+        """Stage 5 — assemble the note's content, one managed block per page.
 
         Every block goes through :class:`~living_ink.destinations.markup.ObsidianWriter`
         rather than being concatenated by hand, so an element this destination
@@ -559,29 +561,42 @@ class ObsidianDestination(FileSystemDestination):
         represents all eleven natively, so nothing degrades here today — which
         is precisely why the contract needs a second writer to prove it, and
         why ``PlainTextWriter`` exists in the test suite.
+
+        The page is the unit because it is the coarsest one that is still
+        useful and the finest one that is still stable. Keyed on the
+        annotation, every id below a newly highlighted paragraph would shift by
+        one and each user's note would re-attach to the wrong quote.
         """
-        blocks: List[Block] = []
-        for page in doc.pages:
-            blocks.extend(self._page_blocks(page))
-
-        # Text lifted out of the PDF or EPUB itself, which is worth publishing
-        # only when no page produced anything — otherwise it duplicates them.
-        if doc.body_text and not any(page.text.strip() for page in doc.pages):
-            blocks.extend(to_blocks(doc.body_text.strip()))
-
-        images = [image_block(page) for page in doc.pages if page.index in layout.attachment_links]
-        if images:
-            blocks.append(Block(kind=BlockKind.DIVIDER))
-            blocks.append(Block(kind=BlockKind.HEADING, text="Original Pages", level=2))
-            blocks.extend(images)
-
         write_ctx = WriteContext(
             resolve_attachment=lambda page: layout.attachment_links.get(page.index, ""),
             settings=ctx.settings,
         )
-        body, degradations = self._writer.render(blocks, write_ctx)
-        layout.warnings.extend(d.describe() for d in degradations)
-        layout.body = str(body)
+
+        def rendered(blocks: List[Block]) -> str:
+            text, degradations = self._writer.render(blocks, write_ctx)
+            layout.warnings.extend(d.describe() for d in degradations)
+            return str(text)
+
+        for page in doc.pages:
+            layout.blocks.append(
+                NoteBlock(f"page-{page.number}", rendered(self._page_blocks(page)))
+            )
+
+        # Text lifted out of the PDF or EPUB itself, which is worth publishing
+        # only when no page produced anything — otherwise it duplicates them.
+        if doc.body_text and not any(page.text.strip() for page in doc.pages):
+            layout.blocks.append(
+                NoteBlock(_BODY_BLOCK, rendered(list(to_blocks(doc.body_text.strip()))))
+            )
+
+        images = [image_block(page) for page in doc.pages if page.index in layout.attachment_links]
+        if images:
+            gallery: List[Block] = [
+                Block(kind=BlockKind.DIVIDER),
+                Block(kind=BlockKind.HEADING, text="Original Pages", level=2),
+                *images,
+            ]
+            layout.blocks.append(NoteBlock(notemerge.ATTACHMENTS_BLOCK, rendered(gallery)))
 
     def render_metadata(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> None:
         """Stage 6 — build the YAML frontmatter Living Ink owns.
@@ -638,8 +653,19 @@ class ObsidianDestination(FileSystemDestination):
         )
 
     def commit(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> PublishResult:
-        """Stage 7 — splice the generated region into the note and write it once."""
-        final_md = notemerge.render(layout.metadata, layout.body, layout.existing_text)
+        """Stage 7 — splice the generated blocks into the note and write it once.
+
+        The merge's surprises — a block the user typed inside, a block this run
+        did not produce — become warnings on the result rather than log lines,
+        because they describe the user's own writing and they are the reason to
+        go and look at the note.
+        """
+        final_md, surprises = notemerge.render(
+            layout.metadata,
+            [(block.block_id, block.content) for block in layout.blocks],
+            layout.existing_text,
+        )
+        layout.warnings.extend(surprises)
         return self.write_note(layout, final_md)
 
     # ------------------------------------------------------------------

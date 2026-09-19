@@ -590,7 +590,7 @@ class TestObsidianPreservesUserEdits:
             dest.publish(*make_both("Meeting Notes", f"Transcript v{version}"))
 
         written = note.read_text(encoding="utf-8")
-        assert written.count(notemerge.MANAGED_BEGIN) == 1
+        assert written.count("living-ink:begin") == 1
         assert written.count("Transcript v") == 1
 
 

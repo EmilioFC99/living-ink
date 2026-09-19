@@ -261,10 +261,14 @@ class TestTheStateKeyIsDeclared:
 class TestMergeUnit:
     """How much of an existing note a destination rewrites is declared, not guessed."""
 
-    def test_both_shipped_destinations_replace_the_whole_note(self):
-        """Neither can anchor a page boundary a reader cannot see — yet."""
+    def test_obsidian_rewrites_one_page_at_a_time(self):
+        """A marked block per page, so the note under a page is left alone."""
+        assert ObsidianDestination.merge_unit is MergeUnit.PAGE
+
+    def test_apple_notes_replaces_the_whole_note(self):
+        """No addressable sub-unit: a whole HTML body per osascript call, and
+        a reader-invisible comment does not survive the round trip at all."""
         assert AppleNotesDestination.merge_unit is MergeUnit.DOCUMENT
-        assert ObsidianDestination.merge_unit is MergeUnit.DOCUMENT
 
     def test_the_default_is_the_assumption_that_is_never_unsafe(self, clean_registry):
         @register_destination("quiet")
