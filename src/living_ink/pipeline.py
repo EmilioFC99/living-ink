@@ -34,8 +34,11 @@ from living_ink.config import (
     get_config_path,
     get_data_dir,
     get_logs_dir,
+    split_problems,
+    validate_config,
 )
 from living_ink.destinations import (
+    DESTINATION_REGISTRY,
     AppleNotesDestination,
     Destination,
     DestinationError,
@@ -133,6 +136,45 @@ def ensure_runtime_dirs() -> None:
 
 
 # --- CONFIGURATION LOADING (YAML) ---
+def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
+    """Validate a parsed config and act on what the schema found.
+
+    Warnings are printed and logged; the run continues, because an unknown key
+    is as likely to be a plugin's or a newer build's as it is a typo. Errors
+    stop the run: a value nothing can read would otherwise be replaced by a
+    default, and the user would get a result their config does not explain.
+
+    Sections belonging to registered destinations are passed through as known,
+    so adding a destination does not make its own config section look like a
+    misspelling.
+
+    Args:
+        config: Parsed ``config.yml`` contents.
+        cfg_path: Where that config was read from, named in the error so the
+            user knows which of the eight candidate paths actually won.
+
+    Raises:
+        ConfigurationMissing: If any value is unusable as written.
+    """
+    errors, warnings = split_problems(
+        validate_config(config, extra_sections=tuple(DESTINATION_REGISTRY))
+    )
+
+    for problem in warnings:
+        message = f"config.yml — {problem.describe()}"
+        print(f"⚠️  {message}")
+        _logger.warning(message)
+
+    if not errors:
+        return
+
+    detail = "; ".join(problem.describe() for problem in errors)
+    raise ConfigurationMissing(
+        f"{cfg_path} has {len(errors)} unusable value(s): {detail}",
+        hint=f"edit {cfg_path}",
+    )
+
+
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Load configuration from YAML and export the credentials third parties read.
 
@@ -237,6 +279,12 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             # empty dict rather than abort the run before it reports anything.
             print(f"Critical error loading config.yml: {e}")
             logging.debug("Loading %s failed", cfg_path, exc_info=True)
+
+        # Outside the try above on purpose: that block exists to keep a
+        # malformed config from aborting the run before it reports anything,
+        # and swallowing the validation result would defeat the point of
+        # validating.
+        check_config(yaml_config, cfg_path)
 
     # Legacy Fallback
     try:

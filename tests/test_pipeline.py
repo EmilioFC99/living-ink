@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from living_ink import logs, pipeline
+from living_ink.config import ConfigurationMissing
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import (
     LOG_PATH,
@@ -635,6 +636,51 @@ class TestConfigPermissionRepair:
 
     def test_a_missing_config_is_not_an_error(self, tmp_path):
         assert pipeline.load_yaml_config(tmp_path / "absent.yml") == {}
+
+
+class TestConfigIsValidatedOnLoad:
+    """A config that parses is not the same as a config that means something."""
+
+    def _write(self, tmp_path, body):
+        """Write a config file and return its path."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(body, encoding="utf-8")
+        # Already private, so the permission repair does not add a warning of
+        # its own to the output these tests read.
+        cfg.chmod(0o600)
+        return cfg
+
+    def test_a_misspelled_section_is_reported_and_the_run_continues(self, tmp_path, capsys):
+        """The old behaviour was silence, then "0 notebooks published"."""
+        cfg = self._write(tmp_path, "obsidain:\n  vault_path: /tmp/v\n")
+        loaded = pipeline.load_yaml_config(cfg)
+        assert loaded == {"obsidain": {"vault_path": "/tmp/v"}}
+        assert "did you mean obsidian?" in capsys.readouterr().out
+
+    def test_an_unusable_value_stops_the_run(self, tmp_path):
+        """Proceeding would silently substitute the default for what was asked."""
+        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: many\n")
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            pipeline.load_yaml_config(cfg)
+        assert "max_notebooks_per_run" in str(excinfo.value)
+        assert str(cfg) in excinfo.value.hint
+
+    def test_a_valid_config_says_nothing(self, tmp_path, capsys):
+        """Validation must not add noise to the normal path."""
+        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+        pipeline.load_yaml_config(cfg)
+        assert "⚠️" not in capsys.readouterr().out
+
+    def test_a_registered_destination_section_is_not_a_typo(self, tmp_path, capsys):
+        """Every shipped destination's own section must pass its own check."""
+        cfg = self._write(tmp_path, "apple_notes:\n  enabled: true\n")
+        pipeline.load_yaml_config(cfg)
+        assert "unknown section" not in capsys.readouterr().out
+
+    def test_a_syntax_error_still_degrades_instead_of_raising(self, tmp_path):
+        """An unparseable file yields no config to validate, and already reports itself."""
+        cfg = self._write(tmp_path, "ai:\n  provider: [unclosed\n")
+        assert pipeline.load_yaml_config(cfg) == {}
 
 
 class TestProcessedLog:

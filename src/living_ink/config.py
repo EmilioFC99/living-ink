@@ -3,11 +3,18 @@
 Supports standard XDG directories for global tool installations while
 maintaining full backward compatibility with repository-relative paths
 during local development and testing.
+
+Also holds the declarative schema every ``config.yml`` is checked against on
+load (:data:`CONFIG_SCHEMA`, :func:`validate_config`). A misspelled key used to
+parse cleanly and be ignored, which surfaced much later as "0 notebooks
+published" and no reason given.
 """
 
+import difflib
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 
 class ConfigurationMissing(Exception):
@@ -158,3 +165,317 @@ def get_logs_dir(repo_dir: Optional[Path] = None) -> Path:
         Path to logs directory.
     """
     return get_data_dir(repo_dir) / "logs"
+
+
+# ---------------------------------------------------------------------------
+# Config schema
+# ---------------------------------------------------------------------------
+
+#: Version of the ``config.yml`` shape this build understands.
+#:
+#: Written into every config the setup wizard generates. It is not a
+#: requirement — a file without one is assumed to be version 1, because every
+#: config written before this existed is one — but it is the hook a future
+#: breaking change branches on, and it lets an old build refuse a file written
+#: by a newer one instead of silently ignoring half of it.
+SCHEMA_VERSION = 1
+
+#: Marker for "any scalar is fine here", used for free-text values.
+TEXT = "text"
+#: Marker for "must read as a whole number".
+WHOLE = "whole number"
+#: Marker for "must read as true or false".
+FLAG = "true/false"
+#: Marker for "must read as a number, decimals allowed".
+NUMBER = "number"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
+
+#: What a ``config.yml`` may contain.
+#:
+#: A mapping means a section and lists the keys that section accepts; a marker
+#: means a bare top-level key. Anything not named here is a warning rather than
+#: an error: an old config, or one carrying keys for a destination this build
+#: was not shipped with, must keep working. Sections belonging to a registered
+#: destination are exempt from key checking entirely — see the
+#: ``extra_sections`` argument to :func:`validate_config`.
+CONFIG_SCHEMA: Dict[str, Union[str, Dict[str, str]]] = {
+    "schema_version": WHOLE,
+    # The pre-``remarkable:`` spelling, still read by Settings._config_values.
+    "use_ssh": FLAG,
+    "ai": {
+        "provider": TEXT,
+        "api_key": TEXT,
+        "model": TEXT,
+        "base_url": TEXT,
+        "temperature": NUMBER,
+    },
+    "openai": {
+        "api_key": TEXT,
+        "model": TEXT,
+    },
+    "remarkable": {
+        "device_token": TEXT,
+        "preferred_connection": TEXT,
+        "use_ssh": FLAG,
+        "ssh_host": TEXT,
+        "ssh_user": TEXT,
+        "ssh_port": WHOLE,
+    },
+    "sync": {
+        "sync_pdfs": FLAG,
+        "sync_epubs": FLAG,
+        "max_notebooks_per_run": WHOLE,
+        "ocr_concurrency": WHOLE,
+        "transcript_cache": FLAG,
+        "render_cache": FLAG,
+        "cache_max_age_days": WHOLE,
+    },
+    "google_vision": {
+        "credentials_path": TEXT,
+        "credentials_json": TEXT,
+    },
+    "obsidian": {
+        "enabled": FLAG,
+        "vault_path": TEXT,
+        "root_folder": TEXT,
+        "mirror_folders": FLAG,
+        "attachments_folder": TEXT,
+    },
+    "apple_notes": {
+        "enabled": FLAG,
+        "folder_name": TEXT,
+    },
+    # The single-destination era's block, normalised away by
+    # destinations._apply_legacy_destination. Free-form on purpose: its keys
+    # are whichever destination it names.
+    "destination": {},
+}
+
+ERROR = "error"
+WARNING = "warning"
+
+
+@dataclass(frozen=True)
+class ConfigProblem:
+    """One thing wrong with a ``config.yml``.
+
+    Attributes:
+        level: :data:`ERROR` (the run cannot proceed) or :data:`WARNING`
+            (the value is ignored but everything else still works).
+        path: Dotted location of the offending key, e.g. ``obsidian.vault_path``.
+        message: What is wrong, in one sentence.
+        hint: The suggested fix, or an empty string when there is nothing
+            better to say than the message itself.
+    """
+
+    level: str
+    path: str
+    message: str
+    hint: str = ""
+
+    def describe(self) -> str:
+        """Render the problem as a single line for a console or a log.
+
+        Returns:
+            ``"obsidian.vault_pat: unknown key (did you mean vault_path?)"``.
+        """
+        text = f"{self.path}: {self.message}"
+        return f"{text} ({self.hint})" if self.hint else text
+
+
+def _reads_as(value: Any, kind: str) -> bool:
+    """Report whether a YAML value can be used as the declared kind.
+
+    Deliberately permissive about spelling and strict about meaning. YAML gives
+    no way to say "this 22 is a string", and Settings already coerces, so
+    ``ssh_port: "22"`` is accepted. ``max_notebooks_per_run: many`` is not,
+    because nothing downstream can turn that into a number and the run would
+    quietly fall back to the default instead.
+
+    Args:
+        value: The parsed YAML value.
+        kind: One of :data:`TEXT`, :data:`WHOLE`, :data:`FLAG`, :data:`NUMBER`.
+
+    Returns:
+        True when the value is usable as that kind.
+    """
+    if isinstance(value, (dict, list)):
+        return False
+
+    if kind == TEXT:
+        return True
+
+    if kind == FLAG:
+        if isinstance(value, bool):
+            return True
+        return str(value).strip().lower() in _TRUTHY | _FALSEY
+
+    # A bool is an int in Python, but ``ssh_port: true`` is a mistake, not a
+    # port, so it is rejected before the numeric checks see it.
+    if isinstance(value, bool):
+        return False
+
+    if kind == WHOLE:
+        if isinstance(value, int):
+            return True
+        try:
+            int(str(value).strip())
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    if kind == NUMBER:
+        if isinstance(value, (int, float)):
+            return True
+        try:
+            float(str(value).strip())
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    return True
+
+
+def _did_you_mean(key: str, candidates: Iterable[str]) -> str:
+    """Suggest the schema key a misspelling was probably reaching for.
+
+    Args:
+        key: The unrecognised key as written.
+        candidates: The keys that would have been accepted in its place.
+
+    Returns:
+        ``"did you mean obsidian?"``, or an empty string when nothing is close
+        enough that guessing would help more than it misleads.
+    """
+    matches = difflib.get_close_matches(key, list(candidates), n=1, cutoff=0.7)
+    return f"did you mean {matches[0]}?" if matches else ""
+
+
+def _check_section(name: str, section: Any, allowed: Dict[str, str]) -> List[ConfigProblem]:
+    """Validate one section of a config against the keys it accepts.
+
+    Args:
+        name: The section's name, used to build the dotted path in a problem.
+        section: The parsed value found under that name.
+        allowed: Key name to kind marker. An empty mapping means the section is
+            free-form and only its shape is checked.
+
+    Returns:
+        Every problem found inside this section, in file order.
+    """
+    problems: List[ConfigProblem] = []
+
+    if section is None:
+        return problems
+    if not isinstance(section, dict):
+        return [
+            ConfigProblem(
+                ERROR,
+                name,
+                f"expected a section of settings, found {type(section).__name__}",
+                "indent its settings underneath it",
+            )
+        ]
+    if not allowed:
+        return problems
+
+    for key, value in section.items():
+        path = f"{name}.{key}"
+        kind = allowed.get(str(key))
+        if kind is None:
+            problems.append(
+                ConfigProblem(
+                    WARNING, path, "unknown key, ignored", _did_you_mean(str(key), allowed)
+                )
+            )
+        elif value is not None and not _reads_as(value, kind):
+            problems.append(ConfigProblem(ERROR, path, f"expected {kind}, found {value!r}"))
+    return problems
+
+
+def validate_config(
+    config: Optional[Dict[str, Any]], extra_sections: Sequence[str] = ()
+) -> List[ConfigProblem]:
+    """Check a parsed ``config.yml`` against :data:`CONFIG_SCHEMA`.
+
+    Two kinds of problem, treated differently on purpose. An unknown key is a
+    *warning*: it is almost always a typo, but it may equally be a setting a
+    newer build added or one a plugin reads, and refusing to run over it would
+    make every upgrade a breaking change. A value of the wrong type is an
+    *error*: nothing downstream can use it, so the run would proceed on the
+    default and report a result the config does not explain.
+
+    Args:
+        config: Parsed config contents. ``None`` and ``{}`` are valid — every
+            setting has a default.
+        extra_sections: Section names that exist but whose keys this function
+            must not police, such as the config section of a destination
+            registered at runtime. Their shape is still checked.
+
+    Returns:
+        Every problem found, errors and warnings interleaved in file order.
+        An empty list means the config is usable as written.
+    """
+    if not config:
+        return []
+    if not isinstance(config, dict):
+        return [
+            ConfigProblem(
+                ERROR,
+                "config.yml",
+                f"expected a mapping of sections, found {type(config).__name__}",
+            )
+        ]
+
+    problems: List[ConfigProblem] = []
+    known = set(CONFIG_SCHEMA) | set(extra_sections)
+
+    declared = config.get("schema_version")
+    if declared is not None and _reads_as(declared, WHOLE) and int(declared) > SCHEMA_VERSION:
+        problems.append(
+            ConfigProblem(
+                ERROR,
+                "schema_version",
+                f"config is version {int(declared)}, this build understands {SCHEMA_VERSION}",
+                "upgrade Living Ink",
+            )
+        )
+
+    for name, value in config.items():
+        key = str(name)
+        schema = CONFIG_SCHEMA.get(key)
+
+        if schema is None:
+            if key in extra_sections:
+                problems.extend(_check_section(key, value, {}))
+            else:
+                problems.append(
+                    ConfigProblem(
+                        WARNING, key, "unknown section, ignored", _did_you_mean(key, known)
+                    )
+                )
+        elif isinstance(schema, dict):
+            problems.extend(_check_section(key, value, schema))
+        elif value is not None and not _reads_as(value, schema):
+            problems.append(ConfigProblem(ERROR, key, f"expected {schema}, found {value!r}"))
+
+    return problems
+
+
+def split_problems(
+    problems: Sequence[ConfigProblem],
+) -> Tuple[List[ConfigProblem], List[ConfigProblem]]:
+    """Separate the problems that stop a run from the ones that do not.
+
+    Args:
+        problems: The output of :func:`validate_config`.
+
+    Returns:
+        ``(errors, warnings)``, each in the order they were reported.
+    """
+    return (
+        [p for p in problems if p.level == ERROR],
+        [p for p in problems if p.level == WARNING],
+    )

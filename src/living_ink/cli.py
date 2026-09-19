@@ -174,7 +174,10 @@ class SyncCommand(BaseCommand):
                 # wizard and then retries the *sync*, which is not what someone
                 # asking a read-only question wanted to set in motion.
                 print(f"Configuration problem: {e}", file=sys.stderr)
-                print("Run 'living-ink setup' to fix it.", file=sys.stderr)
+                # The error's own hint, not a fixed line: a config that is
+                # merely absent wants the wizard, one with an unusable value
+                # wants an editor, and only the raiser knows which it is.
+                print(f"Fix: {e.hint}", file=sys.stderr)
                 return 1
 
         try:
