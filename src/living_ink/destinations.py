@@ -652,19 +652,23 @@ class ObsidianDestination(Destination):
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
         """Build an Obsidian destination, or skip it if no vault is configured.
 
+        Every value comes from the resolved settings rather than the section,
+        so a vault named by ``LIVING_INK_OBSIDIAN_VAULT_PATH`` or by a flag
+        outranks the one in the file. The section is still what decides whether
+        this destination runs at all; :func:`build_destinations` reads that.
+
         Returns:
             The destination, or None when ``vault_path`` is missing — a vault
             is the one thing this destination cannot guess.
         """
-        vault_path = section.get("vault_path")
-        if not vault_path:
+        if not settings.obsidian_vault_path:
             print("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
             return None
         return cls(
-            vault_path=vault_path,
-            attachments_folder=section.get("attachments_folder", "_attachments"),
-            root_folder=section.get("root_folder"),
-            mirror_folders=section.get("mirror_folders", True),
+            vault_path=settings.obsidian_vault_path,
+            attachments_folder=settings.obsidian_attachments_folder,
+            root_folder=settings.obsidian_root_folder,
+            mirror_folders=settings.obsidian_mirror_folders,
         )
 
     def describe(self) -> str:

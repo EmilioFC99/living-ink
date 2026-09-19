@@ -125,6 +125,19 @@ class TestConfigValues:
         assert s.transcript_cache is False
         assert s.verbosity == "verbose"
 
+    def test_a_blank_string_in_the_file_is_a_value_not_an_omission(self):
+        """An empty attachments folder means "beside the note", not "default"."""
+        s = Settings.resolve(config={"obsidian": {"attachments_folder": ""}}, env={})
+        assert s.obsidian_attachments_folder == ""
+
+    def test_a_blank_environment_variable_is_an_omission(self):
+        """A variable set to nothing is how a shell says "unset"."""
+        s = Settings.resolve(
+            config={"obsidian": {"attachments_folder": "Pages"}},
+            env={"LIVING_INK_OBSIDIAN_ATTACHMENTS_FOLDER": ""},
+        )
+        assert s.obsidian_attachments_folder == "Pages"
+
     def test_cloud_preference_disables_ssh_unless_stated(self):
         s = Settings.resolve(config={"remarkable": {"preferred_connection": "cloud"}}, env={})
         assert s.use_ssh is False

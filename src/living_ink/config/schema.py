@@ -519,6 +519,12 @@ SETTINGS: Tuple[Setting, ...] = (
         flag="--prune",
     ),
     # ── Destinations ───────────────────────────────────────────────────────
+    #
+    # The legacy dict form of the retired ``destination:`` key both selected a
+    # destination and configured it (``destination: {type: obsidian,
+    # vault_path: …}``), so each setting it could carry names that spelling as
+    # a legacy key. Otherwise the destination would have to read the raw
+    # section to find a value the settings never saw.
     Setting(
         field="obsidian_enabled",
         key="obsidian.enabled",
@@ -535,6 +541,7 @@ SETTINGS: Tuple[Setting, ...] = (
         help="Path to the vault this run publishes into.",
         env="LIVING_INK_OBSIDIAN_VAULT_PATH",
         flag="--destination",
+        legacy_keys=("destination.vault_path",),
     ),
     Setting(
         field="obsidian_root_folder",
@@ -544,6 +551,7 @@ SETTINGS: Tuple[Setting, ...] = (
         help="Folder inside the vault that everything lands under.",
         env="LIVING_INK_OBSIDIAN_ROOT_FOLDER",
         flag="--destination-folder",
+        legacy_keys=("destination.root_folder",),
     ),
     Setting(
         field="obsidian_mirror_folders",
@@ -554,6 +562,7 @@ SETTINGS: Tuple[Setting, ...] = (
         env="LIVING_INK_OBSIDIAN_MIRROR_FOLDERS",
         flag="--mirror-folders",
         negated="--no-mirror-folders",
+        legacy_keys=("destination.mirror_folders",),
     ),
     Setting(
         field="obsidian_attachments_folder",
@@ -563,6 +572,7 @@ SETTINGS: Tuple[Setting, ...] = (
         help="Subfolder page images land in. Empty means beside the note.",
         env="LIVING_INK_OBSIDIAN_ATTACHMENTS_FOLDER",
         flag="--attachments-folder",
+        legacy_keys=("destination.attachments_folder",),
     ),
     Setting(
         field="obsidian_embed_images",
@@ -589,6 +599,7 @@ SETTINGS: Tuple[Setting, ...] = (
         default=DEFAULT_APPLE_NOTES_FOLDER,
         help="Destination folder name in Apple Notes.",
         env="APPLE_NOTES_FOLDER",
+        legacy_keys=("destination.folder_name",),
     ),
     # ── Watch ──────────────────────────────────────────────────────────────
     #

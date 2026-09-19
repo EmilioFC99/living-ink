@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from living_ink.config import apply_status
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
@@ -14,8 +15,6 @@ from living_ink.destinations import (
     register_destination,
 )
 from living_ink.settings import Settings
-
-SETTINGS = Settings.resolve(config={}, env={})
 
 
 @pytest.fixture
@@ -27,9 +26,16 @@ def clean_registry():
     DESTINATION_REGISTRY.update(original)
 
 
-def build(config, settings=SETTINGS) -> List[Destination]:
-    """Build destinations from a config dict."""
-    return build_destinations(config, settings)
+def build(config, settings=None) -> List[Destination]:
+    """Build destinations from a config dict, the way the pipeline does.
+
+    The pipeline hands ``build_destinations`` a config that has been through
+    :func:`apply_status` and the settings resolved from that same config, so
+    the helper does both: a destination now reads its values from the settings,
+    and resolving them from somewhere else would test a wiring that never runs.
+    """
+    prepared = apply_status(config)
+    return build_destinations(prepared, settings or Settings.resolve(prepared, env={}))
 
 
 class TestShippedDestinations:
@@ -77,6 +83,27 @@ class TestShippedDestinations:
         assert [type(d) for d in built] == [AppleNotesDestination]
         assert "obsidian" in capsys.readouterr().out.lower()
 
+    def test_obsidian_reads_its_vault_from_the_environment(self, tmp_path):
+        config = {"apple_notes": {"enabled": False}, "obsidian": {"enabled": True}}
+        settings = Settings.resolve(
+            config=config, env={"LIVING_INK_OBSIDIAN_VAULT_PATH": str(tmp_path)}
+        )
+        (dest,) = build(config, settings)
+        assert dest.vault_path == tmp_path.resolve()
+
+    def test_an_environment_vault_outranks_the_file(self, tmp_path):
+        chosen = tmp_path / "chosen"
+        chosen.mkdir()
+        config = {
+            "apple_notes": {"enabled": False},
+            "obsidian": {"enabled": True, "vault_path": str(tmp_path)},
+        }
+        settings = Settings.resolve(
+            config=config, env={"LIVING_INK_OBSIDIAN_VAULT_PATH": str(chosen)}
+        )
+        (dest,) = build(config, settings)
+        assert dest.vault_path == chosen.resolve()
+
     def test_describe_names_the_setting_that_matters(self, tmp_path):
         assert "Ideas" in AppleNotesDestination(folder_name="Ideas").describe()
         assert str(tmp_path.resolve()) in ObsidianDestination(vault_path=str(tmp_path)).describe()
@@ -104,6 +131,29 @@ class TestLegacyDestinationKey:
             "destination": {"type": "obsidian"},
         }
         assert [type(d) for d in build(config)] == [ObsidianDestination]
+
+    def test_dict_form_still_configures_apple_notes(self):
+        config = {"destination": {"type": "apple_notes", "folder_name": "Ideas"}}
+        (dest,) = build(config)
+
+        assert isinstance(dest, AppleNotesDestination)
+        assert dest.folder_name == "Ideas"
+
+    def test_dict_form_carries_the_rest_of_the_obsidian_settings(self, tmp_path):
+        config = {
+            "destination": {
+                "type": "obsidian",
+                "vault_path": str(tmp_path),
+                "root_folder": "Ink",
+                "attachments_folder": "",
+                "mirror_folders": False,
+            }
+        }
+        (dest,) = build(config)
+
+        assert dest.root_folder == "Ink"
+        assert dest.attachments_folder == ""
+        assert dest.mirror_folders is False
 
     def test_unrecognized_legacy_value_is_ignored(self):
         assert [type(d) for d in build({"destination": 42})] == [AppleNotesDestination]

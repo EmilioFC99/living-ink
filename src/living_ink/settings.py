@@ -58,6 +58,7 @@ from living_ink.config.schema import (
     PATH,
     SETTINGS,
     STORE_CREDENTIALS,
+    TEXT,
     WHOLE,
     Setting,
 )
@@ -622,8 +623,13 @@ def _coerce(setting: Setting, value: Any, seen: Mapping[str, Any]) -> Any:
     if setting.kind == CHOICE:
         text = as_str(value, default)
         return text.lower() if isinstance(text, str) else text
-    if setting.kind == PATH:
-        return as_str(value, default)
+    if setting.kind in (TEXT, PATH) and value is not None and not str(value).strip():
+        # An explicit blank is a value, not an omission: an empty
+        # ``obsidian.attachments_folder`` means "beside the note". A blank
+        # environment variable never reaches here — :meth:`Settings._pick`
+        # reads that as unset, which is what a shell means by it — so a blank
+        # arriving here was written in the file or typed on the command line.
+        return ""
     return as_str(value, default)
 
 
