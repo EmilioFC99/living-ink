@@ -1330,7 +1330,7 @@ class TestStatusReportsWhatItWasGiven:
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "ok"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "ok"))
         monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
-        monkeypatch.setattr(api_module, "resolve_stored_token", lambda: "")
+        monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
 
         return config, values
 
@@ -1710,7 +1710,7 @@ class TestSetupWritesOnlyWhatItWasTold:
 
         wizard()
         monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
-        monkeypatch.setattr(api_module, "resolve_stored_token", lambda: "")
+        monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "OK"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "OK"))
 

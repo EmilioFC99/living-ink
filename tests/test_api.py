@@ -346,6 +346,27 @@ class TestWhereTheCloudTokenComesFrom:
 
         assert resolve_stored_token() is None
 
+    def test_a_caller_with_a_config_in_hand_reads_that_profile(self, tmp_path):
+        """``living-ink status --root`` must report on the config it resolved.
+
+        Reading the default profile instead reported the connection state of an
+        account the run was never going to use.
+        """
+        other = tmp_path / "other" / "config.yml"
+        write_secret(CLOUD_TOKEN, "default-profile-token")
+        write_secret(CLOUD_TOKEN, "other-profile-token", config_path=other)
+
+        assert resolve_stored_token(config_path=other) == "other-profile-token"
+
+    def test_migration_lands_in_the_profile_that_asked_for_it(self, tmp_path):
+        other = tmp_path / "other" / "config.yml"
+        (self.home / ".rmapi").write_text("legacy-token", encoding="utf-8")
+
+        resolve_stored_token(config_path=other)
+
+        assert read_secret(CLOUD_TOKEN, config_path=other) == "legacy-token"
+        assert read_secret(CLOUD_TOKEN) is None
+
     def test_pairing_writes_the_token_to_the_credentials_directory(self, monkeypatch):
         """The whole point: a fresh pairing never touches ``~/.rmapi``."""
         monkeypatch.setattr(

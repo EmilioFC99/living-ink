@@ -712,7 +712,7 @@ def collect_status(config_path: Path) -> StatusReport:
     # well.
     from living_ink.api import resolve_stored_token
 
-    token = rm_cfg.get("device_token", "") or resolve_stored_token()
+    token = rm_cfg.get("device_token", "") or resolve_stored_token(config_path=config_path)
     if token:
         report.cloud_ok, report.cloud_msg = verify_remarkable_token(token)
 

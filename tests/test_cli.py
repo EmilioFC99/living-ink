@@ -227,6 +227,29 @@ def test_cmd_status_finds_a_token_registration_left_in_rmapi(
     mock_verify_cloud.assert_called_once_with("registered-token")
 
 
+@patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
+@patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
+@patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
+def test_cmd_status_reads_the_token_beside_the_config_it_resolved(
+    mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, capsys
+):
+    """A second profile reports on its own account, not the default one."""
+    from living_ink.config import credentials
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    cfg_file = cfg_dir / "config.yml"
+    cfg_file.write_text(
+        "remarkable:\n  preferred_connection: 'cloud'\n  device_token: ''\nai:\n  provider: 'none'\n"
+    )
+    credentials.write_secret(credentials.CLOUD_TOKEN, "default-profile-token")
+    credentials.write_secret(credentials.CLOUD_TOKEN, "this-profile-token", config_path=cfg_file)
+
+    StatusCommand(root=tmp_path).run(MagicMock(json=False))
+
+    mock_verify_cloud.assert_called_once_with("this-profile-token")
+
+
 def test_main_version_flag(capsys):
     """'living-ink --version' outputs version."""
     with patch("sys.argv", ["living-ink", "--version"]):

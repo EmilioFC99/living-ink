@@ -154,7 +154,9 @@ class FallbackClient:
             return other.get_device_info()
 
 
-def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
+def resolve_stored_token(
+    settings: Optional[Settings] = None, config_path: Optional[Path] = None
+) -> Optional[str]:
     """Find the reMarkable device token, wherever it happens to live.
 
     The token reaches the tool by three routes, tried in this order:
@@ -175,6 +177,11 @@ def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
     Args:
         settings: Resolved settings for this run. Defaults to resolving them
             from the environment alone.
+        config_path: The config file whose credentials directory holds route 2.
+            A caller that already resolved a config — ``living-ink status`` with
+            a ``--root``, or a second profile under ``LIVING_INK_CONFIG`` — must
+            pass it, or the token is read from and migrated into the *default*
+            profile's store instead of the one in use.
 
     Returns:
         The token, or None if no route has one.
@@ -184,10 +191,10 @@ def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
     resolved = settings or Settings.from_env()
     token = resolved.remarkable_token
     if token:
-        migrate_secret(CLOUD_TOKEN, token)
+        migrate_secret(CLOUD_TOKEN, token, config_path=config_path)
         return token
 
-    stored = read_secret(CLOUD_TOKEN)
+    stored = read_secret(CLOUD_TOKEN, config_path=config_path)
     if stored:
         return stored
 
@@ -201,7 +208,7 @@ def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
         return None
 
     if legacy:
-        migrate_secret(CLOUD_TOKEN, legacy)
+        migrate_secret(CLOUD_TOKEN, legacy, config_path=config_path)
     return legacy
 
 
