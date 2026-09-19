@@ -180,6 +180,50 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
     )
 
 
+def _weave_stored_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
+    """Join the stored API key to the provider the config names.
+
+    The key is stored per provider — ``ai.api_key.gemini``, not ``ai.api_key``
+    — so that trying OpenAI for an afternoon and going back does not mean
+    retyping the Gemini key. Nothing downstream should have to know that: by
+    the time :func:`configure_ai_provider` sees the section, the key for the
+    selected provider is simply in it.
+
+    A key still sitting in ``config.yml`` from an older install wins and is
+    copied into the credentials directory on the way past, so the move happens
+    once, silently, on the next run.
+
+    Args:
+        yaml_config: The parsed config, modified in place.
+        cfg_path: The config file the credentials directory is derived from.
+    """
+    from living_ink.config.credentials import ai_key_name, migrate_secret, read_secret
+
+    section = yaml_config.get("ai")
+    if not isinstance(section, dict):
+        return
+
+    provider = str(section.get("provider", "")).strip().lower()
+    if not provider or provider == "none":
+        return
+
+    try:
+        name = ai_key_name(provider)
+    except ValueError:
+        # A provider name that cannot be a credential name is a config error,
+        # and get_provider is about to report it far better than this could.
+        return
+
+    in_config = str(section.get("api_key", "") or "").strip()
+    if in_config:
+        migrate_secret(name, in_config, config_path=cfg_path)
+        return
+
+    stored = read_secret(name, config_path=cfg_path)
+    if stored:
+        section["api_key"] = stored
+
+
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """Load configuration from YAML and export the credentials third parties read.
 
@@ -274,6 +318,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                             print(f"❌ Error writing google_creds.json: {weave_err}")
 
                 # 3. AI Provider — initialize from new 'ai' section or legacy 'openai' section
+                _weave_stored_ai_key(yaml_config, cfg_path)
                 configure_ai_provider(yaml_config)
 
         except Exception as e:

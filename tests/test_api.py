@@ -4,6 +4,7 @@ Covers get_rmapi client factory under SSH and Cloud modes with automatic fallbac
 and FallbackClient failover behavior.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +15,10 @@ from living_ink.api import (
     get_document_tags,
     get_file_type,
     get_rmapi,
+    register_and_get_token,
+    resolve_stored_token,
 )
+from living_ink.config.credentials import CLOUD_TOKEN, read_secret, write_secret
 from living_ink.transport import TransportUnavailable, UnsupportedOperation
 
 
@@ -277,3 +281,79 @@ class TestTransportHelpers:
         doc = MagicMock(tags=["ideas"])
 
         assert get_document_tags(client, doc) == ["ideas"]
+
+
+class TestWhereTheCloudTokenComesFrom:
+    """Three routes to one token, and what each one leaves behind."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated(self, tmp_path, monkeypatch):
+        """Redirect both the config directory and the home directory.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+            monkeypatch: Pytest monkeypatch fixture.
+        """
+        monkeypatch.setenv("LIVING_INK_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.delenv("REMARKABLE_TOKEN", raising=False)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        self.home = tmp_path
+
+    def test_no_token_anywhere_is_none(self):
+        assert resolve_stored_token() is None
+
+    def test_the_stored_credential_is_used(self):
+        write_secret(CLOUD_TOKEN, "stored-token")
+
+        assert resolve_stored_token() == "stored-token"
+
+    def test_a_token_in_the_environment_wins(self, monkeypatch):
+        write_secret(CLOUD_TOKEN, "stored-token")
+        monkeypatch.setenv("REMARKABLE_TOKEN", "env-token")
+
+        assert resolve_stored_token() == "env-token"
+
+    def test_a_legacy_rmapi_file_is_still_read(self):
+        (self.home / ".rmapi").write_text("legacy-token", encoding="utf-8")
+
+        assert resolve_stored_token() == "legacy-token"
+
+    def test_a_legacy_token_moves_itself_into_the_credentials_directory(self):
+        """An existing install upgrades without anyone retyping a pairing code."""
+        (self.home / ".rmapi").write_text("legacy-token", encoding="utf-8")
+
+        resolve_stored_token()
+
+        assert read_secret(CLOUD_TOKEN) == "legacy-token"
+
+    def test_the_legacy_file_is_left_where_it_was(self):
+        """Copy, not move: downgrading must not mean re-pairing."""
+        legacy = self.home / ".rmapi"
+        legacy.write_text("legacy-token", encoding="utf-8")
+
+        resolve_stored_token()
+
+        assert legacy.read_text(encoding="utf-8") == "legacy-token"
+
+    def test_the_stored_credential_beats_a_stale_rmapi_file(self):
+        write_secret(CLOUD_TOKEN, "current-token")
+        (self.home / ".rmapi").write_text("stale-token", encoding="utf-8")
+
+        assert resolve_stored_token() == "current-token"
+
+    def test_an_unreadable_legacy_file_is_not_a_crash(self):
+        (self.home / ".rmapi").write_bytes(b"\xff\xfe\x00bad")
+
+        assert resolve_stored_token() is None
+
+    def test_pairing_writes_the_token_to_the_credentials_directory(self, monkeypatch):
+        """The whole point: a fresh pairing never touches ``~/.rmapi``."""
+        monkeypatch.setattr(
+            "living_ink.sync.register_device", lambda code: {"devicetoken": "fresh"}
+        )
+
+        returned = register_and_get_token("abcdefgh")
+
+        assert read_secret(CLOUD_TOKEN) == returned
+        assert "fresh" in returned
+        assert not (self.home / ".rmapi").exists()

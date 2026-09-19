@@ -25,9 +25,7 @@ class TestConfigSchema:
         """The file Living Ink writes itself must not warn about itself."""
         content = generate_config_yaml(
             ai_provider="gemini",
-            ai_api_key="k",
             ai_model="gemini-2.0-flash",
-            remarkable_token="",
             preferred_connection="ssh",
             obsidian_enabled=True,
             obsidian_vault_path="/tmp/vault",

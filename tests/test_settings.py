@@ -276,8 +276,20 @@ class TestExplain:
         token = origins["remarkable_token"]
 
         assert token.secret is True
-        assert token.display() == "set"
+        assert token.display() == "••••••••"
         assert "sekrit" not in token.display()
+
+    def test_a_long_token_shows_its_edges_and_nothing_else(self):
+        """Enough to recognise which token it is, not enough to use it."""
+        secret = "eyJhbGciOi-middle-of-a-real-jwt-9f3c"
+        origins = {
+            o.name: o
+            for o in Settings.explain(config={"remarkable": {"device_token": secret}}, env={})
+        }
+        shown = origins["remarkable_token"].display()
+
+        assert shown == "eyJh••••••••9f3c"
+        assert "middle-of-a-real-jwt" not in shown
 
     def test_display_renders_booleans_and_absences_readably(self):
         origins = {o.name: o for o in Settings.explain(config={}, env={"SYNC_PDFS": "true"})}

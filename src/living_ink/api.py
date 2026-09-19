@@ -157,31 +157,52 @@ class FallbackClient:
 def resolve_stored_token(settings: Optional[Settings] = None) -> Optional[str]:
     """Find the reMarkable device token, wherever it happens to live.
 
-    The token reaches the tool by two routes: the resolved settings (config
-    file or environment) and the ``~/.rmapi`` file that registration writes.
-    Anything that needs to know whether the Cloud is usable must consult both,
-    or it will report "disconnected" for a setup that syncs perfectly well.
+    The token reaches the tool by three routes, tried in this order:
+
+    1. the resolved settings — the environment, or a ``config.yml`` written by
+       an earlier version;
+    2. the credentials directory, which is where this build writes it;
+    3. ``~/.rmapi``, which is where every build before this one wrote it.
+
+    Anything that needs to know whether the Cloud is usable must consult all
+    three, or it will report "disconnected" for a setup that syncs perfectly
+    well. A token found by route 1 or 3 is copied into route 2 on the way
+    past, so an existing install moves itself to owner-only storage on its next
+    run without anyone retyping a pairing code. The original is left where it
+    was: this build no longer writes those places, but downgrading to the
+    previous one must not mean re-pairing.
 
     Args:
         settings: Resolved settings for this run. Defaults to resolving them
             from the environment alone.
 
     Returns:
-        The token, or None if neither route has one.
+        The token, or None if no route has one.
     """
+    from living_ink.config.credentials import CLOUD_TOKEN, migrate_secret, read_secret
+
     resolved = settings or Settings.from_env()
     token = resolved.remarkable_token
     if token:
+        migrate_secret(CLOUD_TOKEN, token)
         return token
+
+    stored = read_secret(CLOUD_TOKEN)
+    if stored:
+        return stored
 
     rmapi_file = Path.home() / ".rmapi"
     if not rmapi_file.exists():
         return None
     try:
-        return rmapi_file.read_text(encoding="utf-8").strip() or None
+        legacy = rmapi_file.read_text(encoding="utf-8").strip() or None
     except (OSError, UnicodeDecodeError) as e:
         logger.debug("Could not read %s: %s", rmapi_file, e, exc_info=True)
         return None
+
+    if legacy:
+        migrate_secret(CLOUD_TOKEN, legacy)
+    return legacy
 
 
 def get_rmapi(settings: Optional[Settings] = None):
@@ -209,8 +230,11 @@ def get_rmapi(settings: Optional[Settings] = None):
     elif resolved.use_ssh:
         preferred = "ssh"
     else:
-        token_candidate = resolved.remarkable_token or (Path.home() / ".rmapi").exists()
-        preferred = "cloud" if token_candidate else "ssh"
+        # Through resolve_stored_token, not a bare ~/.rmapi check: the token
+        # now lands in the credentials directory, so looking only at the legacy
+        # file would guess "ssh" for an install that paired with the Cloud
+        # yesterday.
+        preferred = "cloud" if resolve_stored_token(resolved) else "ssh"
 
     # 2. Instantiate potential clients
     ssh_client = None
@@ -303,17 +327,20 @@ def register_and_get_token(one_time_code: str) -> str:
     Register with reMarkable using a one-time code and return the token.
 
     Get a code from: https://my.remarkable.com/device/desktop/connect
+
+    The token is stored through :mod:`living_ink.config.credentials`, which
+    means atomically and at mode ``0600``. It used to be a bare ``write_text``
+    to ``~/.rmapi``: world-readable per umask, and truncated in place, so an
+    interrupted registration left an empty file that read back as "no token"
+    while the device was in fact paired.
     """
+    from living_ink.config.credentials import CLOUD_TOKEN, write_secret
     from living_ink.sync import register_device
 
     try:
         token_data = register_device(one_time_code)
-
-        # Save to ~/.rmapi for compatibility
-        rmapi_file = Path.home() / ".rmapi"
         token_json = json_module.dumps(token_data)
-        rmapi_file.write_text(token_json)
-
+        write_secret(CLOUD_TOKEN, token_json)
         return token_json
     except Exception as e:
         # Broad because registration reaches the network, the filesystem and a

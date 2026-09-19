@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Type
 
-from living_ink.config import ConfigurationMissing, get_config_path
+from living_ink.config import ConfigurationMissing, credentials, get_config_path
 from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
 from living_ink.transport import TransportUnavailable
 
@@ -492,6 +492,12 @@ class StatusReport:
     cache_entries: int = 0
     cache_bytes: int = 0
 
+    #: Stored credentials any other account on this machine can read. Almost
+    #: always empty — this module writes 0600 — but a file restored from a
+    #: backup or copied with ``cp`` arrives with whatever mode it had, and the
+    #: user is the only one who can fix it.
+    loose_credentials: list[str] = field(default_factory=list)
+
     settings: list[SettingOrigin] = field(default_factory=list)
 
     @property
@@ -564,6 +570,7 @@ class StatusReport:
                 "entries": self.cache_entries,
                 "size_bytes": self.cache_bytes,
             },
+            "credentials": {"insecure": list(self.loose_credentials)},
             "settings": [
                 {
                     "name": origin.name,
@@ -618,6 +625,28 @@ def _describe_connected_device(host: str, port: int, user: str, *, live: bool = 
     except (RuntimeError, OSError) as e:
         logger.debug("Could not identify the device: %s", e, exc_info=True)
         return ""
+
+
+def _status_ai_key(provider: str, ai_cfg: dict[str, Any], config_path: Path) -> str:
+    """Find the API key ``status`` should verify the provider with.
+
+    The stored credential is the real answer; a key left in ``config.yml`` by
+    an older install is the fallback, so a health check run before the first
+    sync — which is what migrates it — still reports the truth.
+
+    Args:
+        provider: The configured provider name.
+        ai_cfg: The ``ai:`` section of the config.
+        config_path: The config file, which locates the credentials beside it.
+
+    Returns:
+        The key, or an empty string when there is none to find.
+    """
+    try:
+        stored = credentials.read_secret(credentials.ai_key_name(provider), config_path=config_path)
+    except ValueError:
+        stored = None
+    return stored or str(ai_cfg.get("api_key", "") or "")
 
 
 def collect_status(config_path: Path) -> StatusReport:
@@ -678,8 +707,9 @@ def collect_status(config_path: Path) -> StatusReport:
     )
 
     # Not rm_cfg["device_token"] alone: registration stores the token in
-    # ~/.rmapi and leaves the config key empty, so reading only the config
-    # reported "Disconnected" for a setup that syncs perfectly well.
+    # the credentials directory and leaves the config key empty, so reading
+    # only the config reported "Disconnected" for a setup that syncs perfectly
+    # well.
     from living_ink.api import resolve_stored_token
 
     token = rm_cfg.get("device_token", "") or resolve_stored_token()
@@ -692,8 +722,12 @@ def collect_status(config_path: Path) -> StatusReport:
     model = ai_cfg.get("model", "")
     report.ai_model = model or "default"
     report.ai_ok, report.ai_msg = verify_ai_provider(
-        report.ai_provider, ai_cfg.get("api_key", ""), model
+        report.ai_provider, _status_ai_key(report.ai_provider, ai_cfg, config_path), model
     )
+
+    report.loose_credentials = [
+        str(path) for path in credentials.insecure_credentials(config_path=config_path)
+    ]
 
     # Obsidian
     obs_cfg = cfg.get("obsidian", {})
@@ -1639,6 +1673,12 @@ class StatusCommand(BaseCommand):
             print(
                 f"Cache:         {report.cache_entries} page(s), {format_size(report.cache_bytes)}"
             )
+
+        # Named one by one rather than counted: the fix is a chmod on a
+        # specific file, so a count would just send the user looking for them.
+        for path in report.loose_credentials:
+            print(f"Credentials:   {yellow('Readable by other accounts')} ({path})")
+            print(f"               {dim(f'→ Run: chmod 600 {path}')}")
 
         StatusCommand._render_settings(report)
         print()

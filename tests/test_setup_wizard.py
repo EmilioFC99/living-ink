@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import yaml
 
 from living_ink import setup_wizard
+from living_ink.config import credentials
 from living_ink.setup_wizard import (
     detect_obsidian_vaults,
     generate_config_yaml,
@@ -99,6 +100,22 @@ class TestRemarkablePairing:
         with patch("pathlib.Path.home", return_value=tmp_path):
             token = get_existing_remarkable_token()
             assert token == "valid-jwt-token"
+
+    def test_get_existing_remarkable_token_prefers_the_credentials_store(
+        self, tmp_path, monkeypatch
+    ):
+        """A stored token wins over ``~/.rmapi``.
+
+        Re-running the wizard must not resurrect a token the user replaced by
+        pairing again: the credentials directory is what this build writes, so
+        it is what this build believes.
+        """
+        monkeypatch.setenv("LIVING_INK_CONFIG_DIR", str(tmp_path / "config"))
+        credentials.write_secret(credentials.CLOUD_TOKEN, "stored-token")
+        (tmp_path / ".rmapi").write_text("stale-token", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            assert get_existing_remarkable_token() == "stored-token"
 
     def test_get_existing_remarkable_token_ignores_placeholder(self, tmp_path):
         """Ignores placeholder token values."""
@@ -220,9 +237,7 @@ class TestConfigGeneration:
         """Generated YAML parses back into valid python dict."""
         yaml_str = generate_config_yaml(
             ai_provider="gemini",
-            ai_api_key="my-key",
             ai_model="gemini-flash-latest",
-            remarkable_token="tok123",
             obsidian_enabled=True,
             obsidian_vault_path="/Users/test/Vault",
             obsidian_root_folder="Living Ink",
@@ -231,8 +246,6 @@ class TestConfigGeneration:
         )
         parsed = yaml.safe_load(yaml_str)
         assert parsed["ai"]["provider"] == "gemini"
-        assert parsed["ai"]["api_key"] == "my-key"
-        assert parsed["remarkable"]["device_token"] == "tok123"
         assert parsed["remarkable"]["preferred_connection"] == "ssh"
         assert parsed["obsidian"]["enabled"] is True
         assert parsed["obsidian"]["vault_path"] == "/Users/test/Vault"
@@ -240,13 +253,28 @@ class TestConfigGeneration:
         assert parsed["obsidian"]["mirror_folders"] is True
         assert parsed["apple_notes"]["enabled"] is False
 
+    def test_generate_config_yaml_holds_no_secrets(self):
+        """The generated config carries no key for a secret at all.
+
+        Not "an empty key": the whole point of the credentials directory is
+        that ``config.yml`` is a file a user can paste into an issue.
+        """
+        parsed = yaml.safe_load(
+            generate_config_yaml(
+                ai_provider="gemini",
+                ai_model="gemini-flash-latest",
+                obsidian_enabled=True,
+                obsidian_vault_path="/Users/test/Vault",
+            )
+        )
+        assert "api_key" not in parsed["ai"]
+        assert "device_token" not in parsed["remarkable"]
+
     def test_generate_config_yaml_with_ssh(self):
         """Generated YAML with use_ssh=True parses with SSH fields."""
         yaml_str = generate_config_yaml(
             ai_provider="ollama",
-            ai_api_key="",
             ai_model="llama3.2",
-            remarkable_token="",
             preferred_connection="ssh",
             use_ssh=True,
             ssh_host="10.11.99.1",
@@ -259,18 +287,15 @@ class TestConfigGeneration:
         assert parsed["remarkable"]["preferred_connection"] == "ssh"
         assert parsed["remarkable"]["use_ssh"] is True
         assert parsed["remarkable"]["ssh_host"] == "10.11.99.1"
-        assert parsed["remarkable"]["device_token"] == ""
 
     def test_generate_config_yaml_escapes_special_characters(self):
         """Quotes, backslashes and colons in user input survive a round-trip."""
-        api_key = 'sk-ab"c\\d:e'
         vault_path = '/Users/test/My "Vault": notes\\here'
         folder = 'Note"s: #1'
 
         parsed = yaml.safe_load(
             generate_config_yaml(
                 ai_provider="openai",
-                ai_api_key=api_key,
                 ai_model="gpt-4o-mini",
                 obsidian_enabled=True,
                 obsidian_vault_path=vault_path,
@@ -280,16 +305,13 @@ class TestConfigGeneration:
             )
         )
 
-        assert parsed["ai"]["api_key"] == api_key
         assert parsed["obsidian"]["vault_path"] == vault_path
         assert parsed["obsidian"]["root_folder"] == folder
         assert parsed["apple_notes"]["folder_name"] == folder
 
     def test_generate_config_yaml_preserves_section_comments(self):
         """The generated file stays readable and hand-editable."""
-        yaml_str = generate_config_yaml(
-            ai_provider="gemini", ai_api_key="k", ai_model="gemini-flash-latest"
-        )
+        yaml_str = generate_config_yaml(ai_provider="gemini", ai_model="gemini-flash-latest")
         assert "# Living Ink Configuration" in yaml_str
         assert "# 1. AI Handwriting OCR & Text Cleanup" in yaml_str
         assert "# 6. Apple Notes Destination" in yaml_str
@@ -422,12 +444,19 @@ class TestRunWizard:
         assert saved_config.exists()
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
         assert cfg["ai"]["provider"] == "gemini"
-        assert cfg["ai"]["api_key"] == "AIzaTestKey"
         assert cfg["remarkable"]["preferred_connection"] == "cloud"
         assert cfg["remarkable"]["use_ssh"] is False
-        assert cfg["remarkable"]["device_token"] == "existing-token"
         assert cfg["obsidian"]["enabled"] is True
         assert cfg["obsidian"]["root_folder"] == "Living Ink"
+
+        # The answers the user typed went to the credentials directory, not here.
+        assert (
+            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
+        )
+        assert (
+            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
+            == "existing-token"
+        )
 
     @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
     @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
@@ -483,13 +512,17 @@ class TestRunWizard:
         assert saved_config.exists()
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
         assert cfg["ai"]["provider"] == "gemini"
-        assert cfg["ai"]["api_key"] == "AIzaTestKey"
         assert cfg["remarkable"]["preferred_connection"] == "ssh"
         assert cfg["remarkable"]["use_ssh"] is True
         assert cfg["remarkable"]["ssh_host"] == "10.11.99.1"
-        assert cfg["remarkable"]["device_token"] == ""
         assert cfg["obsidian"]["enabled"] is True
         assert cfg["obsidian"]["root_folder"] == "Living Ink"
+
+        assert (
+            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
+        )
+        # No Cloud token was offered, so none was stored.
+        assert credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config) is None
 
     @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
     @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="existing-token")
@@ -549,7 +582,10 @@ class TestRunWizard:
         cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
         assert cfg["remarkable"]["preferred_connection"] == "ssh"
         assert cfg["remarkable"]["use_ssh"] is True
-        assert cfg["remarkable"]["device_token"] == "existing-token"
+        assert (
+            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
+            == "existing-token"
+        )
 
 
 # =========================================================================
@@ -558,13 +594,18 @@ class TestRunWizard:
 
 
 class TestSavedConfigPermissions:
-    """The saved config holds an API key and a device token, so it is 0600."""
+    """The config no longer holds secrets, but it and they are still 0600.
+
+    The config describes a vault path and a provider choice, which is enough to
+    keep private; the credentials beside it are the part that must never be
+    group-readable.
+    """
 
     @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
     @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
     @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="secret-token")
     @patch("living_ink.setup_wizard.detect_obsidian_vaults")
-    def test_saved_config_is_owner_only(
+    def test_saved_config_and_credentials_are_owner_only(
         self,
         mock_detect_vaults,
         mock_get_token,
@@ -572,7 +613,7 @@ class TestSavedConfigPermissions:
         mock_verify_rm,
         tmp_path,
     ):
-        """A config carrying credentials must not be readable by other accounts."""
+        """Nothing the wizard writes may be readable by another account."""
         mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
         (tmp_path / "MyVault").mkdir()
         (tmp_path / "MyVault" / "Living Ink").mkdir()
@@ -607,6 +648,16 @@ class TestSavedConfigPermissions:
         assert stat.S_IMODE(saved_config.parent.stat().st_mode) == 0o700
 
         # The credentials still round-trip; tightening must not truncate.
-        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
-        assert cfg["ai"]["api_key"] == "AIzaTestKey"
-        assert cfg["remarkable"]["device_token"] == "secret-token"
+        assert (
+            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
+        )
+        assert (
+            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
+            == "secret-token"
+        )
+
+        stored = list((saved_config.parent / "credentials").iterdir())
+        assert len(stored) == 2
+        for path in stored:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert credentials.insecure_credentials(config_path=saved_config) == []

@@ -532,7 +532,7 @@ class TestStatusSettingsReport:
         report = self._report("remarkable:\n  device_token: sekrit\n")
 
         entries = {s["name"]: s for s in report.to_dict()["settings"]}
-        assert entries["remarkable_token"]["value"] == "set"
+        assert entries["remarkable_token"]["value"] == "••••••••"
         assert "sekrit" not in json.dumps(report.to_dict())
 
     def test_a_missing_config_reports_no_settings(self):
@@ -553,6 +553,111 @@ class TestStatusSettingsReport:
         out = capsys.readouterr().out
         assert "ocr_concurrency" in out
         assert "SYNC_OCR_CONCURRENCY" in out
+
+
+class TestStatusChecksStoredCredentials:
+    """`status` verifies the provider with the key it will actually use."""
+
+    def _collect(self, tmp_path, config_text, secrets=(), verify=None):
+        """Collect a status report against an isolated config directory.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+            config_text: Contents of ``config.yml``.
+            secrets: Pairs of (credential name, value) to store first.
+            verify: Replacement for ``verify_ai_provider``, or None for a stub.
+
+        Returns:
+            The collected StatusReport.
+        """
+        from living_ink.cli import collect_status
+        from living_ink.config import credentials
+
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(config_text)
+        cfg.chmod(0o600)
+        for name, value in secrets:
+            credentials.write_secret(name, value, config_path=cfg)
+
+        with (
+            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
+            patch("living_ink.api.resolve_stored_token", return_value=""),
+            patch(
+                "living_ink.setup_wizard.verify_ai_provider",
+                side_effect=verify or (lambda *a, **kw: (False, "no")),
+            ),
+        ):
+            return collect_status(cfg)
+
+    def test_the_stored_key_is_the_one_verified(self, tmp_path):
+        """A config with no key must not report the provider as unconfigured."""
+        seen = []
+
+        def _verify(provider, api_key="", model=""):
+            seen.append(api_key)
+            return True, "OK"
+
+        self._collect(
+            tmp_path,
+            "ai:\n  provider: gemini\n",
+            secrets=[("ai.api_key.gemini", "AIza-stored")],
+            verify=_verify,
+        )
+
+        assert seen == ["AIza-stored"]
+
+    def test_a_key_still_in_the_config_is_the_fallback(self, tmp_path):
+        """`status` may run before the first sync, which is what migrates it."""
+        seen = []
+
+        def _verify(provider, api_key="", model=""):
+            seen.append(api_key)
+            return True, "OK"
+
+        self._collect(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n", verify=_verify)
+
+        assert seen == ["AIza-legacy"]
+
+    def test_a_loose_credential_is_reported(self, tmp_path):
+        from living_ink.config import credentials
+
+        self._collect(
+            tmp_path, "ai:\n  provider: none\n", secrets=[(credentials.CLOUD_TOKEN, "tok")]
+        )
+        loose = tmp_path / "credentials" / credentials.CLOUD_TOKEN
+        loose.chmod(0o644)
+
+        report = self._collect(tmp_path, "ai:\n  provider: none\n")
+
+        assert report.loose_credentials == [str(loose)]
+        assert report.to_dict()["credentials"]["insecure"] == [str(loose)]
+
+    def test_owner_only_credentials_are_not_reported(self, tmp_path):
+        from living_ink.config import credentials
+
+        report = self._collect(
+            tmp_path, "ai:\n  provider: none\n", secrets=[(credentials.CLOUD_TOKEN, "tok")]
+        )
+
+        assert report.loose_credentials == []
+
+    def test_the_console_names_the_file_and_the_fix(self, tmp_path, capsys):
+        from living_ink.config import credentials
+
+        self._collect(
+            tmp_path, "ai:\n  provider: none\n", secrets=[(credentials.CLOUD_TOKEN, "tok")]
+        )
+        loose = tmp_path / "credentials" / credentials.CLOUD_TOKEN
+        loose.chmod(0o644)
+        report = self._collect(tmp_path, "ai:\n  provider: none\n")
+        capsys.readouterr()
+
+        StatusCommand._render_console(report)
+
+        out = capsys.readouterr().out
+        assert str(loose) in out
+        assert "chmod 600" in out
 
 
 class TestWatchCommand:
