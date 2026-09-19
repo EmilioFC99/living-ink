@@ -109,10 +109,15 @@ class SyncCommand(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
         parser.add_argument("--folder", help="Apple Notes folder override")
-        parser.add_argument(
+        # A transport is a choice, not a preference order: asking for both
+        # says nothing about which one was meant, so argparse rejects the
+        # pair rather than silently picking SSH and syncing from a source
+        # the user may not have intended.
+        transport = parser.add_mutually_exclusive_group()
+        transport.add_argument(
             "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
         )
-        parser.add_argument(
+        transport.add_argument(
             "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
         )
         parser.add_argument(

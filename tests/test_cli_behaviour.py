@@ -101,6 +101,26 @@ BARE_SYNC = SyncOptions(limit=0)
 #: :class:`TestVerbosityIsAcceptedOnBothSides`.
 SYNC_FLAGS_OUTSIDE_THE_OPTIONS = ("--status", "--all", "--verbose", "-q", "--quiet")
 
+#: Sets of sync flags the parser refuses to see together.
+#:
+#: The exhaustive sweep below reads this to decide which of its 512 subsets
+#: must be a usage error instead of an instruction, so an exclusion added to
+#: the parser and not to this set fails the sweep rather than silently
+#: shrinking it.
+MUTUALLY_EXCLUSIVE_SYNC_FLAGS: tuple[frozenset[str], ...] = (frozenset({"--ssh", "--cloud"}),)
+
+
+def is_rejected(flags: tuple[str, ...]) -> bool:
+    """Say whether a set of flags trips one of the parser's exclusions.
+
+    Args:
+        flags: Flag strings, each a key of :data:`SYNC_BOOLEAN_FLAGS`.
+
+    Returns:
+        True if the flags contain every member of an exclusive group.
+    """
+    return any(group <= set(flags) for group in MUTUALLY_EXCLUSIVE_SYNC_FLAGS)
+
 
 def intent(argv: list[str]) -> SyncOptions:
     """Turn a command line into the instruction it encodes.
@@ -289,15 +309,16 @@ class Combination:
 #: ``--dry-run`` is a combination people rely on, and making it an error later
 #: would break scripts.
 #:
-#: ``--ssh --cloud`` is legal today, which is not obviously what anyone expects.
-#: It resolves by precedence rather than by exclusion — see
-#: :class:`TestForcingBothTransports` for what it actually does.
 FLAG_COMPATIBILITY: tuple[Combination, ...] = (
-    # sync — nothing on this command is mutually exclusive.
+    # sync — the transport pair is the only exclusion.
     Combination(("sync", "--notebook", "Work/Notes"), True, "scoping a sync to one notebook"),
     Combination(("sync", "--notebook", "Foo", "--dry-run"), True, "preview one notebook"),
     Combination(("sync", "--notebook", "Foo", "--limit", "3"), True, "both narrow the run"),
-    Combination(("sync", "--ssh", "--cloud"), True, "precedence, not exclusion"),
+    Combination(("sync", "--ssh", "--cloud"), False, "a transport is a choice, not an order"),
+    Combination(("sync", "--cloud", "--ssh"), False, "and the typing order does not rescue it"),
+    Combination(("sync", "--ssh"), True, "one transport is the point of the flag"),
+    Combination(("sync", "--cloud"), True, "and so is the other"),
+    Combination(("sync", "--ssh", "--dry-run"), True, "the exclusion is to --cloud alone"),
     Combination(("sync", "--dry-run", "--prune"), True, "a preview of what pruning would remove"),
     Combination(("sync", "--all-types", "--sync-pdfs"), True, "--all-types simply subsumes it"),
     Combination(("sync", "--status", "--all"), True, "--all qualifies --status"),
@@ -315,6 +336,7 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     # watch — every sync flag, plus its own.
     Combination(("watch", "--interval", "600"), True, "the documented usage"),
     Combination(("watch", "--notebook", "Foo", "--dry-run"), True, "watch takes every sync option"),
+    Combination(("watch", "--ssh", "--cloud"), False, "including sync's exclusions"),
     Combination(("watch", "--interval", "fast"), False, "--interval is typed int"),
     # state — the three actions genuinely exclude one another.
     Combination(("state",), True, "a bare state prints a summary"),
@@ -722,10 +744,12 @@ class TestSyncFlagsMapExactly:
 class TestEveryFlagCombination:
     """All 512 subsets of the boolean flags, checked against the same rule.
 
-    The rule is independence: the options for a set of flags are exactly the
+    The rule has two halves. A subset that trips an exclusion is a usage error;
+    every other subset is independent, meaning its options are exactly the
     union of what each flag does alone. That is a stronger claim than any list
     of hand-picked cases, and it is the claim a user makes when they combine
-    two flags and expect both to apply.
+    two flags and expect both to apply — the exclusions are then the complete,
+    enumerated list of places where that expectation does not hold.
     """
 
     @pytest.mark.parametrize(
@@ -734,11 +758,49 @@ class TestEveryFlagCombination:
             pytest.param(combo, id="+".join(f.lstrip("-") for f in combo) or "none")
             for size in range(len(SYNC_BOOLEAN_FLAGS) + 1)
             for combo in itertools.combinations(sorted(SYNC_BOOLEAN_FLAGS), size)
+            if not is_rejected(combo)
         ],
     )
     def test_flags_do_not_interact(self, flags):
         """Combining flags changes exactly the fields those flags own."""
         assert intent(["sync", *flags]) == expected_for(flags)
+
+    def test_the_two_halves_cover_every_subset(self):
+        """Accepted plus rejected is all 512, with nothing dropped.
+
+        The split is computed, so this is the guard against it quietly
+        narrowing: widen an exclusion by mistake and the sweep would test
+        fewer combinations while still reporting green.
+        """
+        subsets = [
+            combo
+            for size in range(len(SYNC_BOOLEAN_FLAGS) + 1)
+            for combo in itertools.combinations(sorted(SYNC_BOOLEAN_FLAGS), size)
+        ]
+        assert len(subsets) == 2 ** len(SYNC_BOOLEAN_FLAGS)
+        assert sum(1 for combo in subsets if is_rejected(combo)) == 2 ** (
+            len(SYNC_BOOLEAN_FLAGS) - 2
+        )
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param(combo, id="+".join(f.lstrip("-") for f in combo))
+            for size in range(len(SYNC_BOOLEAN_FLAGS) + 1)
+            for combo in itertools.combinations(sorted(SYNC_BOOLEAN_FLAGS), size)
+            if is_rejected(combo)
+        ],
+    )
+    def test_an_excluded_combination_is_a_usage_error(self, flags):
+        """An exclusion holds no matter what else is on the command line.
+
+        The pair is rejected on its own; this says the other flags cannot
+        smuggle it past — an exclusion that only fired for the bare pair would
+        be a gap a real command line walks straight through.
+        """
+        with pytest.raises(SystemExit) as exit_info:
+            intent(["sync", *flags])
+        assert exit_info.value.code == 2
 
 
 class TestFlagOrderIsIrrelevant:
@@ -797,42 +859,51 @@ class TestValueFlagsTakeTheValueGiven:
 
 
 class TestForcingBothTransports:
-    """``--ssh --cloud`` together: legal, and resolved by precedence.
+    """``--ssh --cloud`` is refused; each one alone selects its transport.
 
-    This is the combination the matrix exists to pin. It is *not* rejected —
-    neither by argparse nor by the pipeline — and what actually happens is that
-    ``--ssh`` wins, because the pipeline tests the flags in order rather than
-    treating them as exclusive. Whether it should reject instead is a decision
-    for the generated-flags work; until then, this is the behaviour, and
-    changing it means changing this test on purpose.
+    A transport is a choice, not a preference order. Silently picking one of
+    the two would sync from a source the user did not ask for — over USB when
+    they meant the Cloud, or the other way round — and the two do not
+    necessarily hold the same documents. Refusing at the parser makes that a
+    visible usage error before anything connects.
     """
 
-    def test_the_parser_accepts_both(self):
-        """No usage error, no exclusive group."""
-        options = intent(["sync", "--ssh", "--cloud"])
-        assert options.ssh is True
-        assert options.cloud is True
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["sync", "--ssh", "--cloud"], id="ssh-first"),
+            pytest.param(["sync", "--cloud", "--ssh"], id="cloud-first"),
+            pytest.param(["watch", "--ssh", "--cloud"], id="watch"),
+            pytest.param(["sync", "--ssh", "--dry-run", "--cloud"], id="separated"),
+        ],
+    )
+    def test_the_parser_refuses_both(self, argv):
+        """Exit code 2, whatever the order or what sits between them."""
+        with pytest.raises(SystemExit) as exit_info:
+            intent(argv)
+        assert exit_info.value.code == 2
 
-    def test_ssh_wins_regardless_of_the_order_they_were_typed(self, tmp_path, monkeypatch):
-        """The resolved transport is SSH either way.
+    def test_the_error_names_the_flags_that_clash(self, cli):
+        """The message points at the pair, not just at "usage".
 
-        Reading the resolved settings rather than the flags is the point: the
-        flags are only an input, and what a user experiences is which transport
-        the run actually prefers.
+        A user who typed both needs to know which two to choose between, and
+        argparse only says so if the flags are in one exclusive group.
         """
+        run = cli("sync", "--ssh", "--cloud")
+        assert run.exit_code == 2
+        assert "--ssh" in run.stderr and "--cloud" in run.stderr
+        assert run.calls == []
+
+    def test_ssh_alone_selects_ssh(self, tmp_path):
+        """One flag, one transport, read back from the resolved settings."""
         from living_ink.pipeline import SyncPipeline
 
-        for argv in (["sync", "--ssh", "--cloud"], ["sync", "--cloud", "--ssh"]):
-            pipe = SyncPipeline(
-                options=intent(argv),
-                data_dir=tmp_path,
-                destinations=[],
-            )
-            assert pipe.settings.preferred_connection == "ssh", argv
-            assert pipe.settings.use_ssh is True, argv
+        pipe = SyncPipeline(options=intent(["sync", "--ssh"]), data_dir=tmp_path, destinations=[])
+        assert pipe.settings.preferred_connection == "ssh"
+        assert pipe.settings.use_ssh is True
 
-    def test_cloud_alone_still_selects_cloud(self, tmp_path):
-        """The precedence rule does not make ``--cloud`` unusable."""
+    def test_cloud_alone_selects_cloud(self, tmp_path):
+        """And the other one, so the exclusion did not disable a flag."""
         from living_ink.pipeline import SyncPipeline
 
         pipe = SyncPipeline(options=intent(["sync", "--cloud"]), data_dir=tmp_path, destinations=[])
@@ -923,16 +994,21 @@ class TestFlagCompatibility:
         assert run.exit_code == 2
         assert "not allowed with" in run.stderr
 
-    def test_every_pair_of_sync_booleans_is_accepted(self):
-        """No two sync flags exclude one another, and none ever have.
+    def test_the_declared_exclusions_are_the_only_ones(self):
+        """Exactly the pairs in the table are refused, and no others.
 
         Stated as a sweep rather than a list so that adding a flag extends the
-        claim automatically: the day one of them needs an exclusive group,
-        this fails and the decision gets written down.
+        claim automatically: a new exclusive group fails here until it is
+        written into :data:`MUTUALLY_EXCLUSIVE_SYNC_FLAGS`, and an exclusion
+        that silently disappears fails here too.
         """
         parser = LivingInkCLI().build_parser()
-        for left, right in itertools.combinations(sorted(SYNC_BOOLEAN_FLAGS), 2):
-            parser.parse_args(["sync", left, right])
+        for pair in itertools.combinations(sorted(SYNC_BOOLEAN_FLAGS), 2):
+            if is_rejected(pair):
+                with pytest.raises(SystemExit):
+                    parser.parse_args(["sync", *pair])
+            else:
+                parser.parse_args(["sync", *pair])
 
 
 class TestAbbreviationsAreAccepted:
