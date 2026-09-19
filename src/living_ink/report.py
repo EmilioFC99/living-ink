@@ -45,8 +45,6 @@ class DocumentOutcome:
         cached: Pages served from the transcript cache at no cost.
         destinations: Destinations that accepted the note.
         reason: Why it was skipped or how it failed.
-        reused_transcript: Whether the run adopted an existing transcript whole
-            and so read no pages at all.
         pages_failed: Pages that could not be rendered. The note still
             published, without them, so a ✓ alone would overstate the result.
     """
@@ -59,7 +57,6 @@ class DocumentOutcome:
     cached: int = 0
     destinations: List[str] = field(default_factory=list)
     reason: Optional[str] = None
-    reused_transcript: bool = False
     pages_failed: int = 0
 
     @property
@@ -84,13 +81,7 @@ class DocumentOutcome:
             return f"{line} {self.reason or 'failed'}"
 
         pages = f"{self.pages} page{'' if self.pages == 1 else 's'}"
-        # Adopting an existing transcript reads no pages at all, and printing
-        # "0 transcribed, 0 cached" next to a page count reads as a failure
-        # rather than as the shortcut it is.
-        if self.reused_transcript:
-            work = "transcript reused"
-        else:
-            work = f"{self.transcribed} transcribed, {self.cached} cached"
+        work = f"{self.transcribed} transcribed, {self.cached} cached"
         where = ", ".join(self.destinations) or "nowhere"
         arrow = "⇢" if self.status == WOULD_PUBLISH else "→"
         described = f"{line} {pages:<9} {work:<28} {arrow} {where}"

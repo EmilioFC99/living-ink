@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pymupdf as fitz  # PyMuPDF
 from PIL import Image
@@ -1118,6 +1118,49 @@ def format_page_label(page_num: int, pdf_path: Optional[Path] = None) -> str:
     return f"Page {page_num}"
 
 
+def page_labels(page_nums: Sequence[int], pdf_path: Optional[Path] = None) -> Dict[int, str]:
+    """Label every page of one document, opening the document once.
+
+    :func:`format_page_label` opens and closes the PDF on every call, which is
+    fine for one page and is 300 opens for a 300-page annotated PDF. The label
+    is needed for every page at the same moment — the pages have just been
+    rendered — so the whole set is read in one pass.
+
+    Args:
+        page_nums: 1-indexed physical page numbers, in any order.
+        pdf_path: The underlying document, if there is one. A notebook has
+            none, and an EPUB has no PDF page labels to read.
+
+    Returns:
+        One label per requested page number.
+    """
+    plain = {n: f"Page {n}" for n in page_nums}
+    if not pdf_path or Path(pdf_path).suffix.lower() != ".pdf" or not Path(pdf_path).exists():
+        return plain
+
+    try:
+        import pymupdf as fitz
+
+        with quiet_mupdf():
+            doc = fitz.open(pdf_path)
+            try:
+                for num in page_nums:
+                    idx = num - 1
+                    if not (0 <= idx < len(doc)):
+                        continue
+                    label = doc[idx].get_label()
+                    if label and label.strip() and label.strip().lower() != str(num):
+                        plain[num] = f"Page {label.strip()} (pdf-{num})"
+            finally:
+                doc.close()
+    except _DOC_ERRORS as e:
+        # A label is decoration. A document whose labels cannot be read still
+        # publishes, with the physical page numbers it was going to show anyway.
+        logger.debug(f"Failed to read page labels from {pdf_path}: {e}")
+
+    return plain
+
+
 @lru_cache(maxsize=16)
 def _get_pdf_toc_entries(pdf_path_str: str) -> List[Tuple[int, str, int]]:
     """Cached helper to read Table of Contents entries from a PDF."""
@@ -1176,6 +1219,8 @@ def format_page_section_header(
     page_num: int,
     pdf_path: Optional[Path] = None,
     include_divider: bool = True,
+    label: Optional[str] = None,
+    breadcrumbs: Optional[Sequence[str]] = None,
 ) -> str:
     """Format a page section header with divider and two-tier styled TOC hierarchy.
 
@@ -1191,16 +1236,20 @@ def format_page_section_header(
         page_num: 1-indexed physical page number.
         pdf_path: Optional path to underlying document file.
         include_divider: Whether to prepend a Markdown divider ('---').
+        label: The page label, when the caller already has it. Passing it skips
+            an open of ``pdf_path``, which a per-page loop repeats once a page.
+        breadcrumbs: The TOC path, when the caller already has it. Same reason.
 
     Returns:
         Formatted Markdown header string.
     """
-    page_label = format_page_label(page_num, pdf_path)
-    breadcrumbs = get_pdf_toc_breadcrumbs(page_num, pdf_path)
+    page_label = label if label is not None else format_page_label(page_num, pdf_path)
+    if breadcrumbs is None:
+        breadcrumbs = get_pdf_toc_breadcrumbs(page_num, pdf_path)
 
     if breadcrumbs:
         lowest = breadcrumbs[-1]
-        parents = breadcrumbs[:-1]
+        parents = list(breadcrumbs[:-1])
         if parents:
             sub_text = f"{' | '.join(parents)} | {page_label}"
         else:

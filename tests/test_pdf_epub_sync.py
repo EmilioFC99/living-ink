@@ -4,7 +4,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pymupdf as fitz
 import pytest
@@ -19,6 +19,7 @@ from living_ink.extract import (
     render_pdf_page_preview,
 )
 from living_ink.pipeline import get_document_type
+from tests.builders import make_both, make_page
 
 
 class TestDocumentTypeDetection:
@@ -184,10 +185,7 @@ class TestDestinationDocumentPublishing:
         dummy_doc.write_bytes(b"%PDF-1.4 dummy book content")
 
         success = dest.publish(
-            notebook_name="Book",
-            text_content="Notes on Book",
-            image_paths=[],
-            document_path=dummy_doc,
+            *make_both("Book", "Notes on Book", source="pdf", source_file=dummy_doc)
         )
         assert success.ok is True
 
@@ -222,10 +220,7 @@ class TestDestinationDocumentPublishing:
         monkeypatch.setattr("subprocess.run", mock_run)
 
         success = dest.publish(
-            notebook_name="My PDF Note",
-            text_content="Some note text",
-            image_paths=[],
-            document_path=dummy_doc,
+            *make_both("My PDF Note", "Some note text", source="pdf", source_file=dummy_doc)
         )
         assert success.ok is True
         assert len(captured_script) == 1
@@ -278,16 +273,80 @@ class TestPageLabelFormatting:
         img_path = tmp_path / "page-1.png"
         img_path.write_bytes(b"dummy image")
 
-        dest.publish(
-            notebook_name="Book",
-            text_content="Notes",
-            image_paths=[img_path],
-            document_path=pdf_path,
-        )
+        page = make_page(1, "Notes", label=format_page_label(1, pdf_path), image=img_path)
+        dest.publish(*make_both("Book", pages=[page], source="pdf", source_file=pdf_path))
 
         note_file = vault / "Living Ink" / "Book.md"
         content = note_file.read_text(encoding="utf-8")
         assert "- [[Living Ink/_attachments/Book/page-1.png|Page xiii (pdf-1)]]" in content
+
+
+class TestLabellingEveryPageAtOnce:
+    """``page_labels`` is ``format_page_label`` for a whole document, one open.
+
+    The per-page function opens and closes the PDF on every call, so labelling
+    a 300-page annotated PDF opened the file 300 times.
+    """
+
+    def test_it_agrees_with_the_single_page_function(self, tmp_path):
+        from living_ink.extract import page_labels
+
+        pdf_path = tmp_path / "book.pdf"
+        doc = fitz.open()
+        doc.new_page()
+        doc.new_page()
+        doc.set_page_labels([{"startpage": 0, "prefix": "xiii"}, {"startpage": 1, "prefix": "51"}])
+        doc.save(str(pdf_path))
+        doc.close()
+
+        assert page_labels([1, 2], pdf_path) == {
+            1: format_page_label(1, pdf_path),
+            2: format_page_label(2, pdf_path),
+        }
+
+    def test_a_notebook_has_no_document_to_read(self):
+        from living_ink.extract import page_labels
+
+        assert page_labels([1, 7], None) == {1: "Page 1", 7: "Page 7"}
+
+    def test_a_missing_document_still_labels_every_page(self, tmp_path):
+        from living_ink.extract import page_labels
+
+        assert page_labels([3], tmp_path / "gone.pdf") == {3: "Page 3"}
+
+    def test_it_opens_the_document_once_for_the_whole_set(self, tmp_path):
+        """The reason the function exists."""
+        import living_ink.extract as extract
+
+        pdf_path = tmp_path / "book.pdf"
+        doc = fitz.open()
+        for _ in range(5):
+            doc.new_page()
+        doc.save(str(pdf_path))
+        doc.close()
+
+        opens = []
+        real_open = fitz.open
+
+        def counting_open(*args, **kwargs):
+            opens.append(args[0] if args else None)
+            return real_open(*args, **kwargs)
+
+        with patch.object(extract.fitz, "open", counting_open):
+            extract.page_labels([1, 2, 3, 4, 5], pdf_path)
+
+        assert len(opens) == 1
+
+    def test_a_page_past_the_end_of_the_document_is_still_labelled(self, tmp_path):
+        from living_ink.extract import page_labels
+
+        pdf_path = tmp_path / "one.pdf"
+        doc = fitz.open()
+        doc.new_page()
+        doc.save(str(pdf_path))
+        doc.close()
+
+        assert page_labels([1, 99], pdf_path)[99] == "Page 99"
 
 
 class TestPageSectionHeaderFormatting:

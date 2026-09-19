@@ -11,10 +11,10 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from living_ink import notemerge
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.destinations.base import (
     Destination,
     DestinationError,
@@ -26,6 +26,19 @@ from living_ink.safeio import write_text_atomic
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _iso_date(moment: Optional[datetime.datetime]) -> Optional[str]:
+    """Render a timestamp as the ``YYYY-MM-DD`` a frontmatter date wants.
+
+    Args:
+        moment: The timestamp, or None when nothing is known.
+
+    Returns:
+        The date, or None. Never today's date as a stand-in: the caller has to
+        be able to tell "the tablet did not say" from "the tablet said today".
+    """
+    return moment.date().isoformat() if moment else None
 
 
 @register_destination("obsidian")
@@ -346,12 +359,50 @@ class ObsidianDestination(Destination):
         clean = re.sub(r"[^\w\-/]", "", clean)
         return clean
 
-    def unpublish(
-        self,
-        target: Optional[str] = None,
-        external_id: Optional[str] = None,
-        doc_id: Optional[str] = None,
-    ) -> PublishResult:
+    def _page_section(self, page: Page) -> str:
+        """Render one page as a divider, a heading, and whatever it produced.
+
+        The heading is built from fields the page already carries, so nothing
+        here reopens the source PDF to ask what page 77 is called.
+
+        Args:
+            page: The page to render.
+
+        Returns:
+            The Markdown section, without a trailing newline.
+        """
+        from living_ink.extract import format_page_section_header
+
+        header = format_page_section_header(
+            page.number,
+            include_divider=True,
+            label=page.label,
+            breadcrumbs=page.breadcrumbs,
+        )
+        # A page that failed says so where its text would have been. Publishing
+        # the heading alone would be indistinguishable from a blank page.
+        body = page.error if page.error else page.text.strip()
+        return f"{header}\n\n{body}" if body else header
+
+    def _body(self, doc: Document) -> str:
+        """Assemble a document's pages into the note's generated body.
+
+        Args:
+            doc: The transcribed document.
+
+        Returns:
+            The Markdown body, or an empty string when there is nothing to say.
+        """
+        sections = [self._page_section(page) for page in doc.pages]
+
+        # Text lifted out of the PDF or EPUB itself, which is worth publishing
+        # only when no page produced anything — otherwise it duplicates them.
+        if doc.body_text and not any(page.text.strip() for page in doc.pages):
+            sections.append(doc.body_text.strip())
+
+        return "\n\n".join(section for section in sections if section).strip()
+
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         """Delete a note whose notebook is gone from the tablet.
 
         Refused unless the file carries this document's ``living_ink_id``.
@@ -359,9 +410,9 @@ class ObsidianDestination(Destination):
         here is a file nobody can get back.
 
         Args:
-            target: Vault-relative path recorded for the note.
-            external_id: Unused; a note here is identified by its path.
-            doc_id: The document the note was published for.
+            ctx: The note's coordinates. ``existing_target`` is the
+                vault-relative path recorded for it; ``existing_external_id``
+                is unused, because a note here is identified by its path.
 
         Returns:
             The outcome, ``ok`` being whether the note was deleted.
@@ -369,6 +420,8 @@ class ObsidianDestination(Destination):
         Raises:
             DestinationError: The vault refused the deletion.
         """
+        target = ctx.existing_target
+        doc_id = ctx.doc_id
         if not target or not doc_id:
             return PublishResult(ok=False, detail="No note recorded for this document.")
 
@@ -397,52 +450,26 @@ class ObsidianDestination(Destination):
         logger.info("Deleted %s", note_path)
         return PublishResult(ok=True, target=target, detail=f"Deleted '{target}'.")
 
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: List[Path],
-        sub_folder: Optional[str] = None,
-        document_path: Optional[Path] = None,
-        tags: Optional[List[str]] = None,
-        existing_id: Optional[str] = None,
-        adopt_by_name: bool = False,
-        doc_id: Optional[str] = None,
-        existing_target: Optional[str] = None,
-        document_modified: Optional[str] = None,
-        first_published: Optional[str] = None,
-    ) -> PublishResult:
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
         """Publish a note to Obsidian as Markdown with image attachments.
 
         A note here is found by its path, which this destination recomputes
-        from the notebook name, and merged rather than replaced. But a path is
-        not an identity: two notebooks can carry the same title, and the second
-        one must not be merged into the first one's note. So the document id is
-        written into the frontmatter as ``living_ink_id`` and checked before
-        anything is written — a note belonging to a different document is
-        stepped around rather than overwritten.
+        from the document's title and folder, and merged rather than replaced.
+        But a path is not an identity: two notebooks can carry the same title,
+        and the second one must not be merged into the first one's note. So the
+        document id is written into the frontmatter as ``living_ink_id`` and
+        checked before anything is written — a note belonging to a different
+        document is stepped around rather than overwritten.
+
+        The title and the folder arrive as two separate facts. They used to
+        arrive as one string, ``"Work / Projects / Note"``, which this method
+        split back apart on ``" / "`` — so a notebook genuinely called
+        ``"Q1 / Q2"`` was filed in a folder named ``Q1``.
 
         Args:
-            notebook_name: Title of the notebook. Can be a base name (e.g. "Note")
-                or a display title with breadcrumbs ("Work / Projects / Note").
-            text_content: Cleaned text content of the notebook.
-            image_paths: List of paths to rendered page images.
-            sub_folder: Relative folder path mirroring the reMarkable hierarchy
-                (e.g., "Work/Projects/Q1").
-            document_path: Optional path to underlying raw document (PDF or EPUB).
-            tags: Optional list of tags associated with the notebook or its pages.
-            existing_id: Unused; accepted to satisfy the Destination contract.
-            adopt_by_name: Unused; accepted to satisfy the Destination contract.
-            doc_id: The reMarkable document id, stamped into the frontmatter as
-                the note's identity. When absent, the path is the only identity
-                available and a same-titled note is merged as before.
-            existing_target: Vault-relative path this note was last written to.
-                When the notebook has since been renamed or moved, the note is
-                moved to match instead of being left behind as a duplicate.
-            document_modified: ``YYYY-MM-DD`` the notebook was last written on,
-                published as ``updated``.
-            first_published: ``YYYY-MM-DD`` this note first reached the vault,
-                used for ``created`` when the note itself does not say.
+            doc: The transcribed document: its title, its folder, its pages and
+                the tags they carry.
+            ctx: Where this note landed last time, and the run's settings.
 
         Returns:
             The outcome, carrying the vault-relative path the note was written
@@ -454,24 +481,21 @@ class ObsidianDestination(Destination):
             DestinationError: The vault is unreachable or unwritable (missing
                 path, permission denied, disk full).
         """
+        doc_id = ctx.doc_id
+        document_path = doc.source_file
         try:
-            # 1. Parse Note Name and Source Path
-            if " / " in notebook_name:
-                source_path = notebook_name.replace(" / ", "/")
-                clean_title = notebook_name.split(" / ")[-1].strip()
-            else:
-                clean_title = notebook_name.strip()
-                source_path = f"{sub_folder}/{clean_title}" if sub_folder else clean_title
+            # 1. Note Name and Source Path
+            clean_title = doc.title.strip()
+            folder_parts = [part.strip() for part in doc.folder_path if part.strip()]
+            source_path = "/".join([*folder_parts, clean_title])
 
             # 2. Determine Target Directory (Notes) and Root Directory
             root_dir = self._root_dir()
 
             subfolder_parts = []
-            if self.mirror_folders and sub_folder:
+            if self.mirror_folders:
                 # Replicate full folder hierarchy
-                for part in sub_folder.replace("\\", "/").split("/"):
-                    if part.strip():
-                        subfolder_parts.append(self._sanitize_filename(part.strip()))
+                subfolder_parts = [self._sanitize_filename(part) for part in folder_parts]
 
             target_dir = root_dir
             for part in subfolder_parts:
@@ -480,16 +504,13 @@ class ObsidianDestination(Destination):
             target_dir.mkdir(parents=True, exist_ok=True)
 
             # 3. Determine File Name
-            if self.mirror_folders:
+            if self.mirror_folders or not folder_parts:
                 # Folder structure provides context, note gets clean name
                 safe_name = self._sanitize_filename(clean_title)
             else:
                 # Flat mode: prepend folder path to avoid collisions between identically named notes
-                if sub_folder:
-                    flat_prefix = sub_folder.replace("\\", "/").replace("/", " - ")
-                    safe_name = self._sanitize_filename(f"{flat_prefix} - {clean_title}")
-                else:
-                    safe_name = self._sanitize_filename(clean_title)
+                flat_prefix = " - ".join(folder_parts)
+                safe_name = self._sanitize_filename(f"{flat_prefix} - {clean_title}")
 
             # A note already at this path that belongs to a different document
             # is someone else's: take the next free name rather than merging
@@ -498,7 +519,7 @@ class ObsidianDestination(Destination):
 
             # A notebook renamed or moved on the tablet keeps its note: bring
             # the old file here rather than writing a second one.
-            self._relocate(existing_target, target_dir / f"{safe_name}.md", doc_id)
+            self._relocate(ctx.existing_target, target_dir / f"{safe_name}.md", doc_id)
 
             # 4. Handle Attachments (centralized _attachments root, mirroring subfolders + dedicated note folder)
             note_path = target_dir / f"{safe_name}.md"
@@ -519,18 +540,13 @@ class ObsidianDestination(Destination):
                 doc_link_target = f"{link_prefix}{doc_filename}"
 
             image_links = []
-            for img_p in image_paths:
-                if img_p.exists():
-                    page_match = re.search(r"page-(\d+)", img_p.name, re.IGNORECASE)
-                    if page_match:
-                        p_num = int(page_match.group(1))
-                        from living_ink.extract import format_page_label
-
-                        label = format_page_label(p_num, document_path)
-                        page_filename = f"page-{p_num}{img_p.suffix.lower()}"
-                    else:
-                        label = img_p.stem.replace("_", " ").title()
-                        page_filename = img_p.name
+            for page in doc.pages:
+                img_p = page.image_path
+                if img_p and img_p.exists():
+                    # The label was worked out when the page was rendered; it is
+                    # not re-derived from the filename here, and the source PDF
+                    # is not reopened once per page to ask what it is called.
+                    page_filename = f"page-{page.number}{img_p.suffix.lower()}"
 
                     # In a dedicated attachments subfolder, use clean page filename;
                     # if alongside note, prefix with safe_name to prevent collisions.
@@ -543,7 +559,7 @@ class ObsidianDestination(Destination):
                     shutil.copy2(img_p, dest_path)
 
                     img_link_target = f"{link_prefix}{new_filename}"
-                    image_links.append(f"- [[{img_link_target}|{label}]]")
+                    image_links.append(f"- [[{img_link_target}|{page.label}]]")
 
             # 5. Build Markdown Content
             existing = notemerge.read_existing(note_path)
@@ -551,6 +567,8 @@ class ObsidianDestination(Destination):
 
             # --- YAML Frontmatter ---
             today_str = datetime.date.today().isoformat()
+            document_modified = _iso_date(doc.modified)
+            first_published = _iso_date(ctx.first_published)
             # Three dates, three meanings. They used to be one field called
             # `created` that was regenerated on every sync, so it silently
             # meant "last synced" — and reported today for a note written in
@@ -572,8 +590,8 @@ class ObsidianDestination(Destination):
             else:
                 combined_tags.append("handwritten")
 
-            if tags:
-                for t in tags:
+            if doc.tags:
+                for t in doc.tags:
                     clean_t = self._sanitize_tag(t)
                     if clean_t and clean_t.lower() not in [ct.lower() for ct in combined_tags]:
                         combined_tags.append(clean_t)
@@ -599,8 +617,9 @@ class ObsidianDestination(Destination):
 
             # --- Generated body ---
             md_lines = []
-            if text_content.strip():
-                md_lines.append(text_content.strip())
+            body = self._body(doc)
+            if body:
+                md_lines.append(body)
                 md_lines.append("")
 
             if image_links:
@@ -624,5 +643,5 @@ class ObsidianDestination(Destination):
 
         except (OSError, shutil.Error) as e:
             raise DestinationError(
-                f"Could not write '{notebook_name}' into the vault at {self.vault_path}: {e}"
+                f"Could not write '{doc.title}' into the vault at {self.vault_path}: {e}"
             ) from e

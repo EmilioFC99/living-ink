@@ -55,14 +55,6 @@ class TestDocumentLines:
     def test_a_document_published_nowhere_says_so(self):
         assert "nowhere" in _published(dests=()).describe()
 
-    def test_an_adopted_transcript_says_so_instead_of_showing_zeroes(self):
-        """A page count beside two zeroes reads as a failure; it is a shortcut."""
-        outcome = _published(pages=1, transcribed=0, cached=0)
-        outcome.reused_transcript = True
-        line = outcome.describe()
-        assert "transcript reused" in line
-        assert "0 transcribed" not in line
-
 
 class TestTotals:
     """The numbers under the table."""

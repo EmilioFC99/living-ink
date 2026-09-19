@@ -17,7 +17,7 @@ import pytest
 
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -33,6 +33,7 @@ from living_ink.pipeline import (
     SyncPipeline,
     log,
 )
+from living_ink.redact import clear_secrets, register_secret
 from living_ink.report import (
     FAILED,
     PUBLISHED,
@@ -64,29 +65,16 @@ class MockDestination(Destination):
     def check(self) -> DestinationStatus:
         return DestinationStatus(ok=self.ready, detail="mock")
 
-    def unpublish(self, target=None, external_id=None, doc_id=None) -> PublishResult:
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         if self.unpublish_error:
             raise self.unpublish_error
-        self.unpublished.append((target, external_id, doc_id))
-        return PublishResult(ok=self.unpublish_result, target=target)
+        self.unpublished.append((ctx.existing_target, ctx.existing_external_id, ctx.doc_id))
+        return PublishResult(ok=self.unpublish_result, target=ctx.existing_target)
 
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: list,
-        **kwargs,
-    ) -> PublishResult:
-        # Recorded as passed rather than named one by one, so a new argument on
-        # the contract does not need this double edited to keep the suite green.
-        self.published.append(
-            {
-                "notebook_name": notebook_name,
-                "text_content": text_content,
-                "image_paths": image_paths,
-                **kwargs,
-            }
-        )
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
+        # Both objects are kept whole rather than unpacked field by field, so a
+        # new field on either does not need this double edited.
+        self.published.append({"doc": doc, "ctx": ctx})
         return PublishResult(
             ok=self.publish_ok, target=self.publish_target, warnings=self.publish_warnings
         )
@@ -383,17 +371,75 @@ class TestDocumentJob:
         present.write_bytes(b"%PDF")
         assert make_job(doc_file_path=present).source_file() == present
 
-    def test_subfolders_split_the_remarkable_path(self):
+    def test_the_folder_splits_into_its_parts(self):
         job = make_job(folder_path="Work / Projects / Q3")
 
-        assert job.full_subfolder() == "Work/Projects/Q3"
-        assert job.top_level_subfolder() == "Work"
+        assert job.folder_parts() == ("Work", "Projects", "Q3")
 
-    def test_subfolders_are_none_at_the_library_root(self):
-        job = make_job()
+    def test_the_library_root_has_no_parts(self):
+        assert make_job().folder_parts() == ()
 
-        assert job.full_subfolder() is None
-        assert job.top_level_subfolder() is None
+
+class TestPagesAreDescribedAtRenderTime:
+    """Everything needed to place a page is recorded once, when it is rendered.
+
+    It used to be recovered at publish time by regexing the PNG filename and
+    reopening the source PDF — once per page, from inside the destination.
+    """
+
+    def _pipeline(self):
+        return SyncPipeline(destinations=[MockDestination()])
+
+    def test_a_page_is_described_for_every_image(self):
+        job = make_job(imgs=[Path("nb.page-1.png"), Path("nb.page-2.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert [p.index for p in job.pages] == [0, 1]
+        assert [p.image_path for p in job.pages] == job.imgs
+
+    def test_the_number_is_the_documents_own_not_the_position(self):
+        """A 400-page PDF with two annotated pages yields 12 and 377."""
+        job = make_job(imgs=[Path("nb.page-12.png"), Path("nb.page-377.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert [p.number for p in job.pages] == [12, 377]
+
+    def test_a_notebook_page_is_labelled_by_its_number(self):
+        job = make_job(imgs=[Path("nb.page-3.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].label == "Page 3"
+
+    def test_a_notebook_has_no_breadcrumbs(self):
+        """An empty tuple, so a writer renders nothing rather than a bare separator."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].breadcrumbs == ()
+
+    def test_the_source_digest_is_carried_when_the_page_was_rendered_this_run(self):
+        job = make_job(
+            imgs=[Path("nb.page-1.png"), Path("nb.page-2.png")],
+            source_hashes=["aaa", "bbb"],
+        )
+        self._pipeline()._describe_pages(job)
+
+        assert [p.source_key for p in job.pages] == ["aaa", "bbb"]
+
+    def test_a_page_reused_from_disk_has_no_source_digest(self):
+        """Nothing hashed the zip, because nothing downloaded it."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].source_key == ""
+
+    def test_no_page_carries_text_yet(self):
+        """Text arrives three stages later; the page exists before it does."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].text == ""
+        assert job.pages[0].error is None
 
 
 class TestJobHelpers:
@@ -407,16 +453,6 @@ class TestJobHelpers:
 
     def test_version_defaults_to_one_when_unusable(self):
         assert pipeline._item_version({"Version": "not-a-number"}) == 1
-
-    def test_metadata_line_is_stripped_from_the_transcript(self, tmp_path):
-        transcript = tmp_path / "clean.txt"
-        transcript.write_text('{"notebook": "N"}\n\n### Page 1\n\nHello\n')
-
-        assert pipeline._strip_transcript_metadata(transcript) == "### Page 1\n\nHello"
-
-    def test_missing_transcript_reads_as_empty(self, tmp_path):
-        assert pipeline._strip_transcript_metadata(None) == ""
-        assert pipeline._strip_transcript_metadata(tmp_path / "gone.txt") == ""
 
 
 class TestRendererDispatch:
@@ -523,14 +559,132 @@ class TestPageConcurrency:
         pipeline_obj = self._pipeline(1)
 
         with patch.object(pipeline_obj, "_vision_ocr_page", return_value="clean text"):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == "clean text"
+            assert pipeline_obj._transcribe_page(Path("p.png")) == ("clean text", None)
 
     def test_an_empty_vision_result_has_nowhere_left_to_fall_back_to(self):
         """One backend: a page the model could not read is an empty page."""
         pipeline_obj = self._pipeline(1)
 
         with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == ""
+            assert pipeline_obj._transcribe_page(Path("p.png")) == ("", None)
+
+
+class TestAFailedPageIsNotABlankPage:
+    """Three pages out of two hundred failing is not a failed notebook.
+
+    Both a failure and a blank arrive as ``text == ""``. Only ``Page.error``
+    tells them apart, and without it the partial-page policy is unimplementable:
+    the page vanishes from the note with nothing marking where it was, and the
+    next run's merge has no block to heal.
+    """
+
+    def _pipeline(self):
+        pipe = SyncPipeline(destinations=[MockDestination()])
+        pipe.settings = replace(pipe.settings, ocr_concurrency=1)
+        return pipe
+
+    def _job_with_pages(self, count: int) -> DocumentJob:
+        job = make_job(imgs=[Path(f"nb.page-{n}.png") for n in range(1, count + 1)])
+        job.pre_paths = list(job.imgs)
+        SyncPipeline(destinations=[MockDestination()])._describe_pages(job)
+        return job
+
+    def test_a_raising_page_reports_the_reason_instead_of_propagating(self):
+        pipe = self._pipeline()
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("429 rate limited")):
+            text, error = pipe._transcribe_page(Path("p.png"))
+
+        assert text == ""
+        assert "429 rate limited" in error
+
+    def test_the_error_names_the_exception_type(self):
+        pipe = self._pipeline()
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=OSError("truncated")):
+            _, error = pipe._transcribe_page(Path("p.png"))
+
+        assert error.startswith("OSError:")
+
+    def test_a_key_in_the_message_is_redacted_before_it_reaches_the_user(self):
+        """The reason is printed and put in the report; a provider URL can carry a key."""
+        pipe = self._pipeline()
+        register_secret("sk-supersecret")
+
+        try:
+            with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("sk-supersecret")):
+                _, error = pipe._transcribe_page(Path("p.png"))
+        finally:
+            clear_secrets()
+
+        assert "sk-supersecret" not in error
+
+    def test_one_bad_page_does_not_cost_the_other_two(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(3)
+
+        def read(path):
+            if path.name.endswith("page-2.png"):
+                raise RuntimeError("boom")
+            return "text"
+
+        with patch.object(pipe, "_vision_ocr_page", side_effect=read):
+            pipe._ocr_pages(job)
+
+        assert [p.text for p in job.pages] == ["text", "", "text"]
+        assert "boom" in job.pages[1].error
+
+    def test_the_failure_is_recorded_on_the_page_that_failed(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert job.pages[0].error is None
+        assert job.pages[1].error == "boom"
+
+    def test_a_blank_page_is_left_unmarked(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(1)
+
+        with patch.object(pipe, "_transcribe_page", return_value=("", None)):
+            pipe._ocr_pages(job)
+
+        assert job.pages[0].error is None
+
+    def test_failures_are_counted(self):
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("", "boom"), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert job.failed_pages == 2
+
+    def test_the_run_report_names_the_page_not_just_the_document(self):
+        pipe = self._pipeline()
+        pipe.report = RunReport()
+        job = self._job_with_pages(2)
+
+        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+            pipe._ocr_pages(job)
+
+        assert any("Page 2" in w and "boom" in w for w in pipe.report.warnings)
+
+    def test_the_transcript_shows_the_reason_where_the_text_would_be(self, tmp_path, monkeypatch):
+        """A reader of the transcript sees a gap, not a page that was blank."""
+        monkeypatch.setattr(pipeline, "OCR_DIR", tmp_path)
+        pipe = self._pipeline()
+        job = self._job_with_pages(2)
+        job.pages = [
+            replace(job.pages[0], text="written"),
+            replace(job.pages[1], error="429 rate limited"),
+        ]
+
+        pipe._write_transcripts(job)
+
+        assert "429 rate limited" in job.clean_out_txt.read_text(encoding="utf-8")
 
 
 class TestDryRun:
@@ -602,11 +756,17 @@ class TestDryRun:
         assert SyncOptions.from_args(SimpleNamespace()).dry_run is False
 
 
-class TestTranscriptReuse:
-    """Transcribing costs money, so a transcript that is still current is reused."""
+class TestEveryRunReadsItsPages:
+    """A leftover transcript on disk is not a shortcut around the OCR stages.
 
-    def _pages_and_transcript(self, tmp_path, monkeypatch):
-        """Lay out one page image and a transcript written after it."""
+    It used to be: a transcript newer than its pages was adopted whole and
+    stages 4-6 were skipped. But the note's text comes from the pages now, and
+    that path never filled them in — so it published a transcript-shaped file
+    and an empty note. Free repeats come from the transcript cache, which is
+    keyed by page bytes and cannot go stale.
+    """
+
+    def test_a_leftover_transcript_does_not_skip_ocr(self, tmp_path, monkeypatch):
         white = tmp_path / "white"
         ocr = tmp_path / "ocr"
         white.mkdir()
@@ -618,44 +778,8 @@ class TestTranscriptReuse:
         transcript = ocr / "Notes_clean.txt"
         transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
         os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
-        return page, transcript
 
-    def test_a_current_transcript_is_adopted(self, tmp_path, monkeypatch):
-        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
-        job = make_job(safe_name="Notes", imgs=[page])
-
-        assert SyncPipeline(destinations=[])._reuse_transcript(job) is True
-        assert job.clean_out_txt == transcript
-
-    def test_redrawn_pages_force_a_new_transcript(self, tmp_path, monkeypatch):
-        """A page rendered after the transcript means the transcript is stale."""
-        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
-        newer = transcript.stat().st_mtime + 10
-        os.utime(page, (newer, newer))
-        job = make_job(safe_name="Notes", imgs=[page])
-
-        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
-        assert job.clean_out_txt is None
-
-    def test_no_transcript_means_no_reuse(self, tmp_path, monkeypatch):
-        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
-        transcript.unlink()
-        job = make_job(safe_name="Notes", imgs=[page])
-
-        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
-
-    def test_an_empty_transcript_is_not_reused(self, tmp_path, monkeypatch):
-        page, transcript = self._pages_and_transcript(tmp_path, monkeypatch)
-        transcript.write_text("")
-        os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
-        job = make_job(safe_name="Notes", imgs=[page])
-
-        assert SyncPipeline(destinations=[])._reuse_transcript(job) is False
-
-    def test_reuse_skips_ocr_entirely(self, tmp_path, monkeypatch):
-        """The expensive stages are not merely fast on reuse — they do not run."""
-        page, _ = self._pages_and_transcript(tmp_path, monkeypatch)
-        pipeline_obj = SyncPipeline(destinations=[])
+        pipeline_obj = SyncPipeline(destinations=[MockDestination()])
         nb_item = {"ID": "nb-1", "VissibleName": "Notes", "hash": "h"}
 
         with (
@@ -665,7 +789,7 @@ class TestTranscriptReuse:
             ),
             patch.object(pipeline_obj, "_collect_tags"),
             patch.object(pipeline_obj, "_publish", return_value=True),
-            patch.object(pipeline_obj, "_ocr_pages") as ocr,
+            patch.object(pipeline_obj, "_ocr_pages") as ocr_stage,
             patch.object(pipeline_obj, "_preprocess_images") as preprocess,
         ):
             assert (
@@ -673,8 +797,8 @@ class TestTranscriptReuse:
                 is True
             )
 
-        ocr.assert_not_called()
-        preprocess.assert_not_called()
+        ocr_stage.assert_called_once()
+        preprocess.assert_called_once()
 
 
 class TestConfigPermissionRepair:
@@ -1183,7 +1307,7 @@ class TestTranscriptionCaching:
     def test_the_first_read_calls_the_provider(self, tmp_path, page):
         pipe = self._pipeline(tmp_path)
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         assert ocr.call_count == 1
 
     def test_the_second_read_does_not(self, tmp_path, page):
@@ -1193,7 +1317,7 @@ class TestTranscriptionCaching:
             pipe._transcribe_page(page)
 
         with patch.object(pipe, "_vision_ocr_page") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         ocr.assert_not_called()
         assert pipe._cache_hits == 1
 
@@ -1233,7 +1357,7 @@ class TestTranscriptionCaching:
 
         second = self._pipeline(tmp_path)
         with patch.object(second, "_vision_ocr_page") as ocr:
-            assert second._transcribe_page(page) == "text"
+            assert second._transcribe_page(page) == ("text", None)
         ocr.assert_not_called()
 
     def test_an_edited_page_is_read_again(self, tmp_path, page):
@@ -1243,7 +1367,7 @@ class TestTranscriptionCaching:
 
         page.write_bytes(b"different png bytes")
         with patch.object(pipe, "_vision_ocr_page", return_value="new text") as ocr:
-            assert pipe._transcribe_page(page) == "new text"
+            assert pipe._transcribe_page(page) == ("new text", None)
         assert ocr.call_count == 1
 
     def test_an_entry_from_the_two_backend_era_is_not_served(self, tmp_path, page):
@@ -1253,7 +1377,7 @@ class TestTranscriptionCaching:
         pipe.cache._write(key, b'{"raw": "google text", "clean": "repaired text"}')
 
         with patch.object(pipe, "_vision_ocr_page", return_value="vision text") as ocr:
-            assert pipe._transcribe_page(page) == "vision text"
+            assert pipe._transcribe_page(page) == ("vision text", None)
         assert ocr.call_count == 1
 
     def test_an_empty_transcription_is_not_cached(self, tmp_path, page):
@@ -1263,7 +1387,7 @@ class TestTranscriptionCaching:
             pipe._transcribe_page(page)
 
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == "text"
+            assert pipe._transcribe_page(page) == ("text", None)
         assert ocr.call_count == 1
 
     def test_a_disabled_cache_reads_every_time(self, tmp_path, page):
@@ -1279,7 +1403,7 @@ class TestTranscriptionCaching:
         pipe = self._pipeline(tmp_path)
         missing = tmp_path / "gone.png"
         with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(missing) == "text"
+            assert pipe._transcribe_page(missing) == ("text", None)
         assert ocr.call_count == 1
         assert not pipe.cache.root.exists()
 
@@ -1635,7 +1759,7 @@ class TestPublicationIdentity:
         with patch("living_ink.pipeline.add_to_processed_log"):
             pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
 
-        assert dest.published[0]["doc_id"] == "nb-1"
+        assert dest.published[0]["doc"].doc_id == "nb-1"
 
     def test_a_destinations_warning_reaches_the_run_summary(self, tmp_path):
         """A log line scrolls past; the summary is the last thing on screen."""
@@ -1684,7 +1808,7 @@ class TestPublicationIdentity:
         with patch("living_ink.pipeline.add_to_processed_log"):
             pipe._publish(job, {"nb-1": [dest]})
 
-        assert dest.published[0]["document_modified"] == "2026-03-04"
+        assert dest.published[0]["doc"].modified == datetime.datetime(2026, 3, 4, 9, 30)
 
 
 class TestOrphanedNotebooks:
@@ -1709,6 +1833,7 @@ class TestOrphanedNotebooks:
         pipe.prune = prune
         pipe.destinations = [dest]
         pipe.report = None
+        pipe.settings = None
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):
@@ -1841,14 +1966,15 @@ class TestJobModifiedDate:
         )
 
     def test_reads_the_cloud_metadata_field(self):
-        assert self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_date() == "2026-03-04"
+        moment = self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_at()
+        assert moment == datetime.datetime(2026, 3, 4, 9, 30)
 
     def test_falls_back_to_the_document_attribute(self):
         item = SimpleNamespace(last_modified=datetime.datetime(2026, 3, 4, 9, 30))
-        assert self._job(item).modified_date() == "2026-03-04"
+        assert self._job(item).modified_at() == datetime.datetime(2026, 3, 4, 9, 30)
 
     def test_an_item_with_no_date_reports_none(self):
-        assert self._job({}).modified_date() is None
+        assert self._job({}).modified_at() is None
 
 
 class TestInterruptedRuns:

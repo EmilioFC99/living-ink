@@ -37,7 +37,7 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
@@ -1036,27 +1036,6 @@ def _item_version(item: Any) -> Any:
         return 1
 
 
-def _strip_transcript_metadata(path: Optional[Path]) -> str:
-    """Read a transcript and drop the leading metadata line.
-
-    Args:
-        path: The transcript file, or None.
-
-    Returns:
-        The note body: everything from the first page header or divider on.
-    """
-    if not path or not path.exists():
-        return ""
-
-    lines = path.read_text(errors="ignore").split("\n")
-    start = 0
-    for i, line in enumerate(lines):
-        if line.startswith("---") or line.startswith("###"):
-            start = i
-            break
-    return "\n".join(lines[start:]).strip()
-
-
 @dataclass
 class DocumentJob:
     """One document's state as it moves through the processing stages.
@@ -1079,27 +1058,33 @@ class DocumentJob:
 
     tags: List[str] = field(default_factory=list)
     imgs: List[Path] = field(default_factory=list)
+    # One entry per rendered page, in page order. Built once the images are
+    # settled and replaced in place as later stages learn the text: everything
+    # a destination needs to *place* a page is known at render time, and
+    # re-deriving it at publish time is what made the destination reopen the
+    # source PDF once per page.
+    pages: List[Page] = field(default_factory=list)
     page_hashes: List[str] = field(default_factory=list)
     source_hashes: List[str] = field(default_factory=list)
     transcribed_pages: int = 0
     cached_pages: int = 0
     failed_pages: int = 0
-    reused_transcript: bool = False
     published_to: List[str] = field(default_factory=list)
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
-    cleaned_texts: List[str] = field(default_factory=list)
     clean_out_txt: Optional[Path] = None
 
-    def modified_date(self) -> Optional[str]:
-        """Return the date the tablet says this notebook was last written on.
+    def modified_at(self) -> Optional[datetime.datetime]:
+        """Return when the tablet says this notebook was last written on.
 
         Returns:
-            ``YYYY-MM-DD``, or None when the transport reported no usable
-            timestamp for it.
+            The timestamp, or None when the transport reported nothing usable.
+            A destination that wants a date takes it from here; today's date is
+            never substituted, because "the tablet did not say" and "the tablet
+            said today" are different facts.
         """
-        return to_iso_date(
+        return to_datetime(
             get_val(self.item, "ModifiedClient") or getattr(self.item, "last_modified", None)
         )
 
@@ -1127,19 +1112,17 @@ class DocumentJob:
             return self.doc_file_path
         return None
 
-    def _folder_parts(self) -> List[str]:
-        """Split the reMarkable folder path into its individual folder names."""
-        return [p.strip() for p in self.folder_path.split(" / ") if p.strip()]
+    def folder_parts(self) -> Tuple[str, ...]:
+        """Return the reMarkable folder hierarchy, outermost first.
 
-    def full_subfolder(self) -> Optional[str]:
-        """Return the whole folder hierarchy, for destinations that nest."""
-        parts = self._folder_parts()
-        return "/".join(parts) if parts else None
+        The parts, not a joined path: how deep a destination nests is its own
+        decision, and this used to be two methods here because the pipeline
+        made that decision for it by checking the destination's class.
 
-    def top_level_subfolder(self) -> Optional[str]:
-        """Return only the outermost folder, for destinations that do not nest."""
-        parts = self._folder_parts()
-        return sanitize_filename(parts[0]) if parts else None
+        Returns:
+            One entry per folder, empty at the library root.
+        """
+        return tuple(p.strip() for p in self.folder_path.split(" / ") if p.strip())
 
 
 class SyncPipeline:
@@ -1568,10 +1551,9 @@ class SyncPipeline:
         try:
             self._acquire_pages(job, client)
             self._collect_tags(job, client)
-            if not self._reuse_transcript(job):
-                self._preprocess_images(job)
-                self._ocr_pages(job)
-                self._write_transcripts(job)
+            self._preprocess_images(job)
+            self._ocr_pages(job)
+            self._write_transcripts(job)
             success = self._publish(job, needs_update)
         except _StopProcessing as stop:
             if stop.reason:
@@ -1619,7 +1601,6 @@ class SyncPipeline:
                 transcribed=job.transcribed_pages,
                 cached=job.cached_pages,
                 pages_failed=job.failed_pages,
-                reused_transcript=job.reused_transcript,
                 destinations=list(job.published_to or job.would_publish_to),
                 reason=(
                     None
@@ -1741,6 +1722,41 @@ class SyncPipeline:
             f"Found {len(job.imgs)} white-background PNGs for {job.notebook}: "
             f"{[p.name for p in job.imgs]}"
         )
+        self._describe_pages(job)
+
+    def _describe_pages(self, job: DocumentJob) -> None:
+        """Record what each rendered page *is*, while the source is open anyway.
+
+        The page number, the label a heading shows and the chapter it sits
+        under are all properties of the render, not of the publish. They used
+        to be recovered at publish time by regexing the PNG filename and
+        reopening the source PDF once per page, from inside the destination.
+
+        Args:
+            job: The job whose images are settled; sets ``pages``.
+        """
+        from living_ink.extract import get_pdf_toc_breadcrumbs, page_labels
+
+        source = job.source_file()
+        numbers = [job.page_number(i) for i in range(len(job.imgs))]
+        labels = page_labels(numbers, source)
+
+        job.pages = [
+            Page(
+                index=index,
+                number=number,
+                label=labels.get(number, f"Page {number}"),
+                breadcrumbs=tuple(get_pdf_toc_breadcrumbs(number, source)),
+                image_path=image,
+                # The digest the render cache keyed this page under, when the
+                # page was rendered this run. A page reused from disk has none,
+                # which is why this is a key and not an identity.
+                source_key=(
+                    job.source_hashes[number - 1] if number - 1 < len(job.source_hashes) else ""
+                ),
+            )
+            for index, (image, number) in enumerate(zip(job.imgs, numbers))
+        ]
 
     def _rendered_pages(self, job: DocumentJob) -> List[Path]:
         """List the page images already rendered for this job, in page order."""
@@ -2104,15 +2120,18 @@ class SyncPipeline:
     # ── Stage 5: OCR ─────────────────────────────────────────────────────
 
     def _ocr_pages(self, job: DocumentJob) -> None:
-        """Transcribe every prepared page.
+        """Transcribe every prepared page and write the results onto the pages.
 
         There is one way to read a page: a single multimodal call that reads
-        and cleans in one step. If no page yielded text but the document
-        carried extractable text (an unannotated PDF, an EPUB), that text is
-        used instead.
+        and cleans in one step.
+
+        A page that raised is recorded on that page and nowhere else. Three
+        pages out of two hundred failing is not a failed notebook: the other
+        197 publish, the three are marked, and the transcript cache makes the
+        retry cost three API calls rather than two hundred.
         """
         before = self._cache_hits
-        job.cleaned_texts = self._transcribe_pages(job.pre_paths)
+        results = self._transcribe_pages(job.pre_paths)
         reused = self._cache_hits - before
         if reused:
             log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
@@ -2120,10 +2139,18 @@ class SyncPipeline:
         job.transcribed_pages = len(job.pre_paths) - reused
         job.cached_pages = reused
 
-        if not any(t.strip() for t in job.cleaned_texts) and job.extracted_doc_text:
-            job.cleaned_texts = [job.extracted_doc_text]
+        job.pages = [
+            replace(page, text=text, error=error) for page, (text, error) in zip(job.pages, results)
+        ]
 
-    def _transcribe_pages(self, paths: List[Path]) -> List[str]:
+        failed = [page for page in job.pages if page.error]
+        job.failed_pages += len(failed)
+        for page in failed:
+            log(f"⚠️ {job.notebook} {page.label}: {page.error}")
+            if self.report:
+                self.report.warn(f"{job.notebook} {page.label}: {page.error}")
+
+    def _transcribe_pages(self, paths: List[Path]) -> List[Tuple[str, Optional[str]]]:
         """Transcribe pages, several at a time, and return them in page order.
 
         A page is one network round trip and nothing else, so running a few
@@ -2135,7 +2162,7 @@ class SyncPipeline:
             paths: Prepared page images, in page order.
 
         Returns:
-            One transcription per page, in the order given.
+            One ``(text, error)`` pair per page, in the order given.
         """
         width = min(self.settings.ocr_concurrency, len(paths))
         if width <= 1:
@@ -2147,14 +2174,18 @@ class SyncPipeline:
             # however the calls happen to finish.
             return list(pool.map(self._transcribe_page, paths))
 
-    def _transcribe_page(self, path: Path) -> str:
+    def _transcribe_page(self, path: Path) -> Tuple[str, Optional[str]]:
         """Transcribe one page, from the cache when it is there.
 
         Args:
             path: The prepared page image.
 
         Returns:
-            The page's text, or an empty string if the page read as nothing.
+            ``(text, error)``. A blank page is ``("", None)`` and a failed one
+            is ``("", "<reason>")`` — the two are indistinguishable by text
+            alone, which is the whole reason the second element exists. An
+            error here costs one page, never the document: the caller marks a
+            gap and publishes the rest.
         """
         key = self._cache_key(path)
         if key:
@@ -2163,11 +2194,18 @@ class SyncPipeline:
                 with self._cache_lock:
                     self._cache_hits += 1
                 log(f"  Cached: {path.name}")
-                return cached
+                return cached, None
             with self._cache_lock:
                 self._cache_misses += 1
 
-        return self._cached(key, self._vision_ocr_page(path))
+        try:
+            return self._cached(key, self._vision_ocr_page(path)), None
+        except Exception as e:
+            # Deliberately broad, and it does not swallow: the reason is put on
+            # the page, warned about, and counted. An unreadable image or a
+            # provider that finally gave up used to propagate out of the thread
+            # pool and fail every other page in the notebook with it.
+            return "", redact(f"{type(e).__name__}: {e}")
 
     def _cache_key(self, path: Path) -> Optional[str]:
         """Return the cache key for one page, or None if it cannot be computed.
@@ -2225,42 +2263,6 @@ class SyncPipeline:
         log(f"  AI Vision returned empty for {path.name}")
         return ""
 
-    # ── Stages 4-6, skipped: an existing transcript ──────────────────────
-
-    def _reuse_transcript(self, job: DocumentJob) -> bool:
-        """Adopt a transcript from an earlier run instead of re-transcribing.
-
-        Transcribing is the only part of a sync that costs money, and it is
-        pure with respect to the page images: the same pages produce the same
-        text. A transcript newer than every page it was made from is therefore
-        still correct, and re-running OCR over it would be paying twice.
-
-        This only comes up when the transcript survived the last run — after
-        ``--dry-run`` or ``--keep-temp``, or when a run got as far as
-        transcribing and then failed to publish. The usual auto-purge removes
-        transcripts, so an ordinary repeat sync still transcribes afresh.
-
-        Args:
-            job: The job about to be transcribed; ``clean_out_txt`` is set when
-                an existing transcript is adopted.
-
-        Returns:
-            True if a current transcript was adopted and OCR can be skipped.
-        """
-        existing = OCR_DIR / f"{job.safe_name}_clean.txt"
-        if not job.imgs or not existing.exists() or not existing.stat().st_size:
-            return False
-
-        transcribed_at = existing.stat().st_mtime
-        if any(p.stat().st_mtime > transcribed_at for p in job.imgs):
-            log(f"Pages for {job.notebook} are newer than their transcript; transcribing again.")
-            return False
-
-        log(f"Reusing the existing transcript for {job.notebook}: {existing}")
-        job.clean_out_txt = existing
-        job.reused_transcript = True
-        return True
-
     # ── Stage 6: transcripts ─────────────────────────────────────────────
 
     def _write_transcripts(self, job: DocumentJob) -> None:
@@ -2273,47 +2275,114 @@ class SyncPipeline:
         meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
 
         job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
-        self._write_transcript(job, job.clean_out_txt, meta, job.cleaned_texts)
+        self._write_transcript(job, job.clean_out_txt, meta)
         log(f"Cleaned OCR text saved to {job.clean_out_txt}")
 
-    def _write_transcript(
-        self,
-        job: DocumentJob,
-        path: Path,
-        meta: Dict[str, Any],
-        texts: List[str],
-    ) -> None:
+    def _write_transcript(self, job: DocumentJob, path: Path, meta: Dict[str, Any]) -> None:
         """Write one transcript: a metadata line, then a section per page.
 
         A page that produced no text keeps its header and gets no body, so the
-        page numbering still lines up with the notebook.
+        page numbering still lines up with the notebook, and a page that failed
+        says so where the missing text would have been.
+
+        Written for a person to read. Nothing in the pipeline reads it back.
 
         Args:
             job: The job being transcribed.
             path: File to write.
             meta: Metadata dict, written as the first line.
-            texts: One entry per page, in page order.
         """
         from living_ink.extract import format_page_section_header
 
         with open(path, "w", encoding="utf-8") as f:
             f.write(json.dumps(meta) + "\n\n")
 
-            if job.extracted_doc_text and texts == [job.extracted_doc_text]:
+            if not job.pages and job.extracted_doc_text:
                 f.write(job.extracted_doc_text + "\n")
                 return
 
-            for i, text in enumerate(texts):
+            for page in job.pages:
                 header = format_page_section_header(
-                    job.page_number(i), job.doc_file_path, include_divider=True
+                    page.number,
+                    job.doc_file_path,
+                    include_divider=True,
+                    # Already read once, when the page was rendered. Letting the
+                    # header re-read them reopens the PDF once per page.
+                    label=page.label,
+                    breadcrumbs=page.breadcrumbs,
                 )
-                body = (text or "").strip()
+                body = page.error if page.error else page.text.strip()
                 f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
+
+            if job.extracted_doc_text and not any(p.text.strip() for p in job.pages):
+                f.write(job.extracted_doc_text + "\n")
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 
+    def _build_document(self, job: DocumentJob) -> Document:
+        """Turn a finished job into the destination-neutral document.
+
+        This is the adapter, and it is temporary: the stages will build the
+        document themselves once they are moved out of this class, and then
+        ``DocumentJob`` stops being the thing that travels between them. Until
+        that lands, one place converts and every destination sees the contract
+        it will keep.
+
+        Args:
+            job: The job, transcribed and ready to publish.
+
+        Returns:
+            The document, carrying nothing about where it is going.
+        """
+        return Document(
+            doc_id=job.notebook_id,
+            # The title alone. It used to be glued to the folder path with
+            # " / " and split apart again inside the destination, which filed a
+            # notebook actually called "Q1 / Q2" in a folder named "Q1".
+            title=job.notebook,
+            folder_path=job.folder_parts(),
+            source=job.doc_type,
+            modified=job.modified_at(),
+            tags=tuple(job.tags),
+            pages=tuple(job.pages),
+            body_text=job.extracted_doc_text or None,
+            source_file=job.source_file(),
+        )
+
+    def _publish_context(self, dest: Destination, doc_id: str) -> PublishContext:
+        """Look up what one destination did with this document last time.
+
+        Keyed by ``state_key``, never by the display name: the row was written
+        under the former, and a lookup under the latter silently finds nothing,
+        which reads as "never published" and duplicates the note.
+
+        Args:
+            dest: The destination about to be asked to publish.
+            doc_id: reMarkable document id.
+
+        Returns:
+            The context to hand to :meth:`Destination.publish`.
+        """
+        previous = get_state_store().get_publication(doc_id, dest.state_key)
+        external_id = previous["external_id"] if previous else None
+        return PublishContext(
+            doc_id=doc_id,
+            dry_run=self.dry_run,
+            existing_external_id=external_id,
+            # Where it landed last time. A notebook renamed or moved on the
+            # tablet is the same note in a new place, not a second note.
+            existing_target=previous["target"] if previous else None,
+            # Only when we already know we published here before: then the note
+            # carrying this title is one we created.
+            adopt_by_name=bool(previous) and not external_id,
+            # When the note first appeared here, for a note that has to state
+            # when it came into existence and predates the frontmatter saying so.
+            first_published=to_datetime(previous["first_published_at"]) if previous else None,
+            settings=self.settings,
+        )
+
     def _publish(self, job: DocumentJob, needs_update: Dict[str, List[Destination]]) -> bool:
-        """Publish the cleaned transcript to every destination that wants it.
+        """Publish the transcribed document to every destination that wants it.
 
         Args:
             job: The processed job.
@@ -2325,7 +2394,6 @@ class SyncPipeline:
             True if every targeted destination accepted the note.
         """
         try:
-            clean_text = _strip_transcript_metadata(job.clean_out_txt)
             targets = needs_update.get(job.notebook_id) or (
                 self.destinations or get_default_destinations()
             )
@@ -2333,13 +2401,15 @@ class SyncPipeline:
                 log("No destinations need update for this notebook (or none configured).")
                 return True
 
+            doc = self._build_document(job)
+
             if self.dry_run:
-                self._report_dry_run(job, targets)
+                self._report_dry_run(job, doc, targets)
                 return True
 
             all_success = True
             for dest in targets:
-                result = self._publish_to(dest, job, clean_text)
+                result = self._publish_to(dest, doc)
                 self._report_destination_warnings(dest, result)
                 if result.ok:
                     job.published_to.append(dest.state_key)
@@ -2369,7 +2439,7 @@ class SyncPipeline:
             log(traceback.format_exc())
             return False
 
-    def _report_dry_run(self, job: DocumentJob, targets: List[Destination]) -> None:
+    def _report_dry_run(self, job: DocumentJob, doc: Document, targets: List[Destination]) -> None:
         """Say what a real run would have published, and where to read it.
 
         Nothing is sent and no processed-log entry is written, so the same
@@ -2381,18 +2451,16 @@ class SyncPipeline:
         :attr:`Destination.merge_unit` rather than inferred from a class name.
 
         Args:
-            job: The processed job.
+            job: The processed job, for the artifacts it left on disk.
+            doc: What would be published.
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
         job.would_publish_to = [dest.state_key for dest in targets]
+        # The document's folder, not the one a particular destination would
+        # nest it in: how deep to nest is the destination's own decision now.
+        where = f" under '{'/'.join(doc.folder_path)}'" if doc.folder_path else ""
         for dest in targets:
-            sub_folder = (
-                job.top_level_subfolder()
-                if isinstance(dest, AppleNotesDestination)
-                else job.full_subfolder()
-            )
-            where = f" under '{sub_folder}'" if sub_folder else ""
             log(f"   Would publish to {dest.describe()}{where}")
             if dest.merge_unit is MergeUnit.DOCUMENT:
                 log("      Replaces the whole note, including anything you added to it.")
@@ -2420,8 +2488,8 @@ class SyncPipeline:
         for warning in result.warnings:
             self.report.warn(f"{dest.display_name}: {warning}")
 
-    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> PublishResult:
-        """Publish one note to one destination.
+    def _publish_to(self, dest: Destination, doc: Document) -> PublishResult:
+        """Publish one document to one destination.
 
         A DestinationError is an expected, user-actionable failure (vault gone,
         Notes not responding): report it plainly and let the caller carry on to
@@ -2430,8 +2498,7 @@ class SyncPipeline:
 
         Args:
             dest: The destination to publish to.
-            job: The processed job.
-            clean_text: The note body.
+            doc: The document to publish.
 
         Returns:
             What the destination reported, or a refusal carrying the reason it
@@ -2440,45 +2507,8 @@ class SyncPipeline:
         dest_name = dest.display_name
         log(f"Publishing to {dest_name}...")
 
-        # Apple Notes only supports 1 level of sub-folder under rootFolder.
-        # Obsidian supports the full nested hierarchy.
-        sub_folder = (
-            job.top_level_subfolder()
-            if isinstance(dest, AppleNotesDestination)
-            else job.full_subfolder()
-        )
-
-        # What this destination called the note last time, so it can replace
-        # exactly that one instead of deleting whatever shares the title.
-        # Keyed by state_key, never by the display name: the row was written
-        # under the former, and a lookup under the latter silently finds
-        # nothing, which reads as "never published" and duplicates the note.
-        previous = get_state_store().get_publication(job.notebook_id, dest.state_key)
-        existing_id = previous["external_id"] if previous else None
-        # Where it landed last time. A notebook renamed or moved on the tablet
-        # is the same note in a new place, not a second note.
-        existing_target = previous["target"] if previous else None
-        # When the note first appeared here, for a note that has to state when
-        # it came into existence and predates the frontmatter that says so.
-        first_published = to_iso_date(previous["first_published_at"]) if previous else None
-
         try:
-            published = dest.publish(
-                notebook_name=job.display_title,
-                text_content=clean_text,
-                image_paths=job.imgs,
-                sub_folder=sub_folder,
-                document_path=job.source_file(),
-                tags=job.tags,
-                existing_id=existing_id,
-                # Only when we already know we published here before: then the
-                # note carrying this title is one we created.
-                adopt_by_name=bool(previous) and not existing_id,
-                doc_id=job.notebook_id,
-                existing_target=existing_target,
-                document_modified=job.modified_date(),
-                first_published=first_published,
-            )
+            published = dest.publish(doc, self._publish_context(dest, doc.doc_id))
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")
             return PublishResult(ok=False, detail=str(e))
@@ -2574,9 +2604,12 @@ class SyncPipeline:
                 continue
             try:
                 result = dest.unpublish(
-                    target=row.get("target"),
-                    external_id=row.get("external_id"),
-                    doc_id=doc_id,
+                    PublishContext(
+                        doc_id=doc_id,
+                        existing_external_id=row.get("external_id"),
+                        existing_target=row.get("target"),
+                        settings=self.settings,
+                    )
                 )
             except DestinationError as e:
                 log(f"  ⚠️ {dest.display_name}: {e}")

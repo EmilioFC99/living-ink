@@ -13,11 +13,11 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 from PIL import Image
 
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations.base import (
     Destination,
     DestinationStatus,
@@ -235,12 +235,7 @@ class AppleNotesDestination(Destination):
             )
             return img_path
 
-    def unpublish(
-        self,
-        target: Optional[str] = None,
-        external_id: Optional[str] = None,
-        doc_id: Optional[str] = None,
-    ) -> PublishResult:
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         """Delete the note this destination created, by its Apple Notes id.
 
         By id and only by id. Matching on title here would mean deleting a note
@@ -248,9 +243,9 @@ class AppleNotesDestination(Destination):
         that used to destroy notes people had written themselves.
 
         Args:
-            target: Unused; the id is the only thing worth matching on.
-            external_id: Apple Notes id recorded for the note.
-            doc_id: Unused.
+            ctx: The note's coordinates. Only ``existing_external_id`` is read;
+                the recorded target is a folder path, which is not something
+                worth matching on.
 
         Returns:
             The outcome, ``ok`` being whether a note was deleted.
@@ -259,6 +254,7 @@ class AppleNotesDestination(Destination):
             DestinationUnavailable: osascript is missing or Notes did not
                 respond.
         """
+        external_id = ctx.existing_external_id
         if not external_id:
             logger.info("No Apple Notes id recorded; leaving the note in place.")
             return PublishResult(ok=False, detail="No Apple Notes id recorded.")
@@ -291,49 +287,54 @@ end tell
             return PublishResult(ok=False, detail="Apple Notes did not delete the note.")
         return PublishResult(ok=True, external_id=external_id, detail="Note deleted.")
 
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: List[Path],
-        sub_folder: Optional[str] = None,
-        document_path: Optional[Path] = None,
-        tags: Optional[List[str]] = None,
-        existing_id: Optional[str] = None,
-        adopt_by_name: bool = False,
-        doc_id: Optional[str] = None,
-        existing_target: Optional[str] = None,
-        document_modified: Optional[str] = None,
-        first_published: Optional[str] = None,
-    ) -> PublishResult:
+    def _body_text(self, doc: Document) -> str:
+        """Assemble the document's pages into the note's text.
+
+        Args:
+            doc: The transcribed document.
+
+        Returns:
+            Markdown-ish text, ready for :meth:`_convert_to_html`.
+        """
+        from living_ink.extract import format_page_section_header
+
+        sections = []
+        for page in doc.pages:
+            header = format_page_section_header(
+                page.number,
+                include_divider=True,
+                label=page.label,
+                breadcrumbs=page.breadcrumbs,
+            )
+            body = page.error if page.error else page.text.strip()
+            sections.append(f"{header}\n\n{body}" if body else header)
+
+        if doc.body_text and not any(page.text.strip() for page in doc.pages):
+            sections.append(doc.body_text.strip())
+
+        return "\n\n".join(section for section in sections if section).strip()
+
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
         """Publish a note to Apple Notes via osascript.
 
         The previous note is removed by identifier, never by title. Deleting
         every note whose *name* matched destroyed unrelated notes a user had
         written themselves, and there was no way to get them back.
 
+        Most of what a document carries is unused here. Apple Notes keeps its
+        own creation and modification dates, and they stay right as long as the
+        note is updated rather than recreated; the document id has nowhere to
+        live, and does not need one, because the note id AppleScript returns is
+        a stabler identity than anything that could be written into the body.
+
         Args:
-            notebook_name: Title of the note.
-            text_content: Cleaned note text.
-            image_paths: Paths to page images.
-            sub_folder: Sub-folder name. Apple Notes supports one level of
-                nesting beneath ``folder_name``; if a nested path is provided,
-                the top-level segment is used.
-            document_path: Optional path to underlying raw document (PDF or EPUB).
-            tags: Optional list of tags associated with the notebook or its pages.
-            existing_id: Apple Notes id of the note published last time.
-            adopt_by_name: Permission to match on title when no id is recorded,
-                which is the case for notebooks synced before ids were stored.
-            doc_id: Unused. Apple Notes has no place to keep it, and does not
-                need one: the note id it returns is a stabler identity than
-                anything that could be written into the note body.
-            existing_target: Unused. A rename or a move needs no special
-                handling here, because the note is deleted by id and recreated
-                in the folder it now belongs to.
-            document_modified: Unused. Apple Notes keeps its own creation and
-                modification dates, and they are right as long as the note is
-                updated rather than recreated.
-            first_published: Unused, for the same reason.
+            doc: The transcribed document. Only the outermost folder is used —
+                Apple Notes supports one level of nesting beneath
+                ``folder_name``.
+            ctx: Where this note landed last time. ``existing_external_id`` is
+                the note to replace; ``adopt_by_name`` is permission to match
+                on title when no id was recorded, which is the case for
+                notebooks synced before ids were stored.
 
         Returns:
             The outcome, carrying the folder path the note landed in and the
@@ -344,23 +345,25 @@ end tell
                 rejected the script on every attempt.
         """
         retries = 3
+        document_path = doc.source_file
+        notebook_name = " / ".join([*(p for p in doc.folder_path if p.strip()), doc.title])
 
-        # Apple Notes supports 1 level of sub-folder under rootFolder.
-        # If a nested path like "Work/Projects/Q1" is passed, use the top-level segment.
+        # Apple Notes supports 1 level of sub-folder under rootFolder, so a
+        # nested "Work / Projects / Q1" is filed under "Work".
         effective_sub_folder = None
-        if sub_folder:
-            top_part = sub_folder.replace("\\", "/").split("/")[0].strip()
-            if top_part:
-                effective_sub_folder = top_part
+        for part in doc.folder_path:
+            if part.strip():
+                effective_sub_folder = part.strip()
+                break
 
         # 1. Prepare Content
         doc_header = ""
         if document_path and document_path.exists():
             doc_header = f"<div><b>Source Document:</b> {html.escape(document_path.name)}</div><div><br></div>"
-        text_html = self._convert_to_html(text_content)
+        text_html = self._convert_to_html(self._body_text(doc))
         tag_footer = ""
-        if tags:
-            tag_badges = " ".join(f"#{t.lstrip('#').replace(' ', '-')}" for t in tags if t)
+        if doc.tags:
+            tag_badges = " ".join(f"#{t.lstrip('#').replace(' ', '-')}" for t in doc.tags if t)
             if tag_badges:
                 tag_footer = f'<div><br></div><div><span style="color: #666;">{html.escape(tag_badges)}</span></div>'
         final_body = "<div><br></div>" + doc_header + text_html + tag_footer
@@ -373,8 +376,9 @@ end tell
                 f"make new attachment at end of attachments of newNote with "
                 f"data (POSIX file {safe_doc})\n    "
             )
-        for img_p in image_paths:
-            if img_p.exists():
+        for page in doc.pages:
+            img_p = page.image_path
+            if img_p and img_p.exists():
                 final_path = self._create_opaque_image(img_p)
                 safe_path = json.dumps(str(final_path.resolve()), ensure_ascii=False)
                 attachment_cmds += (
@@ -419,7 +423,7 @@ tell application "Notes"
     end if
 
     set noteName to {safe_name}
-{self._removal_script(existing_id, adopt_by_name)}
+{self._removal_script(ctx.existing_external_id, ctx.adopt_by_name)}
     -- Create the new note with HTML body in the specific folder
     set newNote to make new note at targetFolder with properties {{name:noteName, body:{safe_body}}}
 
