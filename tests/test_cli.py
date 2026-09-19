@@ -86,7 +86,7 @@ def test_main_sync_command(mock_sync):
 
 def test_cmd_status_no_config(tmp_path, capsys):
     """StatusCommand reports cleanly when config is missing."""
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Not found" in captured.out
@@ -120,7 +120,7 @@ def _run_sync_capturing_pipeline(args, tmp_path):
 def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     """SyncCommand resolves --ssh into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
-    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False, status=False)
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -138,7 +138,7 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_p
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
@@ -160,7 +160,9 @@ def test_main_sync_command_with_cloud(mock_sync):
 def test_cmd_sync_cloud_flag_resolves_to_cloud(tmp_path, monkeypatch):
     """SyncCommand resolves --cloud into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
-    args = MagicMock(ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(
+        ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False, status=False
+    )
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -172,7 +174,9 @@ def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeyp
     """Resolved settings stay on the pipeline instead of leaking into os.environ."""
     for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
         monkeypatch.delenv(var, raising=False)
-    args = MagicMock(ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(
+        ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False, status=False
+    )
 
     _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -192,7 +196,7 @@ def test_cmd_status_ssh_unplugged_cloud_backup(
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  device_token: 'tok'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
@@ -1165,3 +1169,145 @@ class TestDeviceLineInStatus:
         out = capsys.readouterr().out
         assert "Device:" in out
         assert "assumed" in out
+
+
+class TestSyncStatusFlag:
+    """`sync --status` previews a sync instead of running one."""
+
+    def _rows(self, count, status=None):
+        """Build `count` comparison rows, all in the same state."""
+        from living_ink.state import STATUS_NEW
+
+        return [
+            {
+                "id": f"doc-{n:04d}-aaaa",
+                "name": f"Note {n}",
+                "folder": "Work",
+                "doc_type": "notebook",
+                "status": status or STATUS_NEW,
+                "pending": ["ObsidianDestination"],
+                "published": {},
+                "last_error": None,
+            }
+            for n in range(count)
+        ]
+
+    def _show(self, capsys, rows, orphans=None, **flags):
+        """Run the command against a stubbed comparison and return its output."""
+        from living_ink.cli import SyncCommand
+
+        defaults = {"status": True, "all": False, "json": False}
+        args = argparse.Namespace(**{**defaults, **flags})
+        with patch("living_ink.cli.compare_with_device", return_value=(rows, orphans or [], None)):
+            code = SyncCommand().run(args)
+        return code, capsys.readouterr().out
+
+    def test_the_row_is_id_name_type_and_status(self):
+        from living_ink.cli import format_comparison_row
+
+        line = format_comparison_row(self._rows(1)[0])
+        assert line.startswith("doc-0000  Note 0")
+        assert ".notebook" in line
+
+    def test_a_long_name_is_truncated_with_an_ellipsis(self):
+        from living_ink.cli import format_comparison_row
+
+        row = {**self._rows(1)[0], "name": "A notebook with a very long title"}
+        line = format_comparison_row(row)
+        assert "A notebook wit…" in line
+        assert "very long title" not in line
+
+    def test_the_summary_counts_each_status(self, capsys):
+        from living_ink.state import STATUS_UP_TO_DATE
+
+        rows = self._rows(2) + self._rows(1, status=STATUS_UP_TO_DATE)
+        _, out = self._show(capsys, rows)
+        assert "2  new" in out
+        assert "1  up to date" in out
+
+    def test_outstanding_work_is_listed_before_settled_work(self, capsys):
+        from living_ink.state import STATUS_UP_TO_DATE
+
+        settled = self._rows(1, status=STATUS_UP_TO_DATE)
+        settled[0]["name"] = "Settled"
+        _, out = self._show(capsys, settled + self._rows(1))
+        assert out.index("Note 0") < out.index("Settled")
+
+    def test_only_ten_rows_are_shown_by_default(self, capsys):
+        _, out = self._show(capsys, self._rows(12))
+        assert "Note 9" in out
+        assert "Note 10" not in out
+        assert "10 of 12 shown · 2 more — use --all" in out
+
+    def test_all_shows_every_row(self, capsys):
+        with patch("sys.stdout.isatty", return_value=False):
+            _, out = self._show(capsys, self._rows(12), all=True)
+        assert "Note 11" in out
+        assert "use --all" not in out
+
+    def test_documents_gone_from_the_tablet_are_counted(self, capsys):
+        orphans = [{"id": "doc-old", "name": "Deleted"}]
+        _, out = self._show(capsys, self._rows(1), orphans=orphans)
+        assert "1  no longer on the tablet" in out
+
+    def test_an_empty_tablet_says_so(self, capsys):
+        code, out = self._show(capsys, [])
+        assert code == 0
+        assert "Nothing on the tablet" in out
+
+    def test_nothing_pending_says_everything_is_up_to_date(self, capsys):
+        from living_ink.state import STATUS_UP_TO_DATE
+
+        _, out = self._show(capsys, self._rows(2, status=STATUS_UP_TO_DATE))
+        assert "Everything is up to date." in out
+
+    def test_json_keys_documents_by_the_stable_status_key(self, capsys):
+        orphans = [{"id": "doc-old", "name": "Deleted"}]
+        _, out = self._show(capsys, self._rows(1), orphans=orphans, json=True)
+        payload = json.loads(out)
+        assert payload["counts"] == {"failed": 0, "new": 1, "changed": 0, "up_to_date": 0}
+        assert payload["documents"][0]["status"] == "new"
+        assert payload["orphans"] == ["doc-old"]
+
+    def test_the_status_flag_never_runs_a_sync(self, capsys):
+        from living_ink.cli import SyncCommand
+
+        args = argparse.Namespace(status=True, all=False, json=False)
+        with patch("living_ink.cli.compare_with_device", return_value=([], [], None)):
+            with patch.object(SyncCommand, "execute_sync") as mock_sync:
+                SyncCommand().run(args)
+        mock_sync.assert_not_called()
+
+    def test_missing_configuration_does_not_launch_the_wizard(self, capsys):
+        from living_ink.cli import SyncCommand
+        from living_ink.config import ConfigurationMissing
+
+        args = argparse.Namespace(status=True, all=False, json=False)
+        with patch(
+            "living_ink.cli.compare_with_device", side_effect=ConfigurationMissing("no config")
+        ):
+            with patch.object(SyncCommand, "_handle_missing_config") as mock_wizard:
+                code = SyncCommand().run(args)
+
+        mock_wizard.assert_not_called()
+        assert code == 1
+        assert "living-ink setup" in capsys.readouterr().err
+
+
+class TestVersionOf:
+    """The preview and the run must agree on what "changed" means."""
+
+    def test_the_content_hash_wins(self):
+        from living_ink.cli import version_of
+
+        assert version_of({"hash": "abc123", "Version": 4}) == "abc123"
+
+    def test_the_version_number_is_the_fallback(self):
+        from living_ink.cli import version_of
+
+        assert version_of({"Version": 4}) == "4"
+
+    def test_metadata_with_neither_still_yields_a_version(self):
+        from living_ink.cli import version_of
+
+        assert version_of({}) == "1"

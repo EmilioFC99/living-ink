@@ -14,6 +14,7 @@ Commands:
 """
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -142,6 +143,16 @@ class SyncCommand(BaseCommand):
             help="Delete notes whose notebook is gone from the tablet (reported, not deleted, by default)",
         )
         parser.add_argument(
+            "--status",
+            action="store_true",
+            help="Show what a sync would do — compare the tablet against your notes — and exit",
+        )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            help="With --status, list every document instead of the first ten",
+        )
+        parser.add_argument(
             "--json",
             action="store_true",
             help="Print the run summary as JSON instead of a table",
@@ -156,12 +167,57 @@ class SyncCommand(BaseCommand):
         Returns:
             0 on success, or exits with 1 on failure.
         """
+        if getattr(args, "status", False):
+            try:
+                return self.show_status(args)
+            except ConfigurationMissing as e:
+                # Not routed through _handle_missing_config: that offers the
+                # wizard and then retries the *sync*, which is not what someone
+                # asking a read-only question wanted to set in motion.
+                print(f"Configuration problem: {e}", file=sys.stderr)
+                print("Run 'living-ink setup' to fix it.", file=sys.stderr)
+                return 1
+
         try:
             success = self.execute_sync(args)
         except ConfigurationMissing as e:
             return self._handle_missing_config(e, args)
         if not success:
             sys.exit(1)
+        return 0
+
+    def show_status(self, args: argparse.Namespace) -> int:
+        """Report what a sync would do, without doing any of it.
+
+        Lists the tablet over whichever transport the settings resolve to and
+        joins that against the state database. Metadata only: no download, no
+        render, no OCR, no API call.
+
+        Args:
+            args: Parsed arguments for sync; ``--ssh`` / ``--cloud``, ``--all``
+                and ``--json`` are honoured.
+
+        Returns:
+            0 when the comparison succeeded, 1 when the tablet was unreachable.
+
+        Raises:
+            ConfigurationMissing: If configuration is absent or unusable.
+        """
+        rows, orphans, device = compare_with_device(args, root=self.root)
+
+        if getattr(args, "json", False):
+            payload = inventory_as_json(rows)
+            payload["orphans"] = [row["id"] for row in orphans]
+            payload["device"] = device.describe() if device else None
+            print(json.dumps(payload, indent=2))
+            return 0
+
+        render_comparison(
+            rows,
+            orphans,
+            device,
+            show_all=getattr(args, "all", False),
+        )
         return 0
 
     def execute_sync(self, args: argparse.Namespace) -> bool:
@@ -735,6 +791,128 @@ def count_by_status(inventory: list[dict[str, Any]]) -> dict["SyncStatus", int]:
     return counts
 
 
+def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
+    """List the tablet and judge it against what has been published.
+
+    Metadata only. ``get_meta_items()`` is one listing call; the document type
+    is taken from the state database or from the listing's own file index
+    rather than probed per document, because a probe is a round trip each and
+    a preview that costs as much as a sync defeats its own purpose.
+
+    Args:
+        args: Parsed sync arguments; ``--ssh`` / ``--cloud`` select the
+            transport, otherwise the configured preference wins.
+        root: Optional repository root, for locating the config.
+
+    Returns:
+        ``(rows, orphans, device)`` — the comparison rows, documents published
+        but no longer on the tablet, and what the transport says it is talking
+        to, or None when it cannot say.
+
+    Raises:
+        ConfigurationMissing: If configuration is absent or unusable.
+    """
+    from living_ink.api import get_rmapi
+    from living_ink.pipeline import (
+        get_default_config,
+        get_default_destinations,
+        get_notebook_path,
+        get_state_store,
+        get_val,
+    )
+
+    cfg_path = get_config_path(root)
+    if cfg_path.exists():
+        os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
+
+    settings = Settings.resolve(get_default_config())
+    if getattr(args, "ssh", False):
+        settings = dataclasses.replace(settings, preferred_connection="ssh")
+    elif getattr(args, "cloud", False):
+        settings = dataclasses.replace(settings, preferred_connection="cloud")
+
+    client = get_rmapi(settings)
+
+    try:
+        device = client.get_device_info()
+    except Exception:
+        # Broad on purpose, and it covers UnsupportedOperation: the comparison
+        # needs the device's listing, not its identity. Saying nothing about
+        # which tablet beats refusing to answer the question asked.
+        logger.debug("Transport could not identify the device", exc_info=True)
+        device = None
+
+    collection = client.get_meta_items()
+    id_map = {get_val(item, "ID"): item for item in collection}
+
+    listing = []
+    for item in collection:
+        if get_val(item, "Type") != "DocumentType":
+            continue
+        name = get_val(item, "VissibleName") or get_val(item, "VisibleName")
+        if not name:
+            continue
+        folder = get_notebook_path(item, id_map)
+        if folder.startswith("[TRASH]"):
+            continue
+        listing.append(
+            {
+                "id": get_val(item, "ID"),
+                "name": name,
+                "folder": folder or None,
+                "doc_type": document_type_from_metadata(item),
+                "version": version_of(item),
+            }
+        )
+
+    names = [type(dest).__name__ for dest in get_default_destinations()]
+    rows, orphans = get_state_store().compare_with_listing(listing, names)
+    return rows, orphans, device
+
+
+def version_of(item: Any) -> str:
+    """Return the version string a sync would compare against.
+
+    Mirrors :meth:`living_ink.pipeline.SyncPipeline.filter_pending_documents`
+    exactly — hash first, falling back to the numeric version — so that a
+    preview and the run it predicts cannot disagree about whether a document
+    changed.
+
+    Args:
+        item: A document from the transport's listing.
+
+    Returns:
+        The content hash, or the version number as a string, or ``"1"``.
+    """
+    from living_ink.pipeline import get_val
+
+    value = get_val(item, "hash")
+    if value:
+        return str(value)
+    try:
+        return str(int(get_val(item, "Version")))
+    except (ValueError, TypeError):
+        return "1"
+
+
+def document_type_from_metadata(item: Any) -> Optional[str]:
+    """Guess a document's type without asking the transport.
+
+    Args:
+        item: A document from the transport's listing.
+
+    Returns:
+        ``"pdf"``, ``"epub"``, ``"notebook"``, or None when the metadata does
+        not say — in which case the state database's remembered type is used
+        instead.
+    """
+    from living_ink.pipeline import get_document_type
+
+    # No client: get_document_type falls back to the file index and the
+    # filename, both of which are already in hand.
+    return get_document_type(item) or None
+
+
 def inventory_as_json(inventory: list[dict[str, Any]]) -> dict[str, Any]:
     """Render the inventory as JSON-safe data.
 
@@ -752,6 +930,135 @@ def inventory_as_json(inventory: list[dict[str, Any]]) -> dict[str, Any]:
     documents = [{**row, "status": row["status"].key} for row in inventory]
     counts = {status.key: count for status, count in count_by_status(inventory).items()}
     return {"documents": documents, "counts": counts}
+
+
+#: How many rows a page of the comparison shows.
+PAGE_SIZE = 10
+
+#: Width of the truncated document name column.
+NAME_WIDTH = 15
+
+
+def format_comparison_row(row: dict[str, Any]) -> str:
+    """Render one document as `<id> <name>.<type> <status>`.
+
+    Args:
+        row: One entry from :meth:`~living_ink.state.StateStore.compare_with_listing`.
+
+    Returns:
+        The line to print, without a leading indent and without colour — the
+        caller colours the status so that the columns stay aligned whether or
+        not escape codes are in play.
+    """
+    doc_id = str(row.get("id") or "")[:8].ljust(8)
+    name = str(row.get("name") or row.get("id") or "")
+    # Truncated with an ellipsis rather than hard-cut, so a row that lost
+    # characters admits it instead of quietly reading as a different note.
+    if len(name) > NAME_WIDTH:
+        name = name[: NAME_WIDTH - 1] + "…"
+    doc_type = row.get("doc_type") or "notebook"
+    return f"{doc_id}  {name.ljust(NAME_WIDTH)}.{doc_type.ljust(8)}  "
+
+
+def render_comparison(
+    rows: list[dict[str, Any]],
+    orphans: list[dict[str, Any]],
+    device: Any,
+    *,
+    show_all: bool,
+) -> None:
+    """Print the summary and as much of the list as was asked for.
+
+    Args:
+        rows: Comparison rows, in listing order.
+        orphans: Documents published but no longer on the tablet.
+        device: What the transport is talking to, or None.
+        show_all: Whether to page through everything rather than show the
+            first :data:`PAGE_SIZE` rows.
+    """
+    from living_ink.setup_wizard import bold, dim, green
+    from living_ink.state import SYNC_STATUSES
+
+    print()
+    against = device.describe() if device else "your reMarkable"
+    print(bold(f"Comparing {against} against your notes"))
+    print()
+
+    if not rows:
+        print(dim("Nothing on the tablet to compare."))
+        print()
+        return
+
+    counts = count_by_status(rows)
+    for status in SYNC_STATUSES:
+        count = counts[status]
+        if not count:
+            continue
+        colour = tone_colour(status.tone)
+        print(f"  {colour(str(count).rjust(4))}  {status.label}")
+    if orphans:
+        print(f"  {dim(str(len(orphans)).rjust(4))}  no longer on the tablet")
+    print()
+
+    # Outstanding work first: a list that opens with forty up-to-date notes
+    # buries the three that need attention.
+    ordered = sorted(rows, key=lambda row: SYNC_STATUSES.index(row["status"]))
+
+    if not any(row["status"].needs_sync for row in rows):
+        print(green("Everything is up to date."))
+        print()
+        if not show_all:
+            return
+
+    if show_all:
+        _print_paged(ordered)
+    else:
+        for row in ordered[:PAGE_SIZE]:
+            _print_comparison_row(row)
+        remaining = len(ordered) - PAGE_SIZE
+        if remaining > 0:
+            print()
+            print(dim(f"{PAGE_SIZE} of {len(ordered)} shown · {remaining} more — use --all"))
+    print()
+
+
+def _print_comparison_row(row: dict[str, Any]) -> None:
+    """Print one row with its status coloured.
+
+    Args:
+        row: One comparison row.
+    """
+    status = row["status"]
+    print(f"  {format_comparison_row(row)}{tone_colour(status.tone)(status.label)}")
+
+
+def _print_paged(rows: list[dict[str, Any]]) -> None:
+    """Print every row, pausing each page when someone is watching.
+
+    Args:
+        rows: Comparison rows, already ordered.
+    """
+    from living_ink.setup_wizard import dim
+
+    interactive = sys.stdout.isatty() and sys.stdin.isatty()
+
+    for start in range(0, len(rows), PAGE_SIZE):
+        for row in rows[start : start + PAGE_SIZE]:
+            _print_comparison_row(row)
+
+        shown = min(start + PAGE_SIZE, len(rows))
+        if not interactive or shown >= len(rows):
+            continue
+
+        print()
+        try:
+            answer = input(dim(f"  {shown} of {len(rows)} — Enter for more, q to stop: "))
+        except (EOFError, KeyboardInterrupt):
+            # Piped into `head`, or the user gave up. Neither is an error.
+            print()
+            return
+        if answer.strip().lower().startswith("q"):
+            return
 
 
 def tone_colour(tone: str):
