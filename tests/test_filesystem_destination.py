@@ -203,3 +203,48 @@ class TestTheStageContract:
         link = "Ink/_attachments/Work/Note/page-1.png"
         assert f"![[{link}|Page 1]]" in body
         assert (vault / link).is_file()
+
+
+class TestAnUnreadableNote:
+    """A file we cannot read is occupied, not free."""
+
+    def test_it_is_stepped_around_rather_than_overwritten(self, vault):
+        # notemerge.read_existing answered None for "absent" and for
+        # "there but unreadable" alike, and _claim_name read that as a free
+        # name. A .md holding invalid UTF-8 was destroyed without a word.
+        dest = ObsidianDestination(vault_path=str(vault))
+        mine = vault / "Note.md"
+        mine.write_bytes(b"\xff\xfe not utf-8 at all")
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert result.ok is True
+        assert result.target == "Note (2).md"
+        assert mine.read_bytes() == b"\xff\xfe not utf-8 at all"
+
+    def test_the_user_is_told_which_file_was_left_alone(self, vault):
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").write_bytes(b"\xff\xfe")
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert any("Note.md" in w and "could not be read" in w for w in result.warnings)
+
+    def test_a_directory_in_the_way_is_not_a_free_name_either(self, vault):
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").mkdir()
+
+        result = dest.publish(*make_both("Note", "Content"))
+
+        assert result.ok is True
+        assert result.target == "Note (2).md"
+        assert (vault / "Note.md").is_dir()
+
+    def test_an_unreadable_note_does_not_stop_the_documents_own_note(self, vault):
+        # Stepping around is only correct if the notebook still gets published.
+        dest = ObsidianDestination(vault_path=str(vault))
+        (vault / "Note.md").write_bytes(b"\xff\xfe")
+
+        result = dest.publish(*make_both("Note", "Body text"))
+
+        assert "Body text" in (vault / result.target).read_text(encoding="utf-8")

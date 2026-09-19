@@ -344,7 +344,13 @@ class ObsidianDestination(FileSystemDestination):
             # leaves stale files rather than a broken note.
             logger.warning("Could not move attachments from %s", old_attach, exc_info=True)
 
-    def _claim_name(self, target_dir: Path, safe_name: str, doc_id: Optional[str]) -> str:
+    def _claim_name(
+        self,
+        target_dir: Path,
+        safe_name: str,
+        doc_id: Optional[str],
+        warnings: List[str],
+    ) -> str:
         """Return a filename that is either this document's note or a free one.
 
         Two notebooks can have the same title, and before identity was recorded
@@ -353,10 +359,16 @@ class ObsidianDestination(FileSystemDestination):
         carries no id at all — the latter being every note written before ids
         existed, which is adopted rather than duplicated.
 
+        A name is free only when nothing is there. A file that exists but
+        cannot be read is not a free name: it cannot be shown to be ours, so
+        writing over it would destroy something on nothing but a guess.
+
         Args:
             target_dir: Directory the note goes in.
             safe_name: Sanitized filename, without the extension.
             doc_id: The document being published, or None when it is unknown.
+            warnings: Collected for the run report; a stepped-around file is
+                something the user has to resolve by hand.
 
         Returns:
             The name to write under: ``safe_name``, or ``safe_name (2)`` and
@@ -367,22 +379,28 @@ class ObsidianDestination(FileSystemDestination):
             # A notebook that happens to share its title gets the next name.
             safe_name = f"{safe_name} (2)"
 
-        if not doc_id:
-            # Nothing to compare against, so the path is the identity, exactly
-            # as it was before ids were recorded.
-            return safe_name
-
         candidate = safe_name
         # Bounded rather than unbounded: a hundred same-titled notebooks in one
         # folder is a sign something is wrong, not a case worth serving.
         for suffix in range(1, 100):
-            existing = notemerge.read_existing(target_dir / f"{candidate}.md")
-            if existing is None:
+            existing = notemerge.inspect_existing(target_dir / f"{candidate}.md")
+            if existing.unreadable:
+                warnings.append(
+                    f"'{candidate}.md' could not be read, so it was left alone "
+                    f"and this notebook was written beside it."
+                )
+                logger.warning("Stepping around unreadable note %s", target_dir / f"{candidate}.md")
+            elif existing.text is None:
                 return candidate
-            front, _ = notemerge.split_frontmatter(existing)
-            owner = notemerge.frontmatter_value(front, "living_ink_id")
-            if owner is None or owner == doc_id:
+            elif not doc_id:
+                # Nothing to compare against, so the path is the identity,
+                # exactly as it was before ids were recorded.
                 return candidate
+            else:
+                front, _ = notemerge.split_frontmatter(existing.text)
+                owner = notemerge.frontmatter_value(front, "living_ink_id")
+                if owner is None or owner == doc_id:
+                    return candidate
             candidate = f"{safe_name} ({suffix + 1})"
 
         logger.warning(
@@ -470,7 +488,7 @@ class ObsidianDestination(FileSystemDestination):
             # title in different folders do not collide.
             safe_name = self._sanitize_filename(f"{' - '.join(folder_parts)} - {clean_title}")
 
-        safe_name = self._claim_name(layout.target_dir, safe_name, ctx.doc_id)
+        safe_name = self._claim_name(layout.target_dir, safe_name, ctx.doc_id, layout.warnings)
         layout.note_path = self.contained(layout.target_dir, f"{safe_name}{self.note_suffix}")
 
     def prepare(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> None:
