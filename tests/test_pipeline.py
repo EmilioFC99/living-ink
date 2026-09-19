@@ -396,6 +396,68 @@ class TestDocumentJob:
         assert job.top_level_subfolder() is None
 
 
+class TestPagesAreDescribedAtRenderTime:
+    """Everything needed to place a page is recorded once, when it is rendered.
+
+    It used to be recovered at publish time by regexing the PNG filename and
+    reopening the source PDF — once per page, from inside the destination.
+    """
+
+    def _pipeline(self):
+        return SyncPipeline(destinations=[MockDestination()])
+
+    def test_a_page_is_described_for_every_image(self):
+        job = make_job(imgs=[Path("nb.page-1.png"), Path("nb.page-2.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert [p.index for p in job.pages] == [0, 1]
+        assert [p.image_path for p in job.pages] == job.imgs
+
+    def test_the_number_is_the_documents_own_not_the_position(self):
+        """A 400-page PDF with two annotated pages yields 12 and 377."""
+        job = make_job(imgs=[Path("nb.page-12.png"), Path("nb.page-377.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert [p.number for p in job.pages] == [12, 377]
+
+    def test_a_notebook_page_is_labelled_by_its_number(self):
+        job = make_job(imgs=[Path("nb.page-3.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].label == "Page 3"
+
+    def test_a_notebook_has_no_breadcrumbs(self):
+        """An empty tuple, so a writer renders nothing rather than a bare separator."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].breadcrumbs == ()
+
+    def test_the_source_digest_is_carried_when_the_page_was_rendered_this_run(self):
+        job = make_job(
+            imgs=[Path("nb.page-1.png"), Path("nb.page-2.png")],
+            source_hashes=["aaa", "bbb"],
+        )
+        self._pipeline()._describe_pages(job)
+
+        assert [p.source_key for p in job.pages] == ["aaa", "bbb"]
+
+    def test_a_page_reused_from_disk_has_no_source_digest(self):
+        """Nothing hashed the zip, because nothing downloaded it."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].source_key == ""
+
+    def test_no_page_carries_text_yet(self):
+        """Text arrives three stages later; the page exists before it does."""
+        job = make_job(imgs=[Path("nb.page-1.png")])
+        self._pipeline()._describe_pages(job)
+
+        assert job.pages[0].text == ""
+        assert job.pages[0].error is None
+
+
 class TestJobHelpers:
     """Small pure helpers the stages rely on."""
 

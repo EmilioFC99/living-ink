@@ -37,7 +37,7 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Page, PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
@@ -1079,6 +1079,12 @@ class DocumentJob:
 
     tags: List[str] = field(default_factory=list)
     imgs: List[Path] = field(default_factory=list)
+    # One entry per rendered page, in page order. Built once the images are
+    # settled and replaced in place as later stages learn the text: everything
+    # a destination needs to *place* a page is known at render time, and
+    # re-deriving it at publish time is what made the destination reopen the
+    # source PDF once per page.
+    pages: List[Page] = field(default_factory=list)
     page_hashes: List[str] = field(default_factory=list)
     source_hashes: List[str] = field(default_factory=list)
     transcribed_pages: int = 0
@@ -1741,6 +1747,41 @@ class SyncPipeline:
             f"Found {len(job.imgs)} white-background PNGs for {job.notebook}: "
             f"{[p.name for p in job.imgs]}"
         )
+        self._describe_pages(job)
+
+    def _describe_pages(self, job: DocumentJob) -> None:
+        """Record what each rendered page *is*, while the source is open anyway.
+
+        The page number, the label a heading shows and the chapter it sits
+        under are all properties of the render, not of the publish. They used
+        to be recovered at publish time by regexing the PNG filename and
+        reopening the source PDF once per page, from inside the destination.
+
+        Args:
+            job: The job whose images are settled; sets ``pages``.
+        """
+        from living_ink.extract import get_pdf_toc_breadcrumbs, page_labels
+
+        source = job.source_file()
+        numbers = [job.page_number(i) for i in range(len(job.imgs))]
+        labels = page_labels(numbers, source)
+
+        job.pages = [
+            Page(
+                index=index,
+                number=number,
+                label=labels.get(number, f"Page {number}"),
+                breadcrumbs=tuple(get_pdf_toc_breadcrumbs(number, source)),
+                image_path=image,
+                # The digest the render cache keyed this page under, when the
+                # page was rendered this run. A page reused from disk has none,
+                # which is why this is a key and not an identity.
+                source_key=(
+                    job.source_hashes[number - 1] if number - 1 < len(job.source_hashes) else ""
+                ),
+            )
+            for index, (image, number) in enumerate(zip(job.imgs, numbers))
+        ]
 
     def _rendered_pages(self, job: DocumentJob) -> List[Path]:
         """List the page images already rendered for this job, in page order."""
@@ -2304,8 +2345,15 @@ class SyncPipeline:
                 return
 
             for i, text in enumerate(texts):
+                page = job.pages[i] if i < len(job.pages) else None
                 header = format_page_section_header(
-                    job.page_number(i), job.doc_file_path, include_divider=True
+                    page.number if page else job.page_number(i),
+                    job.doc_file_path,
+                    include_divider=True,
+                    # Already read once, when the page was rendered. Letting the
+                    # header re-read them reopens the PDF once per page.
+                    label=page.label if page else None,
+                    breadcrumbs=page.breadcrumbs if page else None,
                 )
                 body = (text or "").strip()
                 f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
