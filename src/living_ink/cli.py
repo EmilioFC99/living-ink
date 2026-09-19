@@ -8,7 +8,6 @@ Commands:
     living-ink watch         Sync repeatedly on a timer until interrupted
     living-ink setup         Launch interactive configuration walkthrough
     living-ink status        Display connection, vault, and sync service status
-    living-ink list          Show which documents are synced, pending, or failing
     living-ink state         Inspect, reset, or check the sync state database
     living-ink cache         Show, prune, or clear the transcription and render caches
 """
@@ -459,11 +458,6 @@ class StatusReport:
     auto_sync_installed: bool = False
     auto_sync_active: bool = False
 
-    documents_known: bool = False
-    documents_synced: int = 0
-    documents_pending: int = 0
-    documents_failing: int = 0
-
     cache_entries: int = 0
     cache_bytes: int = 0
 
@@ -529,12 +523,6 @@ class StatusReport:
             "auto_sync": {
                 "installed": self.auto_sync_installed,
                 "active": self.auto_sync_active,
-            },
-            "documents": {
-                "known": self.documents_known,
-                "synced": self.documents_synced,
-                "pending": self.documents_pending,
-                "failing": self.documents_failing,
             },
             "cache": {
                 "entries": self.cache_entries,
@@ -700,25 +688,6 @@ def collect_status(config_path: Path) -> StatusReport:
         )
         report.auto_sync_active = res.returncode == 0
 
-    # Sync inventory. A status check must survive a missing or damaged state
-    # database — the rest of the report is exactly what someone would be
-    # reading to diagnose that.
-    try:
-        inventory = collect_inventory()
-    except Exception:
-        # Broad on purpose: whatever is wrong with the state database, the
-        # rest of the report is what the user is here to read.
-        logger.debug("Could not read the sync inventory", exc_info=True)
-        inventory = []
-    if inventory:
-        from living_ink.state import STATUS_CHANGED, STATUS_FAILED, STATUS_NEW, STATUS_UP_TO_DATE
-
-        counts = count_by_status(inventory)
-        report.documents_known = True
-        report.documents_synced = counts[STATUS_UP_TO_DATE]
-        report.documents_pending = counts[STATUS_NEW] + counts[STATUS_CHANGED]
-        report.documents_failing = counts[STATUS_FAILED]
-
     try:
         for cache in all_caches():
             entries, total = cache.stats()
@@ -745,36 +714,12 @@ def short_destination(class_name: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", trimmed) or class_name
 
 
-def collect_inventory() -> list[dict[str, Any]]:
-    """Describe every document the state database knows about.
-
-    Args:
-        None.
-
-    Returns:
-        The rows :meth:`living_ink.state.StateStore.sync_overview` returns,
-        judged against the destinations the current config enables. Empty when
-        nothing has ever been synced, which is also what a fresh install looks
-        like.
-    """
-    from living_ink import state
-    from living_ink.pipeline import DATA_DIR, get_default_destinations, get_state_store
-
-    # Reading the inventory must not create it. Opening the store would make
-    # an empty database, and a command that only reports has no business
-    # leaving a file behind.
-    if not (DATA_DIR / state.DB_FILENAME).exists():
-        return []
-
-    names = [type(dest).__name__ for dest in get_default_destinations()]
-    return get_state_store().sync_overview(names)
-
-
 def count_by_status(inventory: list[dict[str, Any]]) -> dict["SyncStatus", int]:
     """Total the inventory by sync status.
 
     Args:
-        inventory: Rows from :func:`collect_inventory`.
+        inventory: Rows carrying a ``status``, as
+            :meth:`~living_ink.state.StateStore.compare_with_listing` returns.
 
     Returns:
         Mapping of every :data:`~living_ink.state.SYNC_STATUSES` entry to its
@@ -1305,7 +1250,7 @@ class StateCommand(BaseCommand):
         matches = store.find_documents(query)
 
         if not matches:
-            print(f"No document matches {query!r}. Try 'living-ink list --all'.")
+            print(f"No document matches {query!r}. Try 'living-ink sync --status --all'.")
             return 1
         if len(matches) > 1:
             print(f"{query!r} matches {len(matches)} documents. Use an id:")
@@ -1519,128 +1464,6 @@ class CacheCommand(BaseCommand):
         return 0
 
 
-class ListCommand(BaseCommand):
-    """Show what is synced, what is waiting, and what is broken.
-
-    Defaults to the exception view. On a healthy library the interesting
-    answer is short — usually nothing — and printing forty untouched notebooks
-    to say so buries it. ``--all`` asks for the full inventory.
-    """
-
-    name = "list"
-    help = "Show which documents are synced, pending, or failing"
-    description = (
-        "List documents Living Ink knows about. Shows only pending and failing "
-        "ones unless --all is given."
-    )
-
-    @classmethod
-    def register_args(cls, parser: argparse.ArgumentParser) -> None:
-        """Register arguments for the list command.
-
-        Args:
-            parser: Subparser to attach arguments to.
-        """
-        parser.add_argument(
-            "--all",
-            action="store_true",
-            help="Include documents that are already up to date",
-        )
-        parser.add_argument(
-            "--json",
-            action="store_true",
-            help="Output the inventory in JSON format",
-        )
-
-    def run(self, args: argparse.Namespace) -> int:
-        """Print the inventory.
-
-        Args:
-            args: Parsed arguments for list.
-
-        Returns:
-            0 always. A pending document is a normal state of affairs, not an
-            error, and a script that treats it as one would break every time
-            somebody wrote a new page.
-        """
-        inventory = collect_inventory()
-
-        if getattr(args, "json", False):
-            print(json.dumps(inventory_as_json(inventory), indent=2))
-            return 0
-
-        self._render_console(inventory, show_all=getattr(args, "all", False))
-        return 0
-
-    @staticmethod
-    def _render_console(inventory: list[dict[str, Any]], *, show_all: bool) -> None:
-        """Print the inventory grouped by status.
-
-        Args:
-            inventory: Rows from :func:`collect_inventory`.
-            show_all: Whether to include the up-to-date documents.
-        """
-        from living_ink.setup_wizard import bold, dim, green
-        from living_ink.state import STATUS_UP_TO_DATE, SYNC_STATUSES
-
-        if not inventory:
-            print()
-            print(dim("No documents on record yet. Run 'living-ink sync' first."))
-            print()
-            return
-
-        # Driven by the registry: a status added in state.py appears here with
-        # no edit, grouped by whether a run would act on it.
-        wanted = [s for s in SYNC_STATUSES if show_all or s.needs_sync]
-
-        width = min(40, max(len(row["name"] or row["id"]) for row in inventory))
-        printed = 0
-
-        print()
-        for status in wanted:
-            rows = [row for row in inventory if row["status"] is status]
-            if not rows:
-                continue
-            colour = tone_colour(status.tone)
-            print(bold(colour(f"{status.label.capitalize()} ({len(rows)})")))
-            for row in rows:
-                print(f"  {ListCommand._format_row(row, width)}")
-            print()
-            printed += len(rows)
-
-        counts = count_by_status(inventory)
-        if not show_all:
-            if printed == 0:
-                print(green("Everything is up to date."))
-            print(dim(f"{counts[STATUS_UP_TO_DATE]} up to date (not shown; use --all)"))
-            print()
-
-    @staticmethod
-    def _format_row(row: dict[str, Any], width: int) -> str:
-        """Render one document as a single line.
-
-        Args:
-            row: One entry from :func:`collect_inventory`.
-            width: Column width for the document name.
-
-        Returns:
-            The line to print, without its leading indent.
-        """
-        from living_ink.setup_wizard import dim
-
-        name = (row["name"] or row["id"])[:width].ljust(width)
-        folder = row.get("folder") or "—"
-
-        if row.get("last_error"):
-            detail = str(row["last_error"]).splitlines()[0][:60]
-        elif row["pending"]:
-            detail = "waiting for " + ", ".join(short_destination(d) for d in row["pending"])
-        else:
-            detail = ""
-
-        return f"{name}  {dim(folder.ljust(20))}  {detail}".rstrip()
-
-
 class StatusCommand(BaseCommand):
     """Display connection, vault, and sync service status."""
 
@@ -1775,18 +1598,10 @@ class StatusCommand(BaseCommand):
         else:
             print(f"Auto-Sync:     {yellow('Installed but not currently loaded')}")
 
-        # Documents — the one line that answers "did my notes make it?".
-        if report.documents_known:
-            parts = [green(f"{report.documents_synced} synced")]
-            if report.documents_pending:
-                parts.append(yellow(f"{report.documents_pending} pending"))
-            if report.documents_failing:
-                parts.append(red(f"{report.documents_failing} failing"))
-            print(f"Documents:     {' · '.join(parts)}")
-            if report.documents_pending or report.documents_failing:
-                print(f"               {dim('→ Run: living-ink list')}")
-        else:
-            print(f"Documents:     {dim('None synced yet')}")
+        # No document tally here on purpose. This command reports the setup;
+        # what is and is not synced is a live question about the tablet, and
+        # `living-ink sync --status` is the one that goes and asks it.
+        print(f"Documents:     {dim('→ Run: living-ink sync --status')}")
 
         # Caches — how much of the next sync is already paid for.
         if report.cache_entries:
@@ -1892,7 +1707,6 @@ class LivingInkCLI:
         WatchCommand,
         SetupCommand,
         StatusCommand,
-        ListCommand,
         StateCommand,
         CacheCommand,
     ]
