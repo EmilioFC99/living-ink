@@ -160,6 +160,48 @@ def frontmatter_value(lines: List[str], key: str) -> Optional[str]:
     return None
 
 
+def frontmatter_list(lines: List[str], key: str) -> List[str]:
+    """Read a list-valued frontmatter key, in either YAML spelling.
+
+    Args:
+        lines: Frontmatter lines, without the ``---`` fences.
+        key: Key to look for, case-insensitively.
+
+    Returns:
+        The values in the order they appear, or an empty list. Both the block
+        sequence Living Ink writes and the inline flow a user may have typed by
+        hand are read; the note is theirs to format.
+    """
+    values: List[str] = []
+    collecting = False
+    for line in lines:
+        match = _KEY_LINE.match(line)
+        if match:
+            if match.group(1).lower() != key.lower():
+                collecting = False
+                continue
+            collecting = True
+            inline = line.split(":", 1)[1].strip()
+            if inline.startswith("[") and inline.endswith("]"):
+                values.extend(
+                    part.strip().strip("\"'") for part in inline[1:-1].split(",") if part.strip()
+                )
+                collecting = False
+            elif inline:
+                values.append(inline.strip("\"'"))
+                collecting = False
+            continue
+        if collecting:
+            item = line.strip()
+            if item.startswith("-"):
+                cleaned = item[1:].strip().strip("\"'")
+                if cleaned:
+                    values.append(cleaned)
+            elif item:
+                collecting = False
+    return values
+
+
 def looks_generated(text: str) -> bool:
     """Say whether a note without markers was written by Living Ink.
 

@@ -439,6 +439,17 @@ class ObsidianDestination(FileSystemDestination):
         clean = re.sub(r"[^\w\-/]", "", clean)
         return clean
 
+    def _add_tag(self, tags: List[str], tag: str) -> None:
+        """Append a tag if sanitising it yields something new.
+
+        Args:
+            tags: The list being built, in order. Modified in place.
+            tag: The raw tag.
+        """
+        clean = self._sanitize_tag(tag)
+        if clean and clean.lower() not in [existing.lower() for existing in tags]:
+            tags.append(clean)
+
     def _page_blocks(self, page: Page) -> List[Block]:
         """Turn one page into the blocks that introduce and carry it.
 
@@ -624,11 +635,21 @@ class ObsidianDestination(FileSystemDestination):
 
         source = doc.source_file
         doc_type = source.suffix.lstrip(".").lower() if source and source.exists() else None
-        combined_tags = ["remarkable", doc_type or "handwritten"]
-        for tag in doc.tags:
-            clean = self._sanitize_tag(tag)
-            if clean and clean.lower() not in [t.lower() for t in combined_tags]:
-                combined_tags.append(clean)
+
+        # The one owned key that is merged rather than replaced. A `#todo` a
+        # user adds to a synced note is the single frontmatter edit they are
+        # most likely to make, and overwriting the list destroyed it.
+        #
+        # Known limitation, stated rather than fixed: removing a tag on the
+        # tablet does not remove it from the note. Knowing which tags Living
+        # Ink wrote last time means storing that set on `publications`, and
+        # union-and-never-remove is the conservative error — a stale tag, not
+        # a deleted one.
+        combined_tags: List[str] = []
+        for tag in ["remarkable", doc_type or "handwritten", *doc.tags]:
+            self._add_tag(combined_tags, tag)
+        for tag in notemerge.frontmatter_list(existing_front, "tags"):
+            self._add_tag(combined_tags, tag)
 
         folder_parts = [part.strip() for part in doc.folder_path if part.strip()]
         source_path = "/".join([*folder_parts, doc.title.strip()])

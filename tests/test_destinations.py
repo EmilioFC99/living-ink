@@ -7,6 +7,7 @@ configuration, attachment handling, and filename sanitization.
 
 import datetime
 import re
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -492,6 +493,73 @@ class TestObsidianWriteDurability:
         dest.publish(*make_both("Meeting Notes", "content"))
         # The attachments folder is expected; a leftover ".tmp" would not be.
         assert sorted(p.name for p in tmp_path.iterdir()) == ["Meeting Notes.md", "_attachments"]
+
+
+class TestTagsAreUnionedNotOverwritten:
+    """The one frontmatter edit a user is most likely to make."""
+
+    def _publish(self, tmp_path, tags=()):
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        doc, ctx = make_both("Daily Note", "Transcript")
+        doc = replace(doc, tags=tuple(tags))
+        result = dest.publish(doc, ctx)
+        return dest, tmp_path / result.target
+
+    def test_a_tag_the_user_added_survives_a_resync(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        note.write_text(
+            note.read_text(encoding="utf-8").replace(
+                "  - handwritten", "  - handwritten\n  - todo", 1
+            ),
+            encoding="utf-8",
+        )
+
+        dest.publish(*make_both("Daily Note", "Transcript v2"))
+
+        assert "  - todo" in note.read_text(encoding="utf-8")
+
+    def test_the_tablets_tags_come_first_and_the_users_follow(self, tmp_path):
+        dest, note = self._publish(tmp_path, tags=["work"])
+        note.write_text(
+            note.read_text(encoding="utf-8").replace("  - work", "  - work\n  - todo", 1),
+            encoding="utf-8",
+        )
+
+        doc, ctx = make_both("Daily Note", "v2")
+        dest.publish(replace(doc, tags=("work",)), ctx)
+
+        written = note.read_text(encoding="utf-8")
+        tags = notemerge.frontmatter_list(notemerge.split_frontmatter(written)[0], "tags")
+        assert tags == ["remarkable", "handwritten", "work", "todo"]
+
+    def test_a_tag_is_not_duplicated_by_the_union(self, tmp_path):
+        dest, note = self._publish(tmp_path, tags=["work"])
+        doc, ctx = make_both("Daily Note", "v2")
+        dest.publish(replace(doc, tags=("work",)), ctx)
+
+        written = note.read_text(encoding="utf-8")
+        assert written.count("  - work") == 1
+
+    def test_a_user_tag_is_sanitized_like_any_other(self, tmp_path):
+        dest, note = self._publish(tmp_path)
+        note.write_text(
+            note.read_text(encoding="utf-8").replace(
+                "  - handwritten", "  - handwritten\n  - my notes!", 1
+            ),
+            encoding="utf-8",
+        )
+
+        dest.publish(*make_both("Daily Note", "v2"))
+
+        assert "  - my-notes" in note.read_text(encoding="utf-8")
+
+    def test_removing_a_tag_on_the_tablet_leaves_it_in_the_note(self, tmp_path):
+        # The stated limitation. Living Ink does not record which tags it wrote
+        # last time, so the conservative error is a stale tag, not a deleted one.
+        dest, note = self._publish(tmp_path, tags=["work"])
+        dest.publish(*make_both("Daily Note", "v2"))
+
+        assert "  - work" in note.read_text(encoding="utf-8")
 
 
 class TestTheSourceKeyIsAContract:

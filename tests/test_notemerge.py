@@ -406,6 +406,36 @@ class TestRenderAdoptsOlderNotes:
         assert out.count("living-ink:begin") == 1
 
 
+class TestFrontmatterList:
+    """Reading a list key back, so ``tags`` can be merged instead of replaced."""
+
+    def test_the_block_sequence_living_ink_writes(self):
+        lines = ["tags:", "  - remarkable", "  - todo", "created: x"]
+        assert notemerge.frontmatter_list(lines, "tags") == ["remarkable", "todo"]
+
+    def test_the_inline_flow_a_user_may_have_typed(self):
+        assert notemerge.frontmatter_list(["tags: [remarkable, todo]"], "tags") == [
+            "remarkable",
+            "todo",
+        ]
+
+    def test_a_single_scalar_value(self):
+        assert notemerge.frontmatter_list(["tags: todo"], "tags") == ["todo"]
+
+    def test_quotes_are_stripped(self):
+        assert notemerge.frontmatter_list(["tags:", '  - "todo"'], "tags") == ["todo"]
+
+    def test_another_keys_list_is_not_read(self):
+        lines = ["aliases:", "  - Standup", "tags:", "  - todo"]
+        assert notemerge.frontmatter_list(lines, "tags") == ["todo"]
+
+    def test_a_missing_key_is_empty(self):
+        assert notemerge.frontmatter_list(["created: x"], "tags") == []
+
+    def test_an_empty_list_is_empty(self):
+        assert notemerge.frontmatter_list(["tags:", "created: x"], "tags") == []
+
+
 class TestLooksGenerated:
     """The discriminator for markerless notes."""
 
