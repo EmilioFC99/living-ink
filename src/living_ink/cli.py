@@ -818,10 +818,9 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
 def version_of(item: Any) -> str:
     """Return the version string a sync would compare against.
 
-    Mirrors :meth:`living_ink.pipeline.SyncPipeline.filter_pending_documents`
-    exactly — hash first, falling back to the numeric version — so that a
-    preview and the run it predicts cannot disagree about whether a document
-    changed.
+    Thin wrapper over :func:`living_ink.pipeline.document_version`, which is
+    also what the run itself uses: a preview and the run it predicts must not
+    disagree about whether a document changed.
 
     Args:
         item: A document from the transport's listing.
@@ -829,15 +828,9 @@ def version_of(item: Any) -> str:
     Returns:
         The content hash, or the version number as a string, or ``"1"``.
     """
-    from living_ink.pipeline import get_val
+    from living_ink.pipeline import document_version
 
-    value = get_val(item, "hash")
-    if value:
-        return str(value)
-    try:
-        return str(int(get_val(item, "Version")))
-    except (ValueError, TypeError):
-        return "1"
+    return document_version(item)
 
 
 def document_type_from_metadata(item: Any) -> Optional[str]:

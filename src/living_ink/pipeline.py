@@ -646,6 +646,30 @@ def get_val(item: Any, key: str) -> Any:
     return getattr(item, key, getattr(item, key.lower(), None))
 
 
+def document_version(item: Any) -> str:
+    """Return the value that decides whether a document has changed.
+
+    The content hash when the transport offers one, the version counter
+    otherwise. Lives here rather than inline in
+    :meth:`SyncPipeline.filter_pending_documents` because ``sync --status``
+    predicts that decision, and a preview that disagrees with the run it
+    predicts is worse than no preview.
+
+    Args:
+        item: A document from the transport's listing.
+
+    Returns:
+        The content hash, or the version number as a string, or ``"1"``.
+    """
+    value = get_val(item, "hash")
+    if value:
+        return str(value)
+    try:
+        return str(int(get_val(item, "Version")))
+    except (ValueError, TypeError):
+        return "1"
+
+
 def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
     """Construct the folder path for an item using the ID lookup map."""
     path = []
@@ -1429,12 +1453,7 @@ class SyncPipeline:
 
         for item in notebooks:
             doc_id = get_val(item, "ID")
-            curr_val = get_val(item, "hash")
-            if not curr_val:
-                try:
-                    curr_val = int(get_val(item, "Version"))
-                except (ValueError, TypeError):
-                    curr_val = 1
+            curr_val = document_version(item)
 
             # Recorded whether or not it needs publishing: an inventory of what
             # is on the device is what makes "what is pending" answerable
