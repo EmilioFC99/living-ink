@@ -9,10 +9,9 @@ import abc
 import enum
 import logging
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Type
+from typing import Any, ClassVar, Dict, Optional, Type
 
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -189,51 +188,25 @@ class Destination(abc.ABC):
         """
 
     @abc.abstractmethod
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: List[Path],
-        sub_folder: Optional[str] = None,
-        document_path: Optional[Path] = None,
-        tags: Optional[List[str]] = None,
-        existing_id: Optional[str] = None,
-        adopt_by_name: bool = False,
-        doc_id: Optional[str] = None,
-        existing_target: Optional[str] = None,
-        document_modified: Optional[str] = None,
-        first_published: Optional[str] = None,
-    ) -> PublishResult:
-        """Publish a notebook to the destination.
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
+        """Publish one document to this destination.
+
+        Two arguments, because the split is real: ``doc`` is the same for every
+        destination and ``ctx`` is what this destination did with it last time.
+        They used to be twelve positional parameters, which meant a new fact
+        about a document was a signature change in every destination that had
+        no use for it, and every caller.
+
+        A destination reads what it can use and ignores the rest. Nothing here
+        is a filesystem path except the two temp artifacts named in
+        :class:`~living_ink.core.document.Page` and
+        :attr:`~living_ink.core.document.Document.source_file`, both of which
+        are gone by the time this call returns.
 
         Args:
-            notebook_name: Title of the notebook.
-            text_content: The cleaned-up text content.
-            image_paths: List of file paths to rendered page images.
-            sub_folder: Optional relative sub-folder path (e.g., "Work/Projects").
-            document_path: Optional path to underlying raw document (PDF or EPUB).
-            tags: Optional list of tags associated with the notebook or its pages.
-            existing_id: Identifier this destination returned the last time it
-                published this notebook, if one was recorded. Replacing exactly
-                that object is the only safe way to re-publish.
-            adopt_by_name: Permission to fall back to matching on title when no
-                ``existing_id`` is known. Only true when sync state says this
-                notebook was published here before, which means the note with
-                that title was almost certainly created by Living Ink.
-            doc_id: The reMarkable document id. This is the note's identity —
-                titles collide and change, document ids do not — so a
-                destination that can record it alongside the note should.
-            existing_target: Where this destination put the note last time, as
-                it reported it in :attr:`PublishResult.target`. When the note
-                belongs somewhere else now — the notebook was renamed or moved
-                on the tablet — a destination that can move it should, rather
-                than leaving a copy under the old name.
-            document_modified: ``YYYY-MM-DD`` the user last wrote on this
-                notebook, as the tablet reports it. This is the date worth
-                sorting a library by, and it is not the date of the sync.
-            first_published: ``YYYY-MM-DD`` this document first reached this
-                destination, for a note that has to state when it came into
-                existence and has no other record of it.
+            doc: The transcribed document, destination-neutral.
+            ctx: This publish — the previous publication's coordinates, whether
+                anything may be written, and the run's settings.
 
         Returns:
             The outcome, carrying where the note landed and any identifier the
@@ -244,12 +217,7 @@ class Destination(abc.ABC):
                 message is user-facing and names the cause.
         """
 
-    def unpublish(
-        self,
-        target: Optional[str] = None,
-        external_id: Optional[str] = None,
-        doc_id: Optional[str] = None,
-    ) -> PublishResult:
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         """Remove a note whose document no longer exists on the tablet.
 
         Only ever called for a document Living Ink published itself and can no
@@ -257,10 +225,12 @@ class Destination(abc.ABC):
         default is to refuse: a destination that cannot prove which note is the
         right one must not delete any.
 
+        There is no Document here and there cannot be — the document is gone.
+        Everything known about the note comes from its state-store row, which
+        is exactly what :class:`PublishContext` carries.
+
         Args:
-            target: Where the note was recorded as landing.
-            external_id: Identifier this destination reported for the note.
-            doc_id: The reMarkable document id it was published for.
+            ctx: The coordinates of the note to remove.
 
         Returns:
             The outcome. ``ok`` is False when nothing was removed, which is not

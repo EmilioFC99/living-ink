@@ -13,6 +13,7 @@ from living_ink.extract import (
 )
 from living_ink.ssh import Document as SSHDocument
 from living_ink.ssh import SSHClient
+from tests.builders import make_both
 
 
 class TestTagNormalization:
@@ -104,11 +105,13 @@ class TestObsidianFrontmatterTags:
         dummy_pdf.write_bytes(b"%PDF-1.4")
 
         dest.publish(
-            notebook_name="Data Systems",
-            text_content="Some content",
-            image_paths=[],
-            document_path=dummy_pdf,
-            tags=["data-engineering", "databases"],
+            *make_both(
+                "Data Systems",
+                "Some content",
+                source="pdf",
+                source_file=dummy_pdf,
+                tags=["data-engineering", "databases"],
+            )
         )
 
         note_file = tmp_path / "Data Systems.md"
@@ -117,12 +120,7 @@ class TestObsidianFrontmatterTags:
 
     def test_handwritten_with_tags(self, tmp_path):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        dest.publish(
-            notebook_name="Meeting",
-            text_content="Notes",
-            image_paths=[],
-            tags=["standup", "sprint-42"],
-        )
+        dest.publish(*make_both("Meeting", "Notes", tags=["standup", "sprint-42"]))
 
         note_file = tmp_path / "Meeting.md"
         content = note_file.read_text(encoding="utf-8")
@@ -130,12 +128,7 @@ class TestObsidianFrontmatterTags:
 
     def test_deduplicates_standard_tags(self, tmp_path):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        dest.publish(
-            notebook_name="Note",
-            text_content="Notes",
-            image_paths=[],
-            tags=["remarkable", "handwritten", "custom"],
-        )
+        dest.publish(*make_both("Note", "Notes", tags=["remarkable", "handwritten", "custom"]))
 
         note_file = tmp_path / "Note.md"
         content = note_file.read_text(encoding="utf-8")
@@ -159,12 +152,7 @@ class TestAppleNotesTags:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
 
-        dest.publish(
-            notebook_name="Test Note",
-            text_content="Body text",
-            image_paths=[],
-            tags=["data-engineering", "python"],
-        )
+        dest.publish(*make_both("Test Note", "Body text", tags=["data-engineering", "python"]))
 
         assert len(captured_script) == 1
         script = captured_script[0]

@@ -37,7 +37,7 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
-from living_ink.core.document import Page, PublishResult
+from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
@@ -1036,27 +1036,6 @@ def _item_version(item: Any) -> Any:
         return 1
 
 
-def _strip_transcript_metadata(path: Optional[Path]) -> str:
-    """Read a transcript and drop the leading metadata line.
-
-    Args:
-        path: The transcript file, or None.
-
-    Returns:
-        The note body: everything from the first page header or divider on.
-    """
-    if not path or not path.exists():
-        return ""
-
-    lines = path.read_text(errors="ignore").split("\n")
-    start = 0
-    for i, line in enumerate(lines):
-        if line.startswith("---") or line.startswith("###"):
-            start = i
-            break
-    return "\n".join(lines[start:]).strip()
-
-
 @dataclass
 class DocumentJob:
     """One document's state as it moves through the processing stages.
@@ -1096,14 +1075,16 @@ class DocumentJob:
     extracted_doc_text: str = ""
     clean_out_txt: Optional[Path] = None
 
-    def modified_date(self) -> Optional[str]:
-        """Return the date the tablet says this notebook was last written on.
+    def modified_at(self) -> Optional[datetime.datetime]:
+        """Return when the tablet says this notebook was last written on.
 
         Returns:
-            ``YYYY-MM-DD``, or None when the transport reported no usable
-            timestamp for it.
+            The timestamp, or None when the transport reported nothing usable.
+            A destination that wants a date takes it from here; today's date is
+            never substituted, because "the tablet did not say" and "the tablet
+            said today" are different facts.
         """
-        return to_iso_date(
+        return to_datetime(
             get_val(self.item, "ModifiedClient") or getattr(self.item, "last_modified", None)
         )
 
@@ -1131,19 +1112,17 @@ class DocumentJob:
             return self.doc_file_path
         return None
 
-    def _folder_parts(self) -> List[str]:
-        """Split the reMarkable folder path into its individual folder names."""
-        return [p.strip() for p in self.folder_path.split(" / ") if p.strip()]
+    def folder_parts(self) -> Tuple[str, ...]:
+        """Return the reMarkable folder hierarchy, outermost first.
 
-    def full_subfolder(self) -> Optional[str]:
-        """Return the whole folder hierarchy, for destinations that nest."""
-        parts = self._folder_parts()
-        return "/".join(parts) if parts else None
+        The parts, not a joined path: how deep a destination nests is its own
+        decision, and this used to be two methods here because the pipeline
+        made that decision for it by checking the destination's class.
 
-    def top_level_subfolder(self) -> Optional[str]:
-        """Return only the outermost folder, for destinations that do not nest."""
-        parts = self._folder_parts()
-        return sanitize_filename(parts[0]) if parts else None
+        Returns:
+            One entry per folder, empty at the library root.
+        """
+        return tuple(p.strip() for p in self.folder_path.split(" / ") if p.strip())
 
 
 class SyncPipeline:
@@ -2340,8 +2319,70 @@ class SyncPipeline:
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 
+    def _build_document(self, job: DocumentJob) -> Document:
+        """Turn a finished job into the destination-neutral document.
+
+        This is the adapter, and it is temporary: the stages will build the
+        document themselves once they are moved out of this class, and then
+        ``DocumentJob`` stops being the thing that travels between them. Until
+        that lands, one place converts and every destination sees the contract
+        it will keep.
+
+        Args:
+            job: The job, transcribed and ready to publish.
+
+        Returns:
+            The document, carrying nothing about where it is going.
+        """
+        return Document(
+            doc_id=job.notebook_id,
+            # The title alone. It used to be glued to the folder path with
+            # " / " and split apart again inside the destination, which filed a
+            # notebook actually called "Q1 / Q2" in a folder named "Q1".
+            title=job.notebook,
+            folder_path=job.folder_parts(),
+            source=job.doc_type,
+            modified=job.modified_at(),
+            tags=tuple(job.tags),
+            pages=tuple(job.pages),
+            body_text=job.extracted_doc_text or None,
+            source_file=job.source_file(),
+        )
+
+    def _publish_context(self, dest: Destination, doc_id: str) -> PublishContext:
+        """Look up what one destination did with this document last time.
+
+        Keyed by ``state_key``, never by the display name: the row was written
+        under the former, and a lookup under the latter silently finds nothing,
+        which reads as "never published" and duplicates the note.
+
+        Args:
+            dest: The destination about to be asked to publish.
+            doc_id: reMarkable document id.
+
+        Returns:
+            The context to hand to :meth:`Destination.publish`.
+        """
+        previous = get_state_store().get_publication(doc_id, dest.state_key)
+        external_id = previous["external_id"] if previous else None
+        return PublishContext(
+            doc_id=doc_id,
+            dry_run=self.dry_run,
+            existing_external_id=external_id,
+            # Where it landed last time. A notebook renamed or moved on the
+            # tablet is the same note in a new place, not a second note.
+            existing_target=previous["target"] if previous else None,
+            # Only when we already know we published here before: then the note
+            # carrying this title is one we created.
+            adopt_by_name=bool(previous) and not external_id,
+            # When the note first appeared here, for a note that has to state
+            # when it came into existence and predates the frontmatter saying so.
+            first_published=to_datetime(previous["first_published_at"]) if previous else None,
+            settings=self.settings,
+        )
+
     def _publish(self, job: DocumentJob, needs_update: Dict[str, List[Destination]]) -> bool:
-        """Publish the cleaned transcript to every destination that wants it.
+        """Publish the transcribed document to every destination that wants it.
 
         Args:
             job: The processed job.
@@ -2353,7 +2394,6 @@ class SyncPipeline:
             True if every targeted destination accepted the note.
         """
         try:
-            clean_text = _strip_transcript_metadata(job.clean_out_txt)
             targets = needs_update.get(job.notebook_id) or (
                 self.destinations or get_default_destinations()
             )
@@ -2361,13 +2401,15 @@ class SyncPipeline:
                 log("No destinations need update for this notebook (or none configured).")
                 return True
 
+            doc = self._build_document(job)
+
             if self.dry_run:
-                self._report_dry_run(job, targets)
+                self._report_dry_run(job, doc, targets)
                 return True
 
             all_success = True
             for dest in targets:
-                result = self._publish_to(dest, job, clean_text)
+                result = self._publish_to(dest, doc)
                 self._report_destination_warnings(dest, result)
                 if result.ok:
                     job.published_to.append(dest.state_key)
@@ -2397,7 +2439,7 @@ class SyncPipeline:
             log(traceback.format_exc())
             return False
 
-    def _report_dry_run(self, job: DocumentJob, targets: List[Destination]) -> None:
+    def _report_dry_run(self, job: DocumentJob, doc: Document, targets: List[Destination]) -> None:
         """Say what a real run would have published, and where to read it.
 
         Nothing is sent and no processed-log entry is written, so the same
@@ -2409,18 +2451,16 @@ class SyncPipeline:
         :attr:`Destination.merge_unit` rather than inferred from a class name.
 
         Args:
-            job: The processed job.
+            job: The processed job, for the artifacts it left on disk.
+            doc: What would be published.
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
         job.would_publish_to = [dest.state_key for dest in targets]
+        # The document's folder, not the one a particular destination would
+        # nest it in: how deep to nest is the destination's own decision now.
+        where = f" under '{'/'.join(doc.folder_path)}'" if doc.folder_path else ""
         for dest in targets:
-            sub_folder = (
-                job.top_level_subfolder()
-                if isinstance(dest, AppleNotesDestination)
-                else job.full_subfolder()
-            )
-            where = f" under '{sub_folder}'" if sub_folder else ""
             log(f"   Would publish to {dest.describe()}{where}")
             if dest.merge_unit is MergeUnit.DOCUMENT:
                 log("      Replaces the whole note, including anything you added to it.")
@@ -2448,8 +2488,8 @@ class SyncPipeline:
         for warning in result.warnings:
             self.report.warn(f"{dest.display_name}: {warning}")
 
-    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> PublishResult:
-        """Publish one note to one destination.
+    def _publish_to(self, dest: Destination, doc: Document) -> PublishResult:
+        """Publish one document to one destination.
 
         A DestinationError is an expected, user-actionable failure (vault gone,
         Notes not responding): report it plainly and let the caller carry on to
@@ -2458,8 +2498,7 @@ class SyncPipeline:
 
         Args:
             dest: The destination to publish to.
-            job: The processed job.
-            clean_text: The note body.
+            doc: The document to publish.
 
         Returns:
             What the destination reported, or a refusal carrying the reason it
@@ -2468,45 +2507,8 @@ class SyncPipeline:
         dest_name = dest.display_name
         log(f"Publishing to {dest_name}...")
 
-        # Apple Notes only supports 1 level of sub-folder under rootFolder.
-        # Obsidian supports the full nested hierarchy.
-        sub_folder = (
-            job.top_level_subfolder()
-            if isinstance(dest, AppleNotesDestination)
-            else job.full_subfolder()
-        )
-
-        # What this destination called the note last time, so it can replace
-        # exactly that one instead of deleting whatever shares the title.
-        # Keyed by state_key, never by the display name: the row was written
-        # under the former, and a lookup under the latter silently finds
-        # nothing, which reads as "never published" and duplicates the note.
-        previous = get_state_store().get_publication(job.notebook_id, dest.state_key)
-        existing_id = previous["external_id"] if previous else None
-        # Where it landed last time. A notebook renamed or moved on the tablet
-        # is the same note in a new place, not a second note.
-        existing_target = previous["target"] if previous else None
-        # When the note first appeared here, for a note that has to state when
-        # it came into existence and predates the frontmatter that says so.
-        first_published = to_iso_date(previous["first_published_at"]) if previous else None
-
         try:
-            published = dest.publish(
-                notebook_name=job.display_title,
-                text_content=clean_text,
-                image_paths=job.imgs,
-                sub_folder=sub_folder,
-                document_path=job.source_file(),
-                tags=job.tags,
-                existing_id=existing_id,
-                # Only when we already know we published here before: then the
-                # note carrying this title is one we created.
-                adopt_by_name=bool(previous) and not existing_id,
-                doc_id=job.notebook_id,
-                existing_target=existing_target,
-                document_modified=job.modified_date(),
-                first_published=first_published,
-            )
+            published = dest.publish(doc, self._publish_context(dest, doc.doc_id))
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")
             return PublishResult(ok=False, detail=str(e))
@@ -2602,9 +2604,12 @@ class SyncPipeline:
                 continue
             try:
                 result = dest.unpublish(
-                    target=row.get("target"),
-                    external_id=row.get("external_id"),
-                    doc_id=doc_id,
+                    PublishContext(
+                        doc_id=doc_id,
+                        existing_external_id=row.get("external_id"),
+                        existing_target=row.get("target"),
+                        settings=self.settings,
+                    )
                 )
             except DestinationError as e:
                 log(f"  ⚠️ {dest.display_name}: {e}")

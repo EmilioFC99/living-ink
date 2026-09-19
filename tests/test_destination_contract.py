@@ -13,14 +13,13 @@ import pytest
 from living_ink import pipeline
 from living_ink.destinations import MergeUnit
 from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
+from tests.builders import make_page
 from tests.fakes import FakeApiDestination
 
 
 def make_job(tmp_path: Path, doc_id: str = "nb-1", version: str = "v1") -> DocumentJob:
-    """Build a minimal job whose transcript exists on disk."""
-    transcript = tmp_path / f"{doc_id}_clean.txt"
-    transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n', encoding="utf-8")
-    return DocumentJob(
+    """Build a minimal job carrying one transcribed page."""
+    job = DocumentJob(
         item={"ID": doc_id},
         notebook="Notes",
         notebook_id=doc_id,
@@ -30,8 +29,9 @@ def make_job(tmp_path: Path, doc_id: str = "nb-1", version: str = "v1") -> Docum
         folder_path="",
         display_title="Notes",
         keep_temp=True,
-        clean_out_txt=transcript,
     )
+    job.pages = [make_page(1, "Hello", image=tmp_path / f"{doc_id}.page-1.png")]
+    return job
 
 
 class TestExternalIdRoundTrip:
@@ -158,6 +158,39 @@ class TestUnpublishThroughThePipeline:
         pipe._prune_orphan("nb-1", {"FakeApiDestination": {"external_id": None, "target": None}})
 
         assert pipeline.get_state_store().get_publication("nb-1", "FakeApiDestination") is None
+
+
+class TestTheDocumentThatArrives:
+    """A destination is handed the document, not a file to go and read.
+
+    The transcript used to be written to disk and parsed back out again, so a
+    destination's idea of the text was whatever survived a round trip through
+    a text file. Now the pages arrive as pages.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _published(self, tmp_path):
+        dest = FakeApiDestination()
+        pipe = SyncPipeline(destinations=[dest])
+        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        return dest.seen_documents[0]
+
+    def test_the_pages_arrive_as_pages(self, tmp_path):
+        doc = self._published(tmp_path)
+
+        assert [page.number for page in doc.pages] == [1]
+        assert doc.pages[0].text == "Hello"
+
+    def test_the_title_is_the_title_and_nothing_else(self, tmp_path):
+        assert self._published(tmp_path).title == "Notes"
 
 
 class TestTheFakeHonoursTheContract:

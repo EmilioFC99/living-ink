@@ -17,7 +17,7 @@ import pytest
 
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -65,29 +65,16 @@ class MockDestination(Destination):
     def check(self) -> DestinationStatus:
         return DestinationStatus(ok=self.ready, detail="mock")
 
-    def unpublish(self, target=None, external_id=None, doc_id=None) -> PublishResult:
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         if self.unpublish_error:
             raise self.unpublish_error
-        self.unpublished.append((target, external_id, doc_id))
-        return PublishResult(ok=self.unpublish_result, target=target)
+        self.unpublished.append((ctx.existing_target, ctx.existing_external_id, ctx.doc_id))
+        return PublishResult(ok=self.unpublish_result, target=ctx.existing_target)
 
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: list,
-        **kwargs,
-    ) -> PublishResult:
-        # Recorded as passed rather than named one by one, so a new argument on
-        # the contract does not need this double edited to keep the suite green.
-        self.published.append(
-            {
-                "notebook_name": notebook_name,
-                "text_content": text_content,
-                "image_paths": image_paths,
-                **kwargs,
-            }
-        )
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
+        # Both objects are kept whole rather than unpacked field by field, so a
+        # new field on either does not need this double edited.
+        self.published.append({"doc": doc, "ctx": ctx})
         return PublishResult(
             ok=self.publish_ok, target=self.publish_target, warnings=self.publish_warnings
         )
@@ -384,17 +371,13 @@ class TestDocumentJob:
         present.write_bytes(b"%PDF")
         assert make_job(doc_file_path=present).source_file() == present
 
-    def test_subfolders_split_the_remarkable_path(self):
+    def test_the_folder_splits_into_its_parts(self):
         job = make_job(folder_path="Work / Projects / Q3")
 
-        assert job.full_subfolder() == "Work/Projects/Q3"
-        assert job.top_level_subfolder() == "Work"
+        assert job.folder_parts() == ("Work", "Projects", "Q3")
 
-    def test_subfolders_are_none_at_the_library_root(self):
-        job = make_job()
-
-        assert job.full_subfolder() is None
-        assert job.top_level_subfolder() is None
+    def test_the_library_root_has_no_parts(self):
+        assert make_job().folder_parts() == ()
 
 
 class TestPagesAreDescribedAtRenderTime:
@@ -470,16 +453,6 @@ class TestJobHelpers:
 
     def test_version_defaults_to_one_when_unusable(self):
         assert pipeline._item_version({"Version": "not-a-number"}) == 1
-
-    def test_metadata_line_is_stripped_from_the_transcript(self, tmp_path):
-        transcript = tmp_path / "clean.txt"
-        transcript.write_text('{"notebook": "N"}\n\n### Page 1\n\nHello\n')
-
-        assert pipeline._strip_transcript_metadata(transcript) == "### Page 1\n\nHello"
-
-    def test_missing_transcript_reads_as_empty(self, tmp_path):
-        assert pipeline._strip_transcript_metadata(None) == ""
-        assert pipeline._strip_transcript_metadata(tmp_path / "gone.txt") == ""
 
 
 class TestRendererDispatch:
@@ -1786,7 +1759,7 @@ class TestPublicationIdentity:
         with patch("living_ink.pipeline.add_to_processed_log"):
             pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
 
-        assert dest.published[0]["doc_id"] == "nb-1"
+        assert dest.published[0]["doc"].doc_id == "nb-1"
 
     def test_a_destinations_warning_reaches_the_run_summary(self, tmp_path):
         """A log line scrolls past; the summary is the last thing on screen."""
@@ -1835,7 +1808,7 @@ class TestPublicationIdentity:
         with patch("living_ink.pipeline.add_to_processed_log"):
             pipe._publish(job, {"nb-1": [dest]})
 
-        assert dest.published[0]["document_modified"] == "2026-03-04"
+        assert dest.published[0]["doc"].modified == datetime.datetime(2026, 3, 4, 9, 30)
 
 
 class TestOrphanedNotebooks:
@@ -1860,6 +1833,7 @@ class TestOrphanedNotebooks:
         pipe.prune = prune
         pipe.destinations = [dest]
         pipe.report = None
+        pipe.settings = None
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):
@@ -1992,14 +1966,15 @@ class TestJobModifiedDate:
         )
 
     def test_reads_the_cloud_metadata_field(self):
-        assert self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_date() == "2026-03-04"
+        moment = self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_at()
+        assert moment == datetime.datetime(2026, 3, 4, 9, 30)
 
     def test_falls_back_to_the_document_attribute(self):
         item = SimpleNamespace(last_modified=datetime.datetime(2026, 3, 4, 9, 30))
-        assert self._job(item).modified_date() == "2026-03-04"
+        assert self._job(item).modified_at() == datetime.datetime(2026, 3, 4, 9, 30)
 
     def test_an_item_with_no_date_reports_none(self):
-        assert self._job({}).modified_date() is None
+        assert self._job({}).modified_at() is None
 
 
 class TestInterruptedRuns:

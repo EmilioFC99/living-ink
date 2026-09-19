@@ -10,7 +10,7 @@ A ``MagicMock`` would return a Mock for a newly added method and keep passing.
 
 from typing import Any, Dict, List, Optional
 
-from living_ink.core.document import PublishResult
+from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations.base import Destination, DestinationStatus
 from living_ink.settings import Settings
 
@@ -30,6 +30,7 @@ class FakeApiDestination(Destination):
         seen_existing_id: The id it was given on each publish, in order. A
             ``None`` here on a second publish is the failure this fake exists
             to catch.
+        seen_documents: Every document it was handed, newest last.
     """
 
     # Set here rather than by @register_destination: registering mutates a
@@ -50,6 +51,7 @@ class FakeApiDestination(Destination):
         self.objects: List[str] = []
         self.seen_existing_id: List[Optional[str]] = []
         self.seen_existing_target: List[Optional[str]] = []
+        self.seen_documents: List[Document] = []
         self.deleted: List[str] = []
         self.ready = True
 
@@ -70,55 +72,36 @@ class FakeApiDestination(Destination):
             )
         return DestinationStatus(ok=True, detail=f"Folder '{self.folder}'.")
 
-    def publish(
-        self,
-        notebook_name: str,
-        text_content: str,
-        image_paths: List[Any],
-        sub_folder: Optional[str] = None,
-        document_path: Optional[Any] = None,
-        tags: Optional[List[str]] = None,
-        existing_id: Optional[str] = None,
-        adopt_by_name: bool = False,
-        doc_id: Optional[str] = None,
-        existing_target: Optional[str] = None,
-        document_modified: Optional[str] = None,
-        first_published: Optional[str] = None,
-    ) -> PublishResult:
-        """Replace the object named by ``existing_id``, or mint a new one.
+    def publish(self, doc: Document, ctx: PublishContext) -> PublishResult:
+        """Replace the object named by the recorded id, or mint a new one.
 
         Returns:
             The outcome, always carrying the id of the object that now holds
             this document.
         """
-        self.seen_existing_id.append(existing_id)
-        self.seen_existing_target.append(existing_target)
+        self.seen_existing_id.append(ctx.existing_external_id)
+        self.seen_existing_target.append(ctx.existing_target)
+        self.seen_documents.append(doc)
 
+        existing_id = ctx.existing_external_id
         if existing_id and existing_id in self.objects:
             object_id = existing_id
         else:
             object_id = f"obj-{len(self.objects) + 1}"
             self.objects.append(object_id)
 
-        return PublishResult(
-            ok=True,
-            target=f"{self.folder}/{notebook_name}",
-            external_id=object_id,
-            detail=f"{self.folder}/{notebook_name}",
-        )
+        where = "/".join([self.folder, *doc.folder_path, doc.title])
+        return PublishResult(ok=True, target=where, external_id=object_id, detail=where)
 
-    def unpublish(
-        self,
-        target: Optional[str] = None,
-        external_id: Optional[str] = None,
-        doc_id: Optional[str] = None,
-    ) -> PublishResult:
+    def unpublish(self, ctx: PublishContext) -> PublishResult:
         """Delete exactly the object named, and refuse without a name.
 
         Returns:
             The outcome. Refusing is not an error — it is what a destination
             that cannot prove which object is the right one must do.
         """
+        external_id = ctx.existing_external_id
+        target = ctx.existing_target
         if not external_id or external_id not in self.objects:
             return PublishResult(ok=False, target=target, detail="No such object.")
         self.objects.remove(external_id)

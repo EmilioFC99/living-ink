@@ -19,6 +19,7 @@ from living_ink.extract import (
     render_pdf_page_preview,
 )
 from living_ink.pipeline import get_document_type
+from tests.builders import make_both, make_page
 
 
 class TestDocumentTypeDetection:
@@ -184,10 +185,7 @@ class TestDestinationDocumentPublishing:
         dummy_doc.write_bytes(b"%PDF-1.4 dummy book content")
 
         success = dest.publish(
-            notebook_name="Book",
-            text_content="Notes on Book",
-            image_paths=[],
-            document_path=dummy_doc,
+            *make_both("Book", "Notes on Book", source="pdf", source_file=dummy_doc)
         )
         assert success.ok is True
 
@@ -222,10 +220,7 @@ class TestDestinationDocumentPublishing:
         monkeypatch.setattr("subprocess.run", mock_run)
 
         success = dest.publish(
-            notebook_name="My PDF Note",
-            text_content="Some note text",
-            image_paths=[],
-            document_path=dummy_doc,
+            *make_both("My PDF Note", "Some note text", source="pdf", source_file=dummy_doc)
         )
         assert success.ok is True
         assert len(captured_script) == 1
@@ -278,12 +273,8 @@ class TestPageLabelFormatting:
         img_path = tmp_path / "page-1.png"
         img_path.write_bytes(b"dummy image")
 
-        dest.publish(
-            notebook_name="Book",
-            text_content="Notes",
-            image_paths=[img_path],
-            document_path=pdf_path,
-        )
+        page = make_page(1, "Notes", label=format_page_label(1, pdf_path), image=img_path)
+        dest.publish(*make_both("Book", pages=[page], source="pdf", source_file=pdf_path))
 
         note_file = vault / "Living Ink" / "Book.md"
         content = note_file.read_text(encoding="utf-8")
