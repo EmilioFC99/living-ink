@@ -83,6 +83,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 - **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
+- **Secrets live beside `config.yml`, never in it.** `living_ink.config.credentials` stores one file per credential under `<config dir>/credentials/`, atomically at `0600`, registered with `redact` on every read and write. The directory is derived from the resolved config path, so a second profile gets its own secrets. The name carries the provider (`ai.api_key.<provider>`, composed only by `ai_key_name()`) so switching AI providers and back does not destroy a key; `_VALID_NAME` restricts a name rather than escaping it, because it is also a filename. `migrate_secret()` copies from the old locations (`config.yml`, `~/.rmapi`) and never deletes them, so a downgrade does not force re-pairing. Anything rendering a key uses `credentials.mask()`.
 - **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink cache` shows/prunes/clears it. It is also what makes a run resumable: a page is banked as soon as it comes back, so an interrupt costs the page in flight and nothing else. An interrupted run is recorded as `outcome="interrupted"` with the counts it actually reached, and exits 130 instead of printing a traceback.
 - **The `pages` table is what detects a broken renderer.** Each page's `.rm` source hash and rendered PNG hash are stored together; a page whose source is unchanged but whose render is not means the renderer moved (the documented symptom of an `rmc`/`rmscene` upgrade), and a notebook whose pages nearly all render to identical bytes rendered blank. Both surface as `RunReport` warnings at the end of the run, not as log lines that scroll away.
 - **Rendered pages are cached under `DATA_DIR/renders/`**, keyed by the page's `.rm` source plus `extract.renderer_fingerprint()` (the `RENDER_FORMAT_VERSION` constant, the installed `rmc` and `rmscene`) and the background colour. An unchanged page skips the `.rm` → SVG → PNG step entirely. Bump `RENDER_FORMAT_VERSION` whenever `extract.py`'s own rendering behaviour changes.
@@ -93,11 +94,13 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 | Source | Key | Description |
 |--------|-----|-------------|
-| `config.yml` | `ai.provider` / `ai.api_key` | LLM provider preset and API key |
+| `config.yml` | `ai.provider` | LLM provider preset |
 | `config.yml` | `remarkable.preferred_connection` | `ssh` or `cloud` |
 | `config.yml` | `remarkable.use_ssh` | Enable USB SSH (`true`/`false`) |
 | `config.yml` | `remarkable.ssh_host` / `ssh_user` / `ssh_port` | SSH parameters (passwordless auth) |
-| `config.yml` | `remarkable.device_token` | reMarkable Cloud auth token |
+| credentials | `ai.api_key.<provider>` | LLM API key, one file per provider |
+| credentials | `remarkable.cloud_token` | reMarkable Cloud auth token |
+| credentials | `remarkable.ssh_password` | SSH password, when the tablet has one |
 | `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
 | `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |

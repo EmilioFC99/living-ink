@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from living_ink import logs, pipeline
-from living_ink.config import ConfigurationMissing
+from living_ink.config import ConfigurationMissing, credentials
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import (
     LOG_PATH,
@@ -692,6 +692,73 @@ class TestConfigIsValidatedOnLoad:
         """An unparseable file yields no config to validate, and already reports itself."""
         cfg = self._write(tmp_path, "ai:\n  provider: [unclosed\n")
         assert pipeline.load_yaml_config(cfg) == {}
+
+
+class TestTheStoredApiKeyReachesTheProvider:
+    """The key is stored per provider; nothing downstream should know that."""
+
+    def _write(self, tmp_path, body):
+        """Write a private config file and return its path."""
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(body, encoding="utf-8")
+        cfg.chmod(0o600)
+        return cfg
+
+    def test_the_key_for_the_selected_provider_is_woven_in(self, tmp_path):
+        """A config with no key at all still configures the provider."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
+        credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
+
+        loaded = pipeline.load_yaml_config(cfg)
+
+        assert loaded["ai"]["api_key"] == "AIza-stored"
+
+    def test_another_provider_s_key_is_not_used(self, tmp_path):
+        """The keys are separate slots, not a single one with a label."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
+        credentials.write_secret("ai.api_key.openai", "sk-openai", config_path=cfg)
+
+        loaded = pipeline.load_yaml_config(cfg)
+
+        assert "api_key" not in loaded["ai"]
+
+    def test_a_key_left_in_the_config_still_works(self, tmp_path):
+        """An install that has not been through the wizard again must keep syncing."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n")
+
+        loaded = pipeline.load_yaml_config(cfg)
+
+        assert loaded["ai"]["api_key"] == "AIza-legacy"
+
+    def test_a_key_left_in_the_config_is_migrated(self, tmp_path):
+        """Once, silently, on the next run — no prompt, no re-typing."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n")
+
+        pipeline.load_yaml_config(cfg)
+
+        assert credentials.read_secret("ai.api_key.gemini", config_path=cfg) == "AIza-legacy"
+
+    def test_the_config_file_itself_is_not_rewritten(self, tmp_path):
+        """Migration copies; it does not edit a file the user owns."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n")
+        before = cfg.read_text(encoding="utf-8")
+
+        pipeline.load_yaml_config(cfg)
+
+        assert cfg.read_text(encoding="utf-8") == before
+
+    def test_provider_none_looks_for_nothing(self, tmp_path):
+        """Cleanup disabled means there is no key to want."""
+        cfg = self._write(tmp_path, "ai:\n  provider: none\n")
+
+        loaded = pipeline.load_yaml_config(cfg)
+
+        assert "api_key" not in loaded["ai"]
+
+    def test_no_ai_section_is_not_an_error(self, tmp_path):
+        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+
+        assert "ai" not in pipeline.load_yaml_config(cfg)
 
 
 class TestProcessedLog:

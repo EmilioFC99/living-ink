@@ -54,6 +54,7 @@ import json
 import os
 import platform
 import socket
+import stat
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1329,7 +1330,7 @@ class TestStatusReportsWhatItWasGiven:
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "ok"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "ok"))
         monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
-        monkeypatch.setattr(api_module, "resolve_stored_token", lambda: "")
+        monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
 
         return config, values
 
@@ -1581,8 +1582,8 @@ class TestSetupWritesOnlyWhatItWasTold:
 
         return _run
 
-    def test_it_leaves_exactly_two_files_behind(self, wizard):
-        """The config, and an executable wrapper the user was never asked about.
+    def test_it_leaves_exactly_the_files_it_should(self, wizard):
+        """A config, two credentials, and a wrapper the user was never asked about.
 
         The wrapper is the interesting one. ``install_cli_command`` runs as part
         of the walkthrough rather than behind a prompt, so a full setup puts a
@@ -1591,11 +1592,30 @@ class TestSetupWritesOnlyWhatItWasTold:
         but it is not free: it is a second thing ``uninstall`` has to know
         about, and an unlisted artefact is how a tool stops being removable.
 
-        Pinned as a list rather than "config exists" so a third artefact cannot
-        appear unnoticed.
+        Pinned as a list rather than "config exists" so an extra artefact cannot
+        appear unnoticed — and so a secret reappearing inside ``config.yml``
+        instead of beside it would show up here as a missing file.
         """
         _, _, written = wizard()
-        assert written == ["bin/living-ink", "config/config.yml"]
+        assert written == [
+            "bin/living-ink",
+            "config/config.yml",
+            "config/credentials/ai.api_key.gemini",
+            "config/credentials/remarkable.cloud_token",
+        ]
+
+    def test_nothing_it_writes_is_readable_by_another_account(self, wizard, tmp_path):
+        """Every credential lands at 0600, not just the ones written last.
+
+        The mode is set by the writer, so this is really a test that setup
+        stores secrets *through* the credentials module rather than by opening
+        a file itself.
+        """
+        wizard()
+        stored = sorted((tmp_path / "config" / "credentials").iterdir())
+        assert stored, "setup stored no credentials at all"
+        for path in stored:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
 
     def test_everything_it_writes_lives_under_one_removable_root(self, wizard, tmp_path):
         """Nothing is scattered outside the directories setup was pointed at.
@@ -1690,7 +1710,7 @@ class TestSetupWritesOnlyWhatItWasTold:
 
         wizard()
         monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
-        monkeypatch.setattr(api_module, "resolve_stored_token", lambda: "")
+        monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "OK"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "OK"))
 

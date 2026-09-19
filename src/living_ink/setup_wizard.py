@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from living_ink import safeio
-from living_ink.config import SCHEMA_VERSION
+from living_ink.config import SCHEMA_VERSION, credentials
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +184,20 @@ def list_vault_folders(vault_path: Path) -> List[str]:
 
 
 def get_existing_remarkable_token() -> Optional[str]:
-    """Check for an existing reMarkable device token in ~/.rmapi or config.
+    """Check for an existing reMarkable device token.
+
+    The credentials directory first, since that is where this build stores it,
+    then ``~/.rmapi`` for a pairing that predates it. Finding either is what
+    lets the wizard offer "use the existing pairing" instead of sending someone
+    back to the website for a code they do not need.
 
     Returns:
         The device token string if found, or None.
     """
+    stored = credentials.read_secret(credentials.CLOUD_TOKEN)
+    if stored and "YOUR" not in stored:
+        return stored
+
     rmapi_file = Path.home() / ".rmapi"
     if rmapi_file.exists():
         try:
@@ -551,9 +560,7 @@ fi
 
 def generate_config_yaml(
     ai_provider: str,
-    ai_api_key: str,
     ai_model: str,
-    remarkable_token: str = "",
     preferred_connection: str = "ssh",
     use_ssh: bool = True,
     ssh_host: str = "10.11.99.1",
@@ -568,11 +575,14 @@ def generate_config_yaml(
 ) -> str:
     """Generate clean, commented config.yml content.
 
+    No secret appears in the result. The API key and the device token are
+    stored by :mod:`living_ink.config.credentials` instead, so this file stays
+    something a user can paste into an issue, copy between machines or keep in
+    a dotfiles repo without thinking about it first.
+
     Args:
         ai_provider: AI provider preset name.
-        ai_api_key: API key for the AI provider.
         ai_model: Model name for the AI provider.
-        remarkable_token: reMarkable Cloud device token (empty if using SSH only).
         preferred_connection: Preferred method ('ssh' or 'cloud').
         use_ssh: Whether USB SSH connection is enabled.
         ssh_host: SSH host address.
@@ -590,8 +600,8 @@ def generate_config_yaml(
 
     Note:
         Values are emitted through PyYAML rather than string interpolation, so
-        API keys, vault paths and folder names containing quotes, backslashes
-        or colons round-trip correctly.
+        vault paths and folder names containing quotes, backslashes or colons
+        round-trip correctly.
     """
     sections: List[Tuple[str, Dict[str, Any]]] = [
         (
@@ -599,24 +609,22 @@ def generate_config_yaml(
             {"schema_version": SCHEMA_VERSION},
         ),
         (
-            "1. AI Handwriting OCR & Text Cleanup",
+            "1. AI Handwriting OCR & Text Cleanup (the API key is stored separately)",
             {
                 "ai": {
                     "provider": ai_provider,
-                    "api_key": ai_api_key,
                     "model": ai_model,
                 }
             },
         ),
         (
-            "2. reMarkable Tablet Connection",
+            "2. reMarkable Tablet Connection (the device token is stored separately)",
             {
                 "remarkable": {
                     "preferred_connection": preferred_connection,
                     "use_ssh": use_ssh,
                     "ssh_host": ssh_host,
                     "ssh_port": ssh_port,
-                    "device_token": remarkable_token,
                 }
             },
         ),
@@ -1058,9 +1066,7 @@ def run_wizard(
 
     yaml_content = generate_config_yaml(
         ai_provider=ai_provider,
-        ai_api_key=ai_key,
         ai_model=ai_model,
-        remarkable_token=remarkable_token,
         preferred_connection=preferred_connection,
         use_ssh=use_ssh,
         ssh_host=ssh_host,
@@ -1074,11 +1080,30 @@ def run_wizard(
     )
 
     config_dir.mkdir(parents=True, exist_ok=True)
-    # The file holds the AI API key and the reMarkable device token, so it is
-    # written owner-only and in one step: a half-written config would lose the
-    # pairing the user just completed.
+    # Still owner-only and still written in one step. The secrets have moved
+    # out, but a config names a vault path and a tablet, and a half-written one
+    # would lose the answers the user just gave.
     safeio.write_secret_atomic(config_file, yaml_content)
     print_func(green(f"✓ Configuration saved to {bold(str(config_file))}"))
+
+    # The two secrets go beside it, one file each, never into it. Written after
+    # the config so that the directory they are derived from exists, and
+    # reported by name and mask so the user can see which key landed without
+    # the key itself reaching the scrollback. Each is stored independently:
+    # failing to store the API key must not also cost the pairing the user just
+    # completed, since that one needs a trip to the website to redo.
+    for label, secret in (("ai", ai_key), ("remarkable", remarkable_token)):
+        if not secret:
+            continue
+        try:
+            name = (
+                credentials.ai_key_name(ai_provider) if label == "ai" else credentials.CLOUD_TOKEN
+            )
+            credentials.write_secret(name, secret, config_path=config_file)
+        except (OSError, ValueError) as e:
+            print_func(yellow(f"  ⚠️  Could not store the {label} credential: {e}"))
+            continue
+        print_func(green(f"  ✓ Stored {name} ({credentials.mask(secret)})"))
 
     # Install/update global CLI launcher in ~/.local/bin
     ok_cli, msg_cli = install_cli_command(repo_dir=repo_dir, bin_dir=bin_dir)

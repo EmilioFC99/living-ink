@@ -104,11 +104,16 @@ class SettingOrigin:
         """Return the value as text, masked when it is a secret.
 
         Returns:
-            A short printable rendering; secrets collapse to ``"set"`` or
-            ``"not set"`` so a token never reaches a log or a screen share.
+            A short printable rendering. A secret goes through
+            :func:`living_ink.config.credentials.mask`, which keeps the first
+            and last few characters: enough for a user to tell *which* token
+            they are looking at — the only reason to print one — without it
+            surviving a screen share or a pasted log.
         """
         if self.secret:
-            return "set" if self.value else "not set"
+            from living_ink.config.credentials import mask
+
+            return mask(self.value if isinstance(self.value, str) else None)
         if self.value is None:
             return "not set"
         if isinstance(self.value, bool):
