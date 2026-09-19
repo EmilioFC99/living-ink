@@ -67,6 +67,27 @@ class AttachmentPolicy(str, Enum):
     BESIDE = "beside"
 
 
+@dataclass(frozen=True)
+class NoteBlock:
+    """One addressable unit of generated content.
+
+    A destination whose :attr:`~living_ink.destinations.base.Destination.merge_unit`
+    is ``PAGE`` emits one of these per source page, so a re-publish rewrites
+    that page and leaves the note the user wrote underneath it alone. One whose
+    merge unit is ``DOCUMENT`` emits exactly one.
+
+    Attributes:
+        block_id: Stable across syncs, and the whole point: it comes from the
+            source document, so it does not renumber when a highlight is added
+            above it and does not move when the model transcribes the page
+            differently.
+        content: The rendered markup for that unit.
+    """
+
+    block_id: str
+    content: str
+
+
 @dataclass
 class NoteLayout:
     """The scratch state one publish accumulates as it moves through the stages.
@@ -90,7 +111,8 @@ class NoteLayout:
             answers from.
         doc_link_target: Reference to the copied source PDF or EPUB, if there
             was one.
-        body: The rendered content. Set by ``render_body``.
+        blocks: The rendered content, as addressable units in the order they
+            should appear. Set by ``render_body``.
         metadata: The rendered frontmatter or header. Set by ``render_metadata``.
         warnings: Things the user has to fix by hand. Returned on the
             :class:`PublishResult` whether the publish succeeded or not.
@@ -101,7 +123,7 @@ class NoteLayout:
     existing_text: Optional[str] = None
     attachment_links: Dict[int, str] = field(default_factory=dict)
     doc_link_target: Optional[str] = None
-    body: str = ""
+    blocks: List[NoteBlock] = field(default_factory=list)
     metadata: str = ""
     warnings: List[str] = field(default_factory=list)
 

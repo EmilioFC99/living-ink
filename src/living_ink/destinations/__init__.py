@@ -32,6 +32,7 @@ from living_ink.destinations.base import (
 from living_ink.destinations.filesystem import (
     AttachmentPolicy,
     FileSystemDestination,
+    NoteBlock,
     NoteLayout,
 )
 from living_ink.destinations.obsidian import ObsidianDestination
@@ -49,6 +50,7 @@ __all__ = [
     "DestinationUnavailable",
     "FileSystemDestination",
     "MergeUnit",
+    "NoteBlock",
     "NoteLayout",
     "ObsidianDestination",
     "build_destinations",

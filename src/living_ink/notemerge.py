@@ -6,30 +6,65 @@ your own commentary, the next run silently replaced the file and your writing
 was gone. Nothing warned you, and because the transcript looked correct
 afterwards there was no reason to suspect a crash or a bug.
 
-The fix is a contract written into the file itself. Living Ink owns two
-regions and nothing else:
+The fix is a contract written into the file itself. Living Ink owns a fixed set
+of YAML frontmatter keys — :data:`OWNED_FRONTMATTER_KEYS` — and a set of
+**named blocks**, each one delimited by a pair of HTML comments:
 
-* a fixed set of YAML frontmatter keys — :data:`OWNED_FRONTMATTER_KEYS`
-* everything between :data:`MANAGED_BEGIN` and :data:`MANAGED_END`
+.. code-block:: markdown
 
-Any other frontmatter key, and every line outside the markers, is copied
-through verbatim. Text you add below the transcript stays below the
-transcript; text you add above it stays above.
+    <!-- living-ink:begin page-77 h=8f3c1a2e -->
+    …the transcription of page 77…
+    <!-- living-ink:end page-77 -->
 
-Notes written by older versions have no markers. Rather than guess, the merge
-looks at the frontmatter: a ``source: Remarkable/...`` key means Living Ink
-wrote the whole file and it is safe to regenerate. A file without it is
-somebody else's, and its content is kept above the block Living Ink adds.
+    Cross-reference: this is the same taxonomy [[DMBOK]] uses.
+
+**Everything between one block's end and the next block's begin is yours,
+forever.** That is what makes one region per *page* rather than one per note:
+the unit a reader wants to react to is a single page, and the place the
+reaction belongs is directly underneath it — not at the bottom of a forty-page
+dump. A transcript you cannot annotate is a read-only export.
+
+Four properties, in priority order:
+
+1. **Free text is never written to.** No branch deletes or rewrites a segment
+   with no block id. The worst reachable failure is a block appearing in the
+   wrong position, never a lost sentence.
+2. **A block this run did not generate is not deleted.** A page that failed
+   OCR, a provider that rate-limited, a model that returned fewer annotations
+   than last time — none of them may erase a block and strand the commentary
+   underneath it. Deletion needs ``--prune``.
+3. **An edit inside a block is preserved, not overwritten.** The ``h=`` on the
+   begin marker is a digest of what Living Ink last wrote there; a mismatch
+   means somebody typed inside the boundaries. Both versions survive.
+4. **The divider lives inside the block**, as its first line. Between blocks it
+   would be free text, so deleting one would be permanent.
+
+Notes written by older versions have no named blocks. Rather than guess, the
+merge looks at the frontmatter: a ``source: Remarkable/...`` key means Living
+Ink wrote the whole file and it is safe to regenerate. A file without it is
+somebody else's, and its content is kept above the blocks Living Ink adds.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-#: Delimiters around the region Living Ink regenerates. HTML comments, so
-#: Obsidian renders nothing and the note looks no different to the reader.
-MANAGED_BEGIN = "<!-- living-ink:begin -->"
-MANAGED_END = "<!-- living-ink:end -->"
+#: A begin marker: the block's id, and the digest of what was last written in
+#: it. HTML comments, so Obsidian renders nothing and the note looks no
+#: different to the reader.
+_BEGIN_LINE = re.compile(
+    r"^<!--\s*living-ink:begin\s+(?P<id>[A-Za-z0-9][A-Za-z0-9_.\-]*)"
+    r"(?:\s+h=(?P<hash>[0-9a-f]+))?\s*-->$"
+)
+
+#: Prefix of the comment that introduces a version of a block the user edited.
+#: Deliberately *not* a begin marker: parked text is free text, so the next
+#: sync leaves it alone rather than reclaiming it.
+PARKED_PREFIX = "<!-- living-ink: your edit to"
+
+#: Reserved block id for the list of original page images, which is not a page.
+ATTACHMENTS_BLOCK = "attachments"
 
 #: Frontmatter keys Living Ink writes. Everything else in the block is the
 #: user's and is preserved in its original order and formatting.
@@ -125,6 +160,48 @@ def frontmatter_value(lines: List[str], key: str) -> Optional[str]:
     return None
 
 
+def frontmatter_list(lines: List[str], key: str) -> List[str]:
+    """Read a list-valued frontmatter key, in either YAML spelling.
+
+    Args:
+        lines: Frontmatter lines, without the ``---`` fences.
+        key: Key to look for, case-insensitively.
+
+    Returns:
+        The values in the order they appear, or an empty list. Both the block
+        sequence Living Ink writes and the inline flow a user may have typed by
+        hand are read; the note is theirs to format.
+    """
+    values: List[str] = []
+    collecting = False
+    for line in lines:
+        match = _KEY_LINE.match(line)
+        if match:
+            if match.group(1).lower() != key.lower():
+                collecting = False
+                continue
+            collecting = True
+            inline = line.split(":", 1)[1].strip()
+            if inline.startswith("[") and inline.endswith("]"):
+                values.extend(
+                    part.strip().strip("\"'") for part in inline[1:-1].split(",") if part.strip()
+                )
+                collecting = False
+            elif inline:
+                values.append(inline.strip("\"'"))
+                collecting = False
+            continue
+        if collecting:
+            item = line.strip()
+            if item.startswith("-"):
+                cleaned = item[1:].strip().strip("\"'")
+                if cleaned:
+                    values.append(cleaned)
+            elif item:
+                collecting = False
+    return values
+
+
 def looks_generated(text: str) -> bool:
     """Say whether a note without markers was written by Living Ink.
 
@@ -139,70 +216,290 @@ def looks_generated(text: str) -> bool:
     return bool(_OURS_MARKER.search("\n".join(front)))
 
 
-def split_managed_region(body: str) -> Tuple[str, Optional[str], str]:
-    """Split a note body around the managed markers.
+@dataclass(frozen=True)
+class Segment:
+    """One run of a note: either the user's prose or a block Living Ink owns.
+
+    Attributes:
+        block_id: The block's id, or None for free text. Free text is never
+            written to, never reordered and never dropped.
+        content: The segment's text. For a block this is what sits between the
+            markers, stripped; for free text it is the lines verbatim, because
+            a blank line the user left is spacing they chose.
+        written_hash: The ``h=`` from the begin marker — the digest of what
+            Living Ink last wrote there. None for free text, and None for a
+            block written before digests existed.
+    """
+
+    block_id: Optional[str] = None
+    content: str = ""
+    written_hash: Optional[str] = None
+
+
+def block_digest(content: str) -> str:
+    """Digest the content of one block, and nothing else.
+
+    Deterministic by construction: the input is the block's own stripped text,
+    so no timestamp, no page count in a surrounding heading and no dict
+    iteration order can reach it. If anything run-to-run variable got in, every
+    block would look user-edited on every sync and the merge would park a
+    duplicate copy of it below itself each time — the note would grow without
+    bound, which is worse than the problem blocks solve.
+
+    Args:
+        content: The block's text.
+
+    Returns:
+        Eight hex characters. Short enough to read in a diff; this is a
+        change detector, not a security boundary.
+    """
+    return hashlib.sha256(content.strip().encode("utf-8")).hexdigest()[:8]
+
+
+def begin_marker(block_id: str, digest: Optional[str] = None) -> str:
+    """Render a block's opening comment.
+
+    Args:
+        block_id: The block's id.
+        digest: The digest of its content, if it is known.
+
+    Returns:
+        The marker line.
+    """
+    suffix = f" h={digest}" if digest else ""
+    return f"<!-- living-ink:begin {block_id}{suffix} -->"
+
+
+def end_marker(block_id: str) -> str:
+    """Render a block's closing comment.
+
+    Args:
+        block_id: The block's id.
+
+    Returns:
+        The marker line.
+    """
+    return f"<!-- living-ink:end {block_id} -->"
+
+
+def parse_segments(body: str) -> List[Segment]:
+    """Split a note body into ordered free-text and block segments.
+
+    A begin marker with no matching end is left as free text rather than
+    swallowing the rest of the note: the file was truncated by something other
+    than us, and the conservative answer is to keep every line.
 
     Args:
         body: Note body, below any frontmatter.
 
     Returns:
-        Tuple of (text before the block, the block's current content or None
-        if there is no block, text after the block).
+        The segments, in document order. Adjacent free text is one segment.
     """
-    start = body.find(MANAGED_BEGIN)
-    if start == -1:
-        return body, None, ""
-    end = body.find(MANAGED_END, start)
-    if end == -1:
-        # A begin with no end means the file was truncated mid-write by
-        # something other than us; regenerate from the marker onwards rather
-        # than treating the rest of the note as user content.
-        return body[:start], "", ""
-    return (
-        body[:start],
-        body[start + len(MANAGED_BEGIN) : end],
-        body[end + len(MANAGED_END) :],
-    )
+    lines = body.split("\n")
+    segments: List[Segment] = []
+    free: List[str] = []
+    index = 0
+
+    def flush() -> None:
+        if free:
+            segments.append(Segment(content="\n".join(free)))
+            free.clear()
+
+    while index < len(lines):
+        match = _BEGIN_LINE.match(lines[index].strip())
+        if not match:
+            free.append(lines[index])
+            index += 1
+            continue
+
+        closing = end_marker(match.group("id"))
+        close_at = None
+        for ahead in range(index + 1, len(lines)):
+            if lines[ahead].strip() == closing:
+                close_at = ahead
+                break
+        if close_at is None:
+            free.append(lines[index])
+            index += 1
+            continue
+
+        flush()
+        segments.append(
+            Segment(
+                block_id=match.group("id"),
+                content="\n".join(lines[index + 1 : close_at]).strip(),
+                written_hash=match.group("hash"),
+            )
+        )
+        index = close_at + 1
+
+    flush()
+    return segments
+
+
+def render_segments(segments: Iterable[Segment]) -> str:
+    """Put parsed segments back together.
+
+    Args:
+        segments: The segments, in order.
+
+    Returns:
+        The body text. Round-trips: ``parse_segments(render_segments(x)) == x``.
+    """
+    parts: List[str] = []
+    for segment in segments:
+        if segment.block_id is None:
+            parts.append(segment.content)
+            continue
+        # A blank line before a begin marker, so a divider as the block's first
+        # line is a divider and not a setext underline for whatever precedes it.
+        if parts and parts[-1] != "" and not parts[-1].endswith("\n"):
+            parts.append("")
+        parts.append(
+            "\n".join(
+                [
+                    begin_marker(segment.block_id, segment.written_hash),
+                    segment.content,
+                    end_marker(segment.block_id),
+                ]
+            )
+        )
+    return "\n".join(parts)
+
+
+def _insert_point(segments: Sequence[Segment], after: Optional[int]) -> int:
+    """Find where a block with no home yet belongs.
+
+    Before the next block, never immediately after the previous one: the free
+    text between two blocks is the user's commentary on the *earlier* one, so
+    inserting a new block straight after its predecessor would wedge it between
+    a page and the note somebody wrote about that page.
+
+    Args:
+        segments: The segments so far.
+        after: Index of the last block placed, or None if none has been.
+
+    Returns:
+        The index to insert at.
+    """
+    start = 0 if after is None else after + 1
+    for index in range(start, len(segments)):
+        if segments[index].block_id is not None:
+            return index
+    return len(segments)
+
+
+def merge_segments(
+    segments: Sequence[Segment], generated: Sequence[Tuple[str, str]]
+) -> Tuple[List[Segment], List[str]]:
+    """Splice this run's blocks into a note, preserving everything else.
+
+    Args:
+        segments: The note as parsed, in order.
+        generated: This run's blocks as ``(block_id, content)``, in the order
+            they should appear.
+
+    Returns:
+        Tuple of (the merged segments, one human-readable line per surprise).
+    """
+    merged = list(segments)
+    warnings: List[str] = []
+    generated_ids = {block_id for block_id, _ in generated}
+
+    seen: Dict[str, int] = {}
+    for index, segment in enumerate(merged):
+        if segment.block_id is None:
+            continue
+        if segment.block_id in seen:
+            warnings.append(
+                f"'{segment.block_id}' appears more than once in the note; "
+                f"only the first copy was updated."
+            )
+        else:
+            seen[segment.block_id] = index
+
+    anchor: Optional[int] = None
+    for block_id, content in generated:
+        digest = block_digest(content)
+        at = seen.get(block_id)
+
+        if at is None:
+            at = _insert_point(merged, anchor)
+            merged.insert(at, Segment(block_id, content.strip(), digest))
+            seen = {key: (value + 1 if value >= at else value) for key, value in seen.items()}
+            seen[block_id] = at
+            anchor = at
+            continue
+
+        current = merged[at]
+        edited = (
+            current.written_hash is not None
+            and block_digest(current.content) != current.written_hash
+        )
+        merged[at] = Segment(block_id, content.strip(), digest)
+        anchor = at
+
+        if edited:
+            # Writing the fresh block and dropping their version would punish a
+            # mistake with a deletion. Both survive; the user decides.
+            # The leading blank line is the same courtesy a begin marker gets:
+            # the parked copy is the one thing here the user is meant to
+            # notice, and butted against the end marker it reads as noise.
+            parked = f"\n{PARKED_PREFIX} {block_id}, kept below -->\n{current.content}"
+            merged.insert(at + 1, Segment(content=parked))
+            seen = {key: (value + 1 if value > at else value) for key, value in seen.items()}
+            anchor = at + 1
+            warnings.append(
+                f"You had edited inside the '{block_id}' block. It was rewritten "
+                f"and your version kept directly below it."
+            )
+
+    for segment in merged:
+        if segment.block_id is not None and segment.block_id not in generated_ids:
+            warnings.append(
+                f"'{segment.block_id}' was not part of this sync, so the note "
+                f"keeps what it already had."
+            )
+
+    return merged, warnings
 
 
 def render(
     owned_frontmatter: List[str],
-    managed_body: str,
+    blocks: Sequence[Tuple[str, str]],
     existing: Optional[str] = None,
-) -> str:
+) -> Tuple[str, List[str]]:
     """Compose the note to write, preserving everything Living Ink does not own.
 
     Args:
         owned_frontmatter: Frontmatter lines Living Ink generates, without the
             ``---`` fences.
-        managed_body: Generated content for the region between the markers.
+        blocks: This run's content as ordered ``(block_id, content)`` pairs.
         existing: Current contents of the note, if it already exists.
 
     Returns:
-        The full text to write.
+        Tuple of (the full text to write, one line per surprise the merge hit).
     """
-    prefix, suffix = "", ""
     kept_frontmatter: List[str] = []
+    segments: List[Segment] = []
 
     if existing:
         front, body = split_frontmatter(existing)
         kept_frontmatter = foreign_frontmatter(front)
-        before, current, after = split_managed_region(body)
-        if current is not None:
-            prefix, suffix = before, after
-        elif not looks_generated(existing):
-            # Somebody else's file sharing our name. Keep all of it and add
-            # the transcript underneath rather than replacing their work.
-            prefix = body.rstrip("\n") + "\n\n" if body.strip() else ""
+        segments = parse_segments(body)
+        if not any(segment.block_id for segment in segments):
+            # Nothing of ours in there. Either somebody else's file sharing our
+            # name — keep all of it and add the transcript underneath — or one
+            # of ours from before blocks existed, which is safe to regenerate.
+            segments = (
+                [Segment(content=body.rstrip("\n") + "\n")]
+                if body.strip() and not looks_generated(existing)
+                else []
+            )
 
-    lines = ["---", *owned_frontmatter, *kept_frontmatter, "---", ""]
-    head = "\n".join(lines)
-
-    managed = f"{MANAGED_BEGIN}\n{managed_body.strip()}\n{MANAGED_END}"
-    # A blank line after the block, so a heading the user put underneath is
-    # still a heading once Obsidian renders it.
-    tail = f"\n\n{suffix.strip()}" if suffix.strip() else ""
-    return f"{head}{prefix}{managed}{tail}".rstrip("\n") + "\n"
+    merged, warnings = merge_segments(segments, blocks)
+    head = "\n".join(["---", *owned_frontmatter, *kept_frontmatter, "---", ""])
+    return f"{head}{render_segments(merged)}".rstrip("\n") + "\n", warnings
 
 
 @dataclass(frozen=True)
