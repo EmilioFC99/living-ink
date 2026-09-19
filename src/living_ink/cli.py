@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional, Type
 
 from living_ink.config import ConfigurationMissing, get_config_path
 from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
+from living_ink.transport import TransportUnavailable
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only; state is imported lazily
     from living_ink.state import SyncStatus
@@ -109,10 +110,15 @@ class SyncCommand(BaseCommand):
         )
         parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
         parser.add_argument("--folder", help="Apple Notes folder override")
-        parser.add_argument(
+        # A transport is a choice, not a preference order: asking for both
+        # says nothing about which one was meant, so argparse rejects the
+        # pair rather than silently picking SSH and syncing from a source
+        # the user may not have intended.
+        transport = parser.add_mutually_exclusive_group()
+        transport.add_argument(
             "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
         )
-        parser.add_argument(
+        transport.add_argument(
             "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
         )
         parser.add_argument(
@@ -179,14 +185,36 @@ class SyncCommand(BaseCommand):
                 # wants an editor, and only the raiser knows which it is.
                 print(f"Fix: {e.hint}", file=sys.stderr)
                 return 1
+            except TransportUnavailable as e:
+                return self._report_unreachable(e)
 
         try:
             success = self.execute_sync(args)
         except ConfigurationMissing as e:
             return self._handle_missing_config(e, args)
+        except TransportUnavailable as e:
+            return self._report_unreachable(e)
         if not success:
             sys.exit(1)
         return 0
+
+    def _report_unreachable(self, error: TransportUnavailable) -> int:
+        """Report that there was no route to the tablet, without a traceback.
+
+        An unplugged cable and an unconfigured Cloud are the two most ordinary
+        states a tablet can be in, and the exception already carries the lines
+        that say which one to fix. Printing it as a stack trace would suggest a
+        bug in the tool and bury the instruction in frames the user cannot act
+        on.
+
+        Args:
+            error: The failure reported by the transport layer.
+
+        Returns:
+            1, the same failure code an unsuccessful sync returns.
+        """
+        print(f"Cannot reach the reMarkable: {error}", file=sys.stderr)
+        return 1
 
     def show_status(self, args: argparse.Namespace) -> int:
         """Report what a sync would do, without doing any of it.
@@ -517,6 +545,11 @@ class StatusReport:
             "obsidian": {
                 "enabled": self.obsidian_enabled,
                 "vault_path": self.obsidian_vault,
+                # The console renderer builds the target path from this
+                # (see _render_console), so omitting it here made the two
+                # renderers describe different things — the exact divergence
+                # this dataclass was introduced to remove.
+                "root_folder": self.obsidian_root_folder,
                 "valid": self.obsidian_valid,
             },
             "apple_notes": {
