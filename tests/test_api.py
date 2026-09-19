@@ -15,7 +15,7 @@ from living_ink.api import (
     get_file_type,
     get_rmapi,
 )
-from living_ink.transport import UnsupportedOperation
+from living_ink.transport import TransportUnavailable, UnsupportedOperation
 
 
 def test_get_rmapi_ssh_preferred_connected(monkeypatch, tmp_path):
@@ -114,6 +114,51 @@ def test_get_rmapi_cloud_preferred_with_ssh_backup(monkeypatch):
             assert isinstance(client, FallbackClient)
             assert client.active is mock_cloud
             assert client.backup is mock_ssh
+
+
+def test_get_rmapi_ssh_unplugged_and_no_token_is_transport_unavailable(monkeypatch, isolated_home):
+    """The bottom of the ladder names itself, so the CLI can print it.
+
+    A plain RuntimeError here is indistinguishable from a bug, and the front
+    end would have to choose between swallowing real failures and showing a
+    traceback for an unplugged cable.
+    """
+    monkeypatch.setenv("REMARKABLE_PREFERRED_CONNECTION", "ssh")
+    monkeypatch.delenv("REMARKABLE_TOKEN", raising=False)
+
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        mock_ssh = MagicMock()
+        mock_ssh.check_connection.return_value = False
+        mock_create_ssh.return_value = mock_ssh
+
+        with pytest.raises(TransportUnavailable, match="USB SSH"):
+            get_rmapi()
+
+
+def test_get_rmapi_cloud_unconfigured_and_ssh_down_is_transport_unavailable(
+    monkeypatch, isolated_home
+):
+    """Same failure from the other preference, same exception type."""
+    monkeypatch.setenv("REMARKABLE_PREFERRED_CONNECTION", "cloud")
+    monkeypatch.delenv("REMARKABLE_TOKEN", raising=False)
+
+    with patch("living_ink.ssh.create_ssh_client") as mock_create_ssh:
+        mock_ssh = MagicMock()
+        mock_ssh.check_connection.return_value = False
+        mock_create_ssh.return_value = mock_ssh
+
+        with pytest.raises(TransportUnavailable, match="No reMarkable token"):
+            get_rmapi()
+
+
+def test_transport_unavailable_is_still_a_runtime_error():
+    """Existing broad handlers keep working.
+
+    ``WatchCommand`` catches ``Exception`` per cycle and anything already
+    written against ``RuntimeError`` must keep treating this as a failed
+    attempt rather than stop recognising it.
+    """
+    assert issubclass(TransportUnavailable, RuntimeError)
 
 
 def test_fallback_client_get_meta_items_failover():

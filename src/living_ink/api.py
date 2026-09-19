@@ -9,7 +9,12 @@ from typing import Any, List, Optional
 
 from living_ink.models import Document
 from living_ink.settings import Settings
-from living_ink.transport import DeviceInfo, RemarkableTransport, UnsupportedOperation
+from living_ink.transport import (
+    DeviceInfo,
+    RemarkableTransport,
+    TransportUnavailable,
+    UnsupportedOperation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +269,7 @@ def get_rmapi(settings: Optional[Settings] = None):
                 backup_name="USB SSH",
             )
 
-        raise RuntimeError(
+        raise TransportUnavailable(
             "Could not connect to reMarkable tablet via USB SSH, and reMarkable Cloud is not configured.\n"
             "Please check that your tablet is plugged in via USB and SSH is enabled,\n"
             "or run 'living-ink setup' to configure reMarkable Cloud."
@@ -287,7 +292,7 @@ def get_rmapi(settings: Optional[Settings] = None):
             print("ℹ️ reMarkable Cloud not configured. Falling back to USB SSH...")
             return ssh_client
 
-        raise RuntimeError(
+        raise TransportUnavailable(
             "No reMarkable token found and USB SSH connection failed.\n"
             "Run 'living-ink setup' to configure your reMarkable connection."
         )

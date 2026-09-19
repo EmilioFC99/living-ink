@@ -58,6 +58,20 @@ class UnsupportedOperation(NotImplementedError):
     """
 
 
+class TransportUnavailable(RuntimeError):
+    """Raised when no transport can be reached at all.
+
+    The end of the fallback ladder: the preferred route is down and the other
+    one is unconfigured, so there is nothing left to try. Distinct from a
+    transport *failing mid-run*, which ``FallbackClient`` handles by switching
+    routes, and distinct from a bug — the message says what the user can plug
+    in or configure, so the front end prints it instead of a traceback.
+
+    A ``RuntimeError`` subclass so that existing broad handlers, including
+    ``WatchCommand``'s per-cycle guard, keep treating it as a failed attempt.
+    """
+
+
 def require_document(doc: object, operation: str) -> Document:
     """Reject anything that is not a Document before a transport touches it.
 

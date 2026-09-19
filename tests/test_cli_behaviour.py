@@ -411,6 +411,7 @@ class _Recorder:
         self.calls: list[str] = []
         self.options: list[SyncOptions] = []
         self.state_db = state_db
+        self.pipeline_error: BaseException | None = None
 
     def note(self, label: str) -> None:
         """Record that a subsystem was entered.
@@ -508,9 +509,16 @@ def cli(monkeypatch, capsys, tmp_path):
             """Report success without doing any work.
 
             Returns:
-                True, always.
+                True, unless the test asked the run to fail.
+
+            Raises:
+                BaseException: Whatever ``fails_with`` was set to, so that a
+                    test can drive the front end's handling of a failure the
+                    pipeline reports by raising.
             """
             recorder.note("pipeline.run")
+            if recorder.pipeline_error is not None:
+                raise recorder.pipeline_error
             return True
 
     class _WizardResult:
@@ -627,15 +635,18 @@ def cli(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", _no_subprocess)
     monkeypatch.setattr(cli_module.time, "sleep", _no_waiting)
 
-    def _run(*argv: str) -> Invocation:
+    def _run(*argv: str, fails_with: BaseException | None = None) -> Invocation:
         """Run the CLI once and describe what happened.
 
         Args:
             *argv: Arguments as the user would type them.
+            fails_with: An exception for the pipeline to raise instead of
+                succeeding, for testing how the front end reports it.
 
         Returns:
             An :class:`Invocation` describing the run.
         """
+        recorder.pipeline_error = fails_with
         recorder.calls.clear()
         recorder.options.clear()
         capsys.readouterr()
@@ -909,6 +920,71 @@ class TestForcingBothTransports:
         pipe = SyncPipeline(options=intent(["sync", "--cloud"]), data_dir=tmp_path, destinations=[])
         assert pipe.settings.preferred_connection == "cloud"
         assert pipe.settings.use_ssh is False
+
+
+class TestAnUnreachableTabletIsReportedNotRaised:
+    """The end of the fallback ladder is a sentence, not a stack trace.
+
+    Choosing a transport and reaching one are different questions. The parser
+    settles the first: ``--ssh`` and ``--cloud`` cannot both be given, so the
+    preference is never ambiguous. The transport layer settles the second, and
+    it falls back — a preference that cannot be honoured is served by the other
+    route rather than refused, which is what makes ``--ssh`` safe to keep in a
+    script that sometimes runs with the cable out. ``tests/test_api.py`` owns
+    that ladder rung by rung.
+
+    What is left is the bottom rung, where neither route answers. That is an
+    ordinary state — an unplugged cable, a Cloud that was never configured —
+    and it is the front end's job to say so.
+    """
+
+    def test_it_exits_one_with_the_reason_and_no_traceback(self, cli):
+        """The message survives; the frames do not.
+
+        A traceback here would claim the tool is broken when the tablet is
+        merely unplugged, and would bury the one line telling the user what to
+        plug in under frames they cannot act on.
+        """
+        from living_ink.transport import TransportUnavailable
+
+        run = cli(
+            "sync",
+            fails_with=TransportUnavailable("Could not connect to reMarkable tablet via USB SSH."),
+        )
+        assert run.exit_code == 1
+        assert "Could not connect to reMarkable tablet via USB SSH." in run.stderr
+        assert "Traceback" not in run.stderr
+
+    def test_it_is_reported_the_same_way_for_a_forced_transport(self, cli):
+        """``--ssh`` and ``--cloud`` do not get a different failure shape."""
+        from living_ink.transport import TransportUnavailable
+
+        for flag in ("--ssh", "--cloud"):
+            run = cli("sync", flag, fails_with=TransportUnavailable("no route"))
+            assert run.exit_code == 1, flag
+            assert "no route" in run.stderr, flag
+            assert "Traceback" not in run.stderr, flag
+
+    def test_nothing_is_published_when_there_was_no_route(self, cli):
+        """A failed connection ends the run rather than half-running it."""
+        from living_ink.transport import TransportUnavailable
+
+        run = cli("sync", fails_with=TransportUnavailable("no route"))
+        assert run.calls == ["pipeline.construct", "pipeline.run"]
+
+    def test_watch_survives_a_cycle_with_no_route(self, cli):
+        """One unreachable cycle is not the end of the daemon.
+
+        ``watch`` is what the compose service runs, and a tablet is unplugged
+        far more often than it is broken; exiting on the first missed cycle
+        would mean a daemon that stops the first time someone takes the cable
+        to another room.
+        """
+        from living_ink.transport import TransportUnavailable
+
+        run = cli("watch", "--interval", "1", fails_with=TransportUnavailable("no route"))
+        assert run.exit_code == 0
+        assert "pipeline.run" in run.calls
 
 
 class TestStatusIsADifferentCommandInDisguise:
