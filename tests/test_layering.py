@@ -1,0 +1,127 @@
+"""The allowed import edges between packages.
+
+One test per rule, as a list that starts small and grows with each package that
+lands. It is the only thing that keeps ``destinations/`` from importing
+``core/`` eighteen months from now, by which point the cycle it creates is
+load-bearing and nobody remembers why it should not be there.
+
+Module-level imports only: a deliberate function-level import is how a module
+reaches across a layer for one value without taking the dependency, and the
+rules below are about the dependency.
+"""
+
+import ast
+from pathlib import Path
+from typing import Iterator, List, Tuple
+
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "src" / "living_ink"
+
+
+def module_imports(path: Path) -> List[str]:
+    """Return the ``living_ink`` modules a file imports at module level.
+
+    Args:
+        path: The ``.py`` file to read.
+
+    Returns:
+        Dotted module names, without the ``living_ink.`` prefix. An import
+        inside a function or a ``TYPE_CHECKING`` block is not module level and
+        is not returned.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: List[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("living_ink."):
+                    found.append(alias.name[len("living_ink.") :])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "living_ink":
+                found.extend(alias.name for alias in node.names)
+            elif node.module.startswith("living_ink."):
+                found.append(node.module[len("living_ink.") :])
+    return found
+
+
+def package_files(name: str) -> Iterator[Tuple[Path, List[str]]]:
+    """Yield every module in a package with what it imports.
+
+    Args:
+        name: Package directory name under ``src/living_ink``.
+
+    Yields:
+        ``(path, imported_modules)`` pairs.
+    """
+    for path in sorted((PACKAGE_ROOT / name).rglob("*.py")):
+        yield path, module_imports(path)
+
+
+class TestConfigIsTheBottom:
+    """Rule 1: ``config/`` imports nothing from the rest of the package.
+
+    Two leaf helpers are excepted. ``safeio`` is how a credential is written
+    atomically at 0600 and ``redact`` is how it is kept out of a log line;
+    both are a handful of functions over the standard library and neither can
+    import ``config`` back, which the second test below is what proves.
+    """
+
+    allowed_leaves = {"redact", "safeio"}
+
+    def test_config_imports_no_sibling(self):
+        offenders = {
+            path.name: [
+                name
+                for name in imports
+                if not name.startswith("config") and name not in self.allowed_leaves
+            ]
+            for path, imports in package_files("config")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+    def test_the_excepted_leaves_cannot_import_config_back(self):
+        for leaf in sorted(self.allowed_leaves):
+            imports = module_imports(PACKAGE_ROOT / f"{leaf}.py")
+            assert [name for name in imports if name.startswith("config")] == []
+
+
+class TestDestinationsDoNotReachBack:
+    """Rule 2: ``destinations/`` never imports the pipeline.
+
+    The one exception is ``core.document``, which holds the types that travel
+    between the two. It is a leaf — it imports nothing itself — so reading it
+    is not a dependency on ``core/``, and the alternative is a destination
+    that cannot name its own return type.
+    """
+
+    allowed_core_modules = {"core.document"}
+
+    def test_destinations_import_only_the_domain_model_from_core(self):
+        offenders = {
+            path.name: [
+                name
+                for name in imports
+                if name.split(".")[0] == "core" and name not in self.allowed_core_modules
+            ]
+            for path, imports in package_files("destinations")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+    def test_destinations_import_no_command_layer(self):
+        forbidden = {"cli", "ui", "scheduler", "pipeline", "setup_wizard"}
+        offenders = {
+            path.name: [name for name in imports if name.split(".")[0] in forbidden]
+            for path, imports in package_files("destinations")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+
+class TestTheDomainModelIsALeaf:
+    """``core/document.py`` imports nothing from Living Ink at all.
+
+    This is what makes the exception above safe: if the domain model ever grows
+    an import, the exception stops being one and the cycle it was guarding
+    against is back.
+    """
+
+    def test_document_imports_nothing_from_the_package(self):
+        assert module_imports(PACKAGE_ROOT / "core" / "document.py") == []

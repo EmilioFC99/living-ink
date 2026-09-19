@@ -37,6 +37,7 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
+from living_ink.core.document import PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
@@ -2297,16 +2298,20 @@ class SyncPipeline:
 
             all_success = True
             for dest in targets:
-                if self._publish_to(dest, job, clean_text):
+                result = self._publish_to(dest, job, clean_text)
+                self._report_destination_warnings(dest, result)
+                if result.ok:
                     job.published_to.append(type(dest).__name__)
+                    if result.detail:
+                        log(f"   {result.detail}")
                     # Update state for THIS destination immediately.
                     add_to_processed_log(
                         type(dest).__name__,
                         job.notebook_id,
                         job.version,
                         run_id=self.run_id,
-                        external_id=dest.last_external_id,
-                        target=dest.last_target,
+                        external_id=result.external_id,
+                        target=result.target,
                     )
                 else:
                     all_success = False
@@ -2349,7 +2354,23 @@ class SyncPipeline:
         if job.tags:
             log(f"   Tags: {job.tags}")
 
-    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> bool:
+    def _report_destination_warnings(self, dest: Destination, result: PublishResult) -> None:
+        """Put a destination's warnings where the log lines cannot scroll past them.
+
+        A destination reports what the user has to fix by hand — a note it
+        stepped around, an attachment it could not copy — and the run summary
+        is the only place that survives a long run.
+
+        Args:
+            dest: The destination that produced the result.
+            result: What it returned.
+        """
+        if self.report is None:
+            return
+        for warning in result.warnings:
+            self.report.warn(f"{type(dest).__name__}: {warning}")
+
+    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> PublishResult:
         """Publish one note to one destination.
 
         A DestinationError is an expected, user-actionable failure (vault gone,
@@ -2363,7 +2384,8 @@ class SyncPipeline:
             clean_text: The note body.
 
         Returns:
-            True if the destination accepted the note.
+            What the destination reported, or a refusal carrying the reason it
+            could not be asked.
         """
         dest_name = type(dest).__name__
         log(f"Publishing to {dest_name}...")
@@ -2406,7 +2428,7 @@ class SyncPipeline:
             )
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")
-            return False
+            return PublishResult(ok=False, detail=str(e))
         except Exception:
             # Deliberately broad, and the message says so: a destination is
             # contracted to raise DestinationError, so anything else reaching
@@ -2416,7 +2438,7 @@ class SyncPipeline:
 
             log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
             log(traceback.format_exc())
-            return False
+            return PublishResult(ok=False, detail="Unexpected error; see the log.")
 
         return published
 
@@ -2498,7 +2520,7 @@ class SyncPipeline:
                 log(f"  {label}: {dest_name} is not configured; its note was left alone.")
                 continue
             try:
-                removed = dest.unpublish(
+                result = dest.unpublish(
                     target=row.get("target"),
                     external_id=row.get("external_id"),
                     doc_id=doc_id,
@@ -2506,7 +2528,9 @@ class SyncPipeline:
             except DestinationError as e:
                 log(f"  ⚠️ {dest_name}: {e}")
                 continue
-            log(f"  {label}: {'deleted from' if removed else 'left alone in'} {dest_name}.")
+            self._report_destination_warnings(dest, result)
+            verb = "deleted from" if result.ok else "left alone in"
+            log(f"  {label}: {verb} {dest_name}.")
 
         try:
             get_state_store().forget(doc_id)

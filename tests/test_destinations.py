@@ -13,6 +13,7 @@ import pytest
 from PIL import Image
 
 from living_ink import notemerge, safeio
+from living_ink.core.document import PublishResult
 from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
@@ -48,10 +49,10 @@ class TestDestinationABC:
 
         class Complete(Destination):
             def publish(self, notebook_name, text_content, image_paths, sub_folder=None):
-                return True
+                return PublishResult(ok=True)
 
         dest = Complete()
-        assert dest.publish("Test", "Content", []) is True
+        assert dest.publish("Test", "Content", []).ok is True
 
 
 # =========================================================================
@@ -147,7 +148,7 @@ class TestObsidianPublishFolders:
         dest = ObsidianDestination(vault_path=str(tmp_path))
         success = dest.publish("Daily Note", "Some text", [])
 
-        assert success is True
+        assert success.ok is True
         note_file = tmp_path / "Daily Note.md"
         assert note_file.exists()
         content = note_file.read_text(encoding="utf-8")
@@ -159,7 +160,7 @@ class TestObsidianPublishFolders:
         dest = ObsidianDestination(vault_path=str(tmp_path), root_folder="Living Ink")
         success = dest.publish("Quick Note", "Quick thoughts", [])
 
-        assert success is True
+        assert success.ok is True
         note_file = tmp_path / "Living Ink" / "Quick Note.md"
         assert note_file.exists()
         assert "Quick thoughts" in note_file.read_text(encoding="utf-8")
@@ -174,7 +175,7 @@ class TestObsidianPublishFolders:
             sub_folder="Work/Projects/2026",
         )
 
-        assert success is True
+        assert success.ok is True
         note_file = tmp_path / "Living Ink" / "Work" / "Projects" / "2026" / "Roadmap.md"
         assert note_file.exists()
         content = note_file.read_text(encoding="utf-8")
@@ -191,7 +192,7 @@ class TestObsidianPublishFolders:
             sub_folder="Work/Finance",
         )
 
-        assert success is True
+        assert success.ok is True
         # Note should be Budget 2026.md, NOT Work - Finance - Budget 2026.md
         note_file = tmp_path / "Living Ink" / "Work" / "Finance" / "Budget 2026.md"
         assert note_file.exists()
@@ -212,7 +213,7 @@ class TestObsidianPublishFolders:
             sub_folder="Work/Finance",
         )
 
-        assert success is True
+        assert success.ok is True
         # Should be flat inside "All Notes" with folder prefix to avoid collision
         note_file = tmp_path / "All Notes" / "Work - Finance - Budget.md"
         assert note_file.exists()
@@ -245,7 +246,7 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
             sub_folder="Personal",
         )
 
-        assert success is True
+        assert success.ok is True
         note_file = vault / "Living Ink" / "Personal" / "Sketches.md"
         assert note_file.exists()
         content = note_file.read_text(encoding="utf-8")
@@ -274,7 +275,7 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
             image_paths=[img],
             sub_folder="Work/Projects/2026",
         )
-        assert success is True
+        assert success.ok is True
         note_file = vault / "Living Ink" / "Work" / "Projects" / "2026" / "Roadmap.md"
         assert note_file.exists()
 
@@ -294,7 +295,7 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
         missing_img = tmp_path / "nonexistent.png"
 
         success = dest.publish("Note", "Content", [missing_img])
-        assert success is True
+        assert success.ok is True
         note_file = tmp_path / "Note.md"
         assert note_file.exists()
         # Should not include Original Pages header if no attachments copied
@@ -311,7 +312,7 @@ class TestObsidianPublishAttachmentsAndFrontmatter:
         )
         success = dest.publish("DirectNote", "Text", [img], sub_folder="Sub")
 
-        assert success is True
+        assert success.ok is True
         target_dir = tmp_path / "Sub"
         assert (target_dir / "DirectNote.md").exists()
         assert (target_dir / "DirectNote_page-1.png").exists()
@@ -366,7 +367,7 @@ class TestAppleNotesDestination:
         result_img = Image.open(opaque)
         assert result_img.mode == "RGB"
 
-    @patch("living_ink.destinations.subprocess.run")
+    @patch("living_ink.destinations.apple_notes.subprocess.run")
     def test_publish_executes_applescript_with_top_level_folder(self, mock_run):
         """Extracts top-level subfolder when nested path is provided."""
         mock_run.return_value = MagicMock(return_code=0, returncode=0, stderr="")
@@ -379,7 +380,7 @@ class TestAppleNotesDestination:
             sub_folder="Projects/Q1",
         )
 
-        assert success is True
+        assert success.ok is True
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         script = cmd[2]  # osascript -e <script>
@@ -390,20 +391,20 @@ class TestAppleNotesDestination:
         assert '"Projects"' in script
         assert "Projects/Q1" not in script
 
-    @patch("living_ink.destinations.subprocess.run")
+    @patch("living_ink.destinations.apple_notes.subprocess.run")
     def test_publish_handles_applescript_failure(self, mock_run):
         """Raises DestinationUnavailable after exhausting retries."""
         mock_run.return_value = MagicMock(returncode=1, stderr="AppleScript Error")
 
         dest = AppleNotesDestination()
-        with patch("living_ink.destinations.time.sleep"):
+        with patch("living_ink.destinations.apple_notes.time.sleep"):
             with pytest.raises(DestinationUnavailable) as exc_info:
                 dest.publish("Failed Note", "Content", [])
 
         assert "AppleScript Error" in str(exc_info.value)
         assert mock_run.call_count == 3
 
-    @patch("living_ink.destinations.subprocess.run")
+    @patch("living_ink.destinations.apple_notes.subprocess.run")
     def test_publish_reports_missing_osascript(self, mock_run):
         """A non-macOS host is reported as unavailable, not as a generic failure."""
         mock_run.side_effect = FileNotFoundError("osascript")
@@ -420,7 +421,9 @@ class TestObsidianFailureReporting:
         vault.mkdir()
         dest = ObsidianDestination(vault_path=str(vault), root_folder="Living Ink")
 
-        with patch("living_ink.destinations.Path.mkdir", side_effect=PermissionError("denied")):
+        with patch(
+            "living_ink.destinations.obsidian.Path.mkdir", side_effect=PermissionError("denied")
+        ):
             with pytest.raises(DestinationError, match="Could not write"):
                 dest.publish("Note", "Content", [])
 
@@ -477,7 +480,7 @@ class TestObsidianWriteDurability:
 
     def test_an_interrupted_write_preserves_the_previous_note(self, tmp_path, monkeypatch):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        assert dest.publish("Meeting Notes", "first version", []) is True
+        assert dest.publish("Meeting Notes", "first version", []).ok is True
         note = tmp_path / "Meeting Notes.md"
         original = note.read_text(encoding="utf-8")
 
@@ -502,7 +505,7 @@ class TestObsidianPreservesUserEdits:
 
     def _publish(self, tmp_path, text="Transcript v1"):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        assert dest.publish("Meeting Notes", text, []) is True
+        assert dest.publish("Meeting Notes", text, []).ok is True
         return dest, tmp_path / "Meeting Notes.md"
 
     def test_notes_below_the_transcript_survive_a_resync(self, tmp_path):
@@ -575,7 +578,7 @@ class TestAppleNotesIdentifiesNotesById:
 
     def _run(self, tmp_path, returncode=0, stdout="x-coredata://Store/ICNote/p7", **kwargs):
         dest = AppleNotesDestination(folder_name="reMarkable")
-        with patch("living_ink.destinations.subprocess.run") as run:
+        with patch("living_ink.destinations.apple_notes.subprocess.run") as run:
             run.return_value = MagicMock(returncode=returncode, stdout=stdout, stderr="")
             result = dest.publish("Meeting Notes", "body", [], **kwargs)
         return dest, result, run.call_args[0][0][2]
@@ -584,7 +587,7 @@ class TestAppleNotesIdentifiesNotesById:
         """With no recorded id, a matching title might be somebody else's note."""
         _, result, script = self._run(tmp_path)
 
-        assert result is True
+        assert result.ok is True
         assert "delete note" not in script
         assert "delete (every" not in script
 
@@ -615,27 +618,23 @@ class TestAppleNotesIdentifiesNotesById:
         assert "whose name is noteName" not in script
 
     def test_the_new_note_id_is_reported_back(self, tmp_path):
-        dest, _, script = self._run(tmp_path)
+        _, result, script = self._run(tmp_path)
 
         assert "return id of newNote" in script
-        assert dest.last_external_id == "x-coredata://Store/ICNote/p7"
+        assert result.external_id == "x-coredata://Store/ICNote/p7"
 
     def test_an_empty_reply_records_no_id(self, tmp_path):
         """Better no id than an empty string that would look like one."""
-        dest, _, _ = self._run(tmp_path, stdout="\n")
+        _, result, _ = self._run(tmp_path, stdout="\n")
 
-        assert dest.last_external_id is None
+        assert result.external_id is None
 
-    def test_a_stale_id_is_cleared_before_publishing(self, tmp_path):
-        dest = AppleNotesDestination()
-        dest.last_external_id = "x-coredata://old"
-        with patch("living_ink.destinations.subprocess.run") as run:
-            run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
-            with patch("living_ink.destinations.time.sleep"):
-                with pytest.raises(DestinationUnavailable):
-                    dest.publish("Meeting Notes", "body", [])
+    def test_the_note_id_never_lands_on_the_destination(self, tmp_path):
+        """It used to, and a failed publish then left the previous note's id there."""
+        dest, _, _ = self._run(tmp_path)
 
-        assert dest.last_external_id is None
+        assert not hasattr(dest, "last_external_id")
+        assert not hasattr(dest, "last_target")
 
     def test_an_id_with_a_quote_is_escaped(self, tmp_path):
         """AppleScript is assembled as text, so every value has to be quoted."""
@@ -649,13 +648,12 @@ class TestObsidianIgnoresIdentityArguments:
 
     def test_publishing_with_an_id_still_works(self, tmp_path):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        assert dest.publish("Note", "body", [], existing_id="ignored") is True
+        assert dest.publish("Note", "body", [], existing_id="ignored").ok is True
         assert (tmp_path / "Note.md").exists()
 
     def test_no_external_id_is_reported(self, tmp_path):
         dest = ObsidianDestination(vault_path=str(tmp_path))
-        dest.publish("Note", "body", [])
-        assert dest.last_external_id is None
+        assert dest.publish("Note", "body", []).external_id is None
 
 
 class TestObsidianNoteIdentity:
@@ -723,14 +721,14 @@ class TestObsidianNoteIdentity:
 
     def test_where_the_note_landed_is_reported(self, tmp_path):
         dest = self._dest(tmp_path)
-        dest.publish("Notes", "body", [], sub_folder="Work", doc_id="doc-1")
-        assert dest.last_target == "Work/Notes.md"
+        result = dest.publish("Notes", "body", [], sub_folder="Work", doc_id="doc-1")
+        assert result.target == "Work/Notes.md"
 
     def test_the_reported_target_is_the_name_actually_used(self, tmp_path):
         dest = self._dest(tmp_path)
         dest.publish("Notes", "first", [], doc_id="doc-1")
-        dest.publish("Notes", "second", [], doc_id="doc-2")
-        assert dest.last_target == "Notes (2).md"
+        result = dest.publish("Notes", "second", [], doc_id="doc-2")
+        assert result.target == "Notes (2).md"
 
     def test_the_attachments_follow_the_note_that_was_written(self, tmp_path, monkeypatch):
         """A renamed note must not point its links at the other document's images."""
@@ -819,14 +817,14 @@ class TestObsidianRenamesAndMoves:
 
     def test_a_recorded_path_that_no_longer_exists_is_harmless(self, tmp_path):
         dest = self._dest(tmp_path)
-        assert dest.publish("Notes", "body", [], doc_id="doc-1", existing_target="Gone.md") is True
+        assert dest.publish("Notes", "body", [], doc_id="doc-1", existing_target="Gone.md").ok
         assert (tmp_path / "Notes.md").exists()
 
     def test_the_new_location_is_reported(self, tmp_path):
         dest = self._dest(tmp_path)
         dest.publish("Old Name", "body", [], doc_id="doc-1")
-        dest.publish("New Name", "body", [], doc_id="doc-1", existing_target="Old Name.md")
-        assert dest.last_target == "New Name.md"
+        result = dest.publish("New Name", "body", [], doc_id="doc-1", existing_target="Old Name.md")
+        assert result.target == "New Name.md"
 
 
 class TestObsidianUnpublish:
@@ -839,7 +837,7 @@ class TestObsidianUnpublish:
         dest = self._dest(tmp_path)
         dest.publish("Notes", "body", [], doc_id="doc-1")
 
-        assert dest.unpublish(target="Notes.md", doc_id="doc-1") is True
+        assert dest.unpublish(target="Notes.md", doc_id="doc-1").ok is True
         assert not (tmp_path / "Notes.md").exists()
 
     def test_the_attachments_go_too(self, tmp_path):
@@ -855,21 +853,21 @@ class TestObsidianUnpublish:
         dest = self._dest(tmp_path)
         dest.publish("Notes", "body", [], doc_id="doc-2")
 
-        assert dest.unpublish(target="Notes.md", doc_id="doc-1") is False
+        assert dest.unpublish(target="Notes.md", doc_id="doc-1").ok is False
         assert (tmp_path / "Notes.md").exists()
 
     def test_a_note_with_no_id_is_left_alone(self, tmp_path):
         """A hand-written note is unrecoverable; never delete on a path alone."""
         (tmp_path / "Notes.md").write_text("# Mine\n", encoding="utf-8")
 
-        assert self._dest(tmp_path).unpublish(target="Notes.md", doc_id="doc-1") is False
+        assert self._dest(tmp_path).unpublish(target="Notes.md", doc_id="doc-1").ok is False
         assert (tmp_path / "Notes.md").exists()
 
     def test_a_note_that_is_already_gone_is_not_an_error(self, tmp_path):
-        assert self._dest(tmp_path).unpublish(target="Gone.md", doc_id="doc-1") is False
+        assert self._dest(tmp_path).unpublish(target="Gone.md", doc_id="doc-1").ok is False
 
     def test_nothing_happens_without_a_target(self, tmp_path):
-        assert self._dest(tmp_path).unpublish(doc_id="doc-1") is False
+        assert self._dest(tmp_path).unpublish(doc_id="doc-1").ok is False
 
 
 class TestUnpublishDefault:
@@ -882,9 +880,9 @@ class TestUnpublishDefault:
                 return cls()
 
             def publish(self, notebook_name, text_content, image_paths, **kwargs):
-                return True
+                return PublishResult(ok=True)
 
-        assert Bare().unpublish(target="x", external_id="y", doc_id="z") is False
+        assert Bare().unpublish(target="x", external_id="y", doc_id="z").ok is False
 
 
 class TestObsidianNoteDates:
@@ -936,7 +934,7 @@ class TestObsidianNoteDates:
         assert "created: 2026-03-04" in self._front(tmp_path)
 
     def test_a_notebook_with_no_known_dates_still_publishes(self, tmp_path):
-        assert self._dest(tmp_path).publish("Notes", "body", []) is True
+        assert self._dest(tmp_path).publish("Notes", "body", []).ok is True
         today = datetime.date.today().isoformat()
         assert f"created: {today}" in self._front(tmp_path)
         assert f"updated: {today}" in self._front(tmp_path)

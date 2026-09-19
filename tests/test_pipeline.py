@@ -17,6 +17,7 @@ import pytest
 
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
+from living_ink.core.document import PublishResult
 from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
 from living_ink.pipeline import (
     LOG_PATH,
@@ -45,12 +46,15 @@ class MockDestination(Destination):
         self.unpublished = []
         self.unpublish_result = True
         self.unpublish_error = None
+        self.publish_target = None
+        self.publish_warnings = ()
+        self.publish_ok = True
 
-    def unpublish(self, target=None, external_id=None, doc_id=None) -> bool:
+    def unpublish(self, target=None, external_id=None, doc_id=None) -> PublishResult:
         if self.unpublish_error:
             raise self.unpublish_error
         self.unpublished.append((target, external_id, doc_id))
-        return self.unpublish_result
+        return PublishResult(ok=self.unpublish_result, target=target)
 
     def publish(
         self,
@@ -58,7 +62,7 @@ class MockDestination(Destination):
         text_content: str,
         image_paths: list,
         **kwargs,
-    ) -> bool:
+    ) -> PublishResult:
         # Recorded as passed rather than named one by one, so a new argument on
         # the contract does not need this double edited to keep the suite green.
         self.published.append(
@@ -69,7 +73,9 @@ class MockDestination(Destination):
                 **kwargs,
             }
         )
-        return True
+        return PublishResult(
+            ok=self.publish_ok, target=self.publish_target, warnings=self.publish_warnings
+        )
 
 
 class TestSyncOptions:
@@ -1595,9 +1601,36 @@ class TestPublicationIdentity:
 
         assert dest.published[0]["doc_id"] == "nb-1"
 
+    def test_a_destinations_warning_reaches_the_run_summary(self, tmp_path):
+        """A log line scrolls past; the summary is the last thing on screen."""
+        dest = MockDestination("MockDest")
+        dest.publish_warnings = ("Notes (2).md belongs to another document.",)
+        pipe = SyncPipeline(destinations=[dest])
+        pipe.report = RunReport()
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert pipe.report.warnings == [
+            "MockDestination: Notes (2).md belongs to another document."
+        ]
+
+    def test_a_warning_from_a_failed_publish_is_still_reported(self, tmp_path):
+        """The run that went wrong is the one whose warnings matter most."""
+        dest = MockDestination("MockDest")
+        dest.publish_warnings = ("The vault is read-only.",)
+        dest.publish_ok = False
+        pipe = SyncPipeline(destinations=[dest])
+        pipe.report = RunReport()
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert pipe.report.warnings == ["MockDestination: The vault is read-only."]
+
     def test_where_the_note_landed_is_recorded(self, tmp_path):
         dest = MockDestination("MockDest")
-        dest.last_target = "Work/Notes.md"
+        dest.publish_target = "Work/Notes.md"
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
@@ -1639,6 +1672,7 @@ class TestOrphanedNotebooks:
         pipe.dry_run = dry_run
         pipe.prune = prune
         pipe.destinations = [dest]
+        pipe.report = None
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):

@@ -189,7 +189,7 @@ class TestDestinationDocumentPublishing:
             image_paths=[],
             document_path=dummy_doc,
         )
-        assert success is True
+        assert success.ok is True
 
         # Note created
         note_file = vault / "Remarkable" / "Book.md"
@@ -227,7 +227,7 @@ class TestDestinationDocumentPublishing:
             image_paths=[],
             document_path=dummy_doc,
         )
-        assert success is True
+        assert success.ok is True
         assert len(captured_script) == 1
         script = captured_script[0]
         assert "Source Document:" in script
