@@ -28,7 +28,11 @@ from living_ink.destinations.base import (
     MergeUnit,
     register_destination,
 )
-from living_ink.destinations.filesystem import FileSystemDestination, NoteLayout
+from living_ink.destinations.filesystem import (
+    AttachmentPolicy,
+    FileSystemDestination,
+    NoteLayout,
+)
 from living_ink.destinations.markup import (
     Block,
     BlockKind,
@@ -188,6 +192,17 @@ class ObsidianDestination(FileSystemDestination):
         """The configured root folder inside the vault, where notes are filed."""
         return self._root_dir()
 
+    @property
+    def attachment_policy(self) -> AttachmentPolicy:
+        """Read off ``attachments_folder``: a name means a folder of our own.
+
+        A blank ``obsidian.attachments_folder`` is a value, not an omission —
+        it means "beside the note" — and this is the one place that reading
+        happens. The four behaviours that used to test the blank string
+        separately now ask the same question of the same property.
+        """
+        return AttachmentPolicy.OWNED if self.attachments_folder else AttachmentPolicy.BESIDE
+
     def _sanitize_filename(self, name: str) -> str:
         """Sanitize a filename or folder segment for filesystem compatibility.
 
@@ -250,7 +265,7 @@ class ObsidianDestination(FileSystemDestination):
         Raises:
             DestinationError: The result would land outside the vault.
         """
-        if not self.attachments_folder:
+        if self.attachment_policy is AttachmentPolicy.BESIDE:
             return note_path.parent
 
         root_dir = self._root_dir()
@@ -328,7 +343,7 @@ class ObsidianDestination(FileSystemDestination):
             old_path: Where the note used to be.
             note_path: Where the note is now.
         """
-        if not self.attachments_folder:
+        if self.attachment_policy is AttachmentPolicy.BESIDE:
             return
 
         old_attach = self._attachment_dir(old_path)
@@ -528,7 +543,10 @@ class ObsidianDestination(FileSystemDestination):
             # In a dedicated attachments subfolder the page filename is already
             # unique; beside the note it needs the note's name to stay so.
             page_filename = f"page-{page.number}{image.suffix.lower()}"
-            filename = page_filename if self.attachments_folder else f"{stem}_{page_filename}"
+            if self.attachment_policy is AttachmentPolicy.OWNED:
+                filename = page_filename
+            else:
+                filename = f"{stem}_{page_filename}"
             shutil.copy2(image, self.contained(attach_dir, filename))
             layout.attachment_links[page.index] = f"{link_prefix}{filename}"
 
@@ -667,7 +685,7 @@ class ObsidianDestination(FileSystemDestination):
         attach_dir = self._attachment_dir(note_path)
         try:
             note_path.unlink()
-            if self.attachments_folder and attach_dir.is_dir():
+            if self.attachment_policy is AttachmentPolicy.OWNED and attach_dir.is_dir():
                 shutil.rmtree(attach_dir)
         except OSError as e:
             raise DestinationError(f"Could not delete '{note_path}': {e}") from e

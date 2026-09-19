@@ -29,7 +29,11 @@ from living_ink.destinations.base import (
     MergeUnit,
     register_destination,
 )
-from living_ink.destinations.filesystem import FileSystemDestination, NoteLayout
+from living_ink.destinations.filesystem import (
+    AttachmentPolicy,
+    FileSystemDestination,
+    NoteLayout,
+)
 from living_ink.destinations.obsidian import ObsidianDestination
 from living_ink.settings import Settings
 
@@ -38,6 +42,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DESTINATION_REGISTRY",
     "AppleNotesDestination",
+    "AttachmentPolicy",
     "Destination",
     "DestinationError",
     "DestinationStatus",
