@@ -442,7 +442,10 @@ def merge_segments(
         if edited:
             # Writing the fresh block and dropping their version would punish a
             # mistake with a deletion. Both survive; the user decides.
-            parked = f"{PARKED_PREFIX} {block_id}, kept below -->\n{current.content}"
+            # The leading blank line is the same courtesy a begin marker gets:
+            # the parked copy is the one thing here the user is meant to
+            # notice, and butted against the end marker it reads as noise.
+            parked = f"\n{PARKED_PREFIX} {block_id}, kept below -->\n{current.content}"
             merged.insert(at + 1, Segment(content=parked))
             seen = {key: (value + 1 if value > at else value) for key, value in seen.items()}
             anchor = at + 1
