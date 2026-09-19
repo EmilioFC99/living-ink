@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import logging
-import os
 import re
 import tempfile
 import zipfile
@@ -22,20 +21,6 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-
-# Standard reMarkable background color (light cream/gray)
-# Can be overridden via REMARKABLE_BACKGROUND_COLOR environment variable
-_DEFAULT_BACKGROUND_COLOR = "#FBFBFB"
-
-
-def get_background_color() -> str:
-    """Get the background color, checking env var for override."""
-    return os.environ.get("REMARKABLE_BACKGROUND_COLOR", _DEFAULT_BACKGROUND_COLOR)
-
-
-# For backwards compatibility, expose as module constant (evaluated at import)
-# Use get_background_color() for runtime evaluation of env var
-REMARKABLE_BACKGROUND_COLOR = get_background_color()
 
 #: Opening or rendering a document. PyMuPDF raises its own errors
 #: (FileDataError and friends) as RuntimeError subclasses, a path it cannot
@@ -88,7 +73,7 @@ _JSON_ERRORS = (ValueError, TypeError, KeyError)
 #: monkey-patching, the background compositing, the bounds calculation. It is
 #: part of the render cache key, so a bump correctly invalidates every cached
 #: page image rather than serving output the current code would not produce.
-RENDER_FORMAT_VERSION = 2
+RENDER_FORMAT_VERSION = 3
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
@@ -647,8 +632,9 @@ def render_rm_file_to_png(
     Args:
         rm_file_path: Path to the .rm file
         background_color: Background color (e.g., "#FFFFFF", "transparent", None).
-                         None means transparent. Use REMARKABLE_BACKGROUND_COLOR
-                         for the standard reMarkable paper color.
+                         None means transparent. The paper colour a sync renders
+                         on is ``Settings.render_background``; this module does
+                         not read it, so a caller says which colour it wants.
         screen: Panel size of the tablet that drew the page, as
             ``(width, height)``. Only used when the SVG carries no content
             bounds to size the output from — a blank-ish page is then a whole
@@ -900,7 +886,7 @@ def render_page_from_document_zip(
         zip_path: Path to the document zip file
         page: Page number (1-indexed)
         background_color: Background color (e.g., "#FFFFFF", None for transparent).
-                         Use REMARKABLE_BACKGROUND_COLOR for the standard paper color.
+                         See :func:`render_rm_file_to_png`.
         screen: Panel size of the tablet that drew the page. See
             :func:`render_rm_file_to_png`.
 

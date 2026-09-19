@@ -33,6 +33,7 @@ from living_ink.report import (
     DocumentOutcome,
     RunReport,
 )
+from living_ink.settings import Settings
 
 
 class MockDestination(Destination):
@@ -1345,17 +1346,15 @@ class TestRenderCaching:
             raising=True,
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
-        monkeypatch.setattr(
-            "living_ink.extract.get_background_color", lambda: "white", raising=True
-        )
         return calls
 
-    def _pipeline(self, tmp_path, enabled=True, device=None):
+    def _pipeline(self, tmp_path, enabled=True, device=None, background="white"):
         from living_ink.cache import RenderCache
         from living_ink.devices import default_reading
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.device = device or default_reading()
+        pipe.settings = Settings(render_background=background)
         pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
         pipe.report = RunReport()
         pipe.saved = []
@@ -1496,16 +1495,39 @@ class TestRenderCaching:
         again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         assert rendered == [1, 2]
 
-    def test_a_new_background_re_renders_everything(self, tmp_path, rendered, monkeypatch):
+    def test_a_new_background_re_renders_everything(self, tmp_path, rendered):
         """The background is baked into the PNG, so it belongs in the key."""
         pipe = self._pipeline(tmp_path)
         pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         rendered.clear()
 
-        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "yellow")
-        again = self._pipeline(tmp_path)
+        again = self._pipeline(tmp_path, background="yellow")
         again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         assert rendered == [1, 2]
+
+    def test_the_background_reaches_the_renderer(self, tmp_path, monkeypatch):
+        """The colour in the key is the colour the page is rendered on.
+
+        It used to be in the key and nowhere else, so setting it invalidated
+        every cached render and produced byte-identical PNGs.
+        """
+        seen = {}
+
+        def fake_render(zip_path, page, **kwargs):
+            seen.update(kwargs)
+            return b"png"
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", fake_render, raising=True
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
+        )
+
+        pipe = self._pipeline(tmp_path, background="#123456")
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 1)
+
+        assert seen["background_color"] == "#123456"
 
     def test_a_disabled_cache_renders_every_time(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path, enabled=False)
@@ -1528,7 +1550,6 @@ class TestRenderCaching:
             raising=True,
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp")
-        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "white")
 
         pipe = self._pipeline(tmp_path)
         pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
@@ -2274,13 +2295,11 @@ class TestRenderGeometryFollowsTheDevice:
             "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
-        monkeypatch.setattr(
-            "living_ink.extract.get_background_color", lambda: "white", raising=True
-        )
 
         def pipe_for(model):
             pipe = SyncPipeline.__new__(SyncPipeline)
             pipe.device = self._reading(model)
+            pipe.settings = Settings(render_background="white")
             pipe.renders = RenderCache(tmp_path / "renders", enabled=True)
             pipe.report = RunReport()
             pipe._save_page = lambda job, page, data, label="Saved": None
@@ -2324,6 +2343,7 @@ class TestRenderGeometryFollowsTheDevice:
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.device = self._reading("reMarkable Paper Pro")
+        pipe.settings = Settings(render_background="white")
         pipe.renders = RenderCache(tmp_path / "renders", enabled=False)
         pipe.report = RunReport()
         pipe._save_page = lambda job, page, data, label="Saved": None

@@ -1843,7 +1843,6 @@ class SyncPipeline:
         """
         from living_ink.extract import (
             RenderError,
-            get_background_color,
             get_page_source_hashes,
             render_page_from_document_zip,
             renderer_fingerprint,
@@ -1860,8 +1859,9 @@ class SyncPipeline:
         # different tablet changes the size a boundless page renders at, and a
         # cache that ignored it would serve the other device's geometry.
         screen = self.device.info.screen
+        background = self.settings.render_background
         fingerprint = (
-            f"{renderer_fingerprint()}:{get_background_color()}:{screen[0]}x{screen[1]}"
+            f"{renderer_fingerprint()}:{background}:{screen[0]}x{screen[1]}"
             if source_hashes and self.renders.enabled
             else ""
         )
@@ -1873,7 +1873,9 @@ class SyncPipeline:
 
             if png_bytes is None:
                 try:
-                    png_bytes = render_page_from_document_zip(tmp_zip, page, screen=screen)
+                    png_bytes = render_page_from_document_zip(
+                        tmp_zip, page, background_color=background, screen=screen
+                    )
                 except RenderError as e:
                     # Named rather than counted: a page that renders to nothing
                     # used to publish as an empty note with no error anywhere.
