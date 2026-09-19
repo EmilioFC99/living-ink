@@ -6,7 +6,17 @@ import threading
 
 import pytest
 
-from living_ink.state import SCHEMA_VERSION, StateStore, import_legacy_json
+from living_ink.state import (
+    SCHEMA_VERSION,
+    STATUS_CHANGED,
+    STATUS_FAILED,
+    STATUS_NEW,
+    STATUS_UP_TO_DATE,
+    SYNC_STATUSES,
+    StateStore,
+    classify,
+    import_legacy_json,
+)
 from living_ink.transport import DeviceInfo
 
 
@@ -493,32 +503,101 @@ class TestFailures:
         store.clear_failure("never-seen")
 
 
+class TestStatusRegistry:
+    """A status is a value in an ordered registry, not a bare string."""
+
+    def _view(self, **overrides):
+        from living_ink.state import DocumentView
+
+        defaults = {
+            "doc_id": "doc-1",
+            "last_error": None,
+            "published": {},
+            "pending": [],
+            "destinations": [],
+        }
+        return DocumentView(**{**defaults, **overrides})
+
+    def test_the_last_status_matches_everything(self):
+        """classify() must always return; the fallback carries that guarantee."""
+        assert SYNC_STATUSES[-1].matches(self._view()) is True
+
+    def test_classify_returns_the_first_match_not_the_best(self):
+        """Order is the rule: a document that both errored and changed is failed."""
+        view = self._view(
+            last_error="boom", pending=["ObsidianDestination"], destinations=["ObsidianDestination"]
+        )
+        assert classify(view) is STATUS_FAILED
+
+    def test_new_is_checked_before_changed(self):
+        view = self._view(pending=["ObsidianDestination"], destinations=["ObsidianDestination"])
+        assert classify(view) is STATUS_NEW
+
+    def test_a_document_owed_to_a_second_destination_is_changed_not_new(self):
+        view = self._view(
+            published={"ObsidianDestination": "v1"},
+            pending=["AppleNotesDestination"],
+            destinations=["ObsidianDestination", "AppleNotesDestination"],
+        )
+        assert classify(view) is STATUS_CHANGED
+
+    def test_a_disabled_destination_does_not_make_a_document_look_synced_before(self):
+        """Published only to a destination since turned off: new to the ones on."""
+        view = self._view(
+            published={"AppleNotesDestination": "v1"},
+            pending=["ObsidianDestination"],
+            destinations=["ObsidianDestination"],
+        )
+        assert classify(view) is STATUS_NEW
+
+    def test_no_destinations_enabled_is_up_to_date_not_new(self):
+        """Nothing is owed, so nothing is outstanding — do not alarm the user."""
+        assert classify(self._view()) is STATUS_UP_TO_DATE
+
+    def test_every_status_key_is_unique(self):
+        keys = [status.key for status in SYNC_STATUSES]
+        assert len(keys) == len(set(keys))
+
+    def test_only_the_up_to_date_status_is_skipped_by_a_run(self):
+        skipped = [status for status in SYNC_STATUSES if not status.needs_sync]
+        assert skipped == [STATUS_UP_TO_DATE]
+
+    def test_a_status_prints_as_its_label(self):
+        assert f"{STATUS_UP_TO_DATE}" == "up to date"
+
+    def test_the_key_is_machine_stable_and_the_label_is_not(self):
+        """--json consumers key off `key`; renaming the label must not move it."""
+        assert STATUS_UP_TO_DATE.key == "up_to_date"
+        assert " " in STATUS_UP_TO_DATE.label
+
+
 class TestSyncOverview:
     """The join the per-destination JSON files could never do."""
 
-    def test_a_document_published_everywhere_is_synced(self, store):
+    def test_a_document_published_everywhere_is_up_to_date(self, store):
         store.record_document("doc-1", name="Notes", version="v1")
         store.record_publication("doc-1", "ObsidianDestination", "v1")
         store.record_publication("doc-1", "AppleNotesDestination", "v1")
 
         row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
-        assert row["status"] == "synced"
+        assert row["status"] is STATUS_UP_TO_DATE
         assert row["pending"] == []
 
-    def test_one_lagging_destination_makes_it_pending(self, store):
+    def test_one_lagging_destination_makes_it_changed(self, store):
         store.record_document("doc-1", version="v2")
         store.record_publication("doc-1", "ObsidianDestination", "v2")
         store.record_publication("doc-1", "AppleNotesDestination", "v1")
 
         row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
-        assert row["status"] == "pending"
+        assert row["status"] is STATUS_CHANGED
         assert row["pending"] == ["AppleNotesDestination"]
 
-    def test_a_never_published_document_is_pending(self, store):
+    def test_a_never_published_document_is_new(self, store):
+        """Never synced and merely stale are different bills; do not conflate."""
         store.record_document("doc-1", version="v1")
 
         row = store.sync_overview(["ObsidianDestination"])[0]
-        assert row["status"] == "pending"
+        assert row["status"] is STATUS_NEW
         assert row["pending"] == ["ObsidianDestination"]
 
     def test_a_disabled_destination_is_not_counted_as_missing(self, store):
@@ -527,14 +606,14 @@ class TestSyncOverview:
         store.record_publication("doc-1", "ObsidianDestination", "v1")
 
         row = store.sync_overview(["ObsidianDestination"])[0]
-        assert row["status"] == "synced"
+        assert row["status"] is STATUS_UP_TO_DATE
 
     def test_a_failure_outranks_being_up_to_date(self, store):
         store.record_document("doc-1", version="v1")
         store.record_publication("doc-1", "ObsidianDestination", "v1")
         store.record_failure("doc-1", "boom")
 
-        assert store.sync_overview(["ObsidianDestination"])[0]["status"] == "failing"
+        assert store.sync_overview(["ObsidianDestination"])[0]["status"] is STATUS_FAILED
 
     def test_published_versions_are_reported_per_destination(self, store):
         store.record_document("doc-1", version="v2")
@@ -691,3 +770,78 @@ class TestMaintenance:
         store.vacuum()
 
         assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}
+
+
+class TestCompareWithListing:
+    """The live listing outranks whatever the last run happened to record."""
+
+    def _entry(self, doc_id="doc-1", **overrides):
+        """One listing entry, as the CLI builds it from the tablet's metadata."""
+        return {
+            "id": doc_id,
+            "name": "Notes",
+            "folder": "Work",
+            "doc_type": "notebook",
+            "version": "v1",
+            **overrides,
+        }
+
+    def test_a_document_the_database_has_never_seen_is_new(self, store):
+        rows, orphans = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
+
+        assert orphans == []
+        assert rows[0]["status"] is STATUS_NEW
+        assert rows[0]["pending"] == ["ObsidianDestination"]
+
+    def test_a_newer_version_on_the_tablet_is_changed(self, store):
+        store.record_document("doc-1", version="v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        rows, _ = store.compare_with_listing([self._entry(version="v2")], ["ObsidianDestination"])
+        assert rows[0]["status"] is STATUS_CHANGED
+
+    def test_the_listing_decides_the_version_not_the_database(self, store):
+        """The database's version is what a past run saw, not what is there now."""
+        store.record_document("doc-1", version="v9")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        rows, _ = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
+        assert rows[0]["status"] is STATUS_UP_TO_DATE
+
+    def test_the_database_fills_in_a_type_the_listing_could_not_name(self, store):
+        store.record_document("doc-1", doc_type="epub", version="v1")
+
+        rows, _ = store.compare_with_listing([self._entry(doc_type=None)], ["ObsidianDestination"])
+        assert rows[0]["doc_type"] == "epub"
+
+    def test_the_listing_wins_over_a_stale_remembered_folder(self, store):
+        store.record_document("doc-1", folder="Old", version="v1")
+
+        rows, _ = store.compare_with_listing(
+            [self._entry(folder="Archive")], ["ObsidianDestination"]
+        )
+        assert rows[0]["folder"] == "Archive"
+
+    def test_a_published_document_absent_from_the_listing_is_an_orphan(self, store):
+        store.record_document("doc-gone", name="Deleted", version="v1")
+        store.record_publication("doc-gone", "ObsidianDestination", "v1")
+
+        rows, orphans = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
+        assert [row["id"] for row in orphans] == ["doc-gone"]
+        assert [row["id"] for row in rows] == ["doc-1"]
+
+    def test_a_never_published_absence_is_not_an_orphan(self, store):
+        """Nothing was ever written for it, so there is nothing left behind."""
+        store.record_document("doc-gone", version="v1")
+
+        _, orphans = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
+        assert orphans == []
+
+    def test_a_recorded_failure_outranks_the_listing(self, store):
+        store.record_document("doc-1", version="v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_failure("doc-1", "boom")
+
+        rows, _ = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
+        assert rows[0]["status"] is STATUS_FAILED
+        assert rows[0]["last_error"] == "boom"

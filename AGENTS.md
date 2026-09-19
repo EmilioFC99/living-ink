@@ -127,7 +127,7 @@ uv run living-ink sync --json                         # run summary as JSON
 uv run living-ink watch --interval 600                # sync every 10 minutes
 uv run living-ink status                              # health check + effective settings
 uv run living-ink status --json                       # machine-readable health check
-uv run living-ink list                                # what is pending or failing
+uv run living-ink sync --status                      # what is new, changed, or up to date
 uv run living-ink state                               # what is remembered between runs
 uv run living-ink sync --prune                        # also delete notes whose notebook is gone
 uv run living-ink cache                               # transcription and render cache sizes

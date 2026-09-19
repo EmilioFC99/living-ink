@@ -95,6 +95,7 @@ def test_cli_keep_temp_flag(mock_sync):
 def test_sync_command_forwards_keep_temp():
     """SyncCommand forwards --keep-temp to pipeline."""
     args = MagicMock(
+        status=False,
         keep_temp=True,
         notebook=None,
         limit=0,

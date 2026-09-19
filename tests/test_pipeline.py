@@ -193,10 +193,9 @@ def test_sync_pipeline_filter_pending_documents_limit():
     id_map = {it["ID"]: it for it in items}
 
     pipeline = SyncPipeline(SyncOptions(limit=2), destinations=[MockDestination()])
-    with patch("living_ink.pipeline.load_processed_log", return_value={}):
-        to_process, needs_update, cont = pipeline.filter_pending_documents(items, id_map)
-        assert cont is True
-        assert len(to_process) == 2
+    to_process, needs_update, cont = pipeline.filter_pending_documents(items, id_map)
+    assert cont is True
+    assert len(to_process) == 2
 
 
 def test_sync_pipeline_run_no_notebooks():
@@ -1939,3 +1938,81 @@ class TestJsonSummaryReachesStdout:
         assert "Synced 0 of 1 documents" in out
         with pytest.raises(json.JSONDecodeError):
             json.loads(out)
+
+
+class TestThePreviewAndTheRunAgree:
+    """`sync --status` predicts the run; a second opinion would be a bug."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """A real state store on a throwaway database."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield pipeline.get_state_store()
+        pipeline.reset_state_store()
+
+    ITEMS = [
+        {"ID": "doc-new", "Type": "DocumentType", "VissibleName": "New", "hash": "h1"},
+        {"ID": "doc-changed", "Type": "DocumentType", "VissibleName": "Changed", "hash": "h2"},
+        {"ID": "doc-settled", "Type": "DocumentType", "VissibleName": "Settled", "hash": "h3"},
+    ]
+
+    def _sync(self, store):
+        """Run the filter over ITEMS against one destination."""
+        dest = MockDestination()
+        # Above the document count: the per-run cap is applied after the
+        # filter, and capping it here would look like a disagreement.
+        pipe = SyncPipeline(SyncOptions(limit=10), destinations=[dest])
+        id_map = {item["ID"]: item for item in self.ITEMS}
+        to_process, needs_update, _ = pipe.filter_pending_documents(list(self.ITEMS), id_map)
+        return [item["ID"] for item in to_process], needs_update, dest
+
+    def _preview(self, store):
+        """Classify the same items the way `sync --status` does."""
+        listing = [
+            {
+                "id": item["ID"],
+                "name": item["VissibleName"],
+                "folder": None,
+                "doc_type": "notebook",
+                "version": item["hash"],
+            }
+            for item in self.ITEMS
+        ]
+        rows, _ = store.compare_with_listing(listing, ["MockDestination"])
+        return {row["id"]: row["status"] for row in rows}
+
+    def test_the_run_processes_exactly_what_the_preview_flagged(self, store):
+        store.record_publication("doc-changed", "MockDestination", "old")
+        store.record_publication("doc-settled", "MockDestination", "h3")
+
+        processed, _, _ = self._sync(store)
+        flagged = [doc_id for doc_id, status in self._preview(store).items() if status.needs_sync]
+        assert sorted(processed) == sorted(flagged) == ["doc-changed", "doc-new"]
+
+    def test_a_settled_document_is_left_alone_by_both(self, store):
+        for item in self.ITEMS:
+            store.record_publication(item["ID"], "MockDestination", item["hash"])
+
+        processed, needs_update, _ = self._sync(store)
+        assert processed == []
+        assert needs_update == {}
+        assert not any(status.needs_sync for status in self._preview(store).values())
+
+    def test_the_run_names_the_destination_that_is_owed(self, store):
+        store.record_publication("doc-settled", "MockDestination", "h3")
+
+        _, needs_update, dest = self._sync(store)
+        assert needs_update["doc-new"] == [dest]
+        assert "doc-settled" not in needs_update
+
+    def test_the_per_run_cap_shortens_the_run_not_the_preview(self, store):
+        """A capped run is not a disagreement: the rest is still owed."""
+        pipe = SyncPipeline(SyncOptions(limit=1), destinations=[MockDestination()])
+        id_map = {item["ID"]: item for item in self.ITEMS}
+        to_process, needs_update, _ = pipe.filter_pending_documents(list(self.ITEMS), id_map)
+
+        assert len(to_process) == 1
+        assert set(needs_update) == {"doc-new", "doc-changed", "doc-settled"}

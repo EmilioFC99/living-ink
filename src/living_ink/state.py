@@ -29,9 +29,10 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle: transport does not need state
     from living_ink.transport import DeviceInfo
@@ -123,16 +124,120 @@ _ADDED_COLUMNS = {
     },
 }
 
-#: A document has been published to every destination that wants it, at its
-#: current version.
-STATUS_SYNCED = "synced"
 
-#: A document is new, or has changed since it was last published somewhere.
-STATUS_PENDING = "pending"
+@dataclass(frozen=True)
+class DocumentView:
+    """The facts a status predicate is allowed to look at.
 
-#: The last attempt at this document ended in an error that was never followed
-#: by a success.
-STATUS_FAILING = "failing"
+    Deciding a document's status must be a pure function of facts already
+    gathered — never a fresh read. A status that needs something nobody has
+    yet is a reason to add a field here, gathered once in bulk, not a reason
+    to let a predicate go to disk per document.
+
+    Attributes:
+        doc_id: The reMarkable document id.
+        last_error: The error the last attempt ended with, if it was never
+            followed by a success.
+        published: Destination class name to the version it currently holds,
+            including destinations that have since been disabled.
+        pending: Enabled destination class names that do not hold the current
+            version.
+        destinations: The enabled destination class names, so that a document
+            published only to a destination the user has since turned off is
+            still judged against the ones that are on.
+    """
+
+    doc_id: str
+    last_error: Optional[str]
+    published: Dict[str, str]
+    pending: List[str]
+    destinations: List[str]
+
+    @property
+    def ever_published(self) -> bool:
+        """Whether any currently enabled destination has ever held this document.
+
+        Returns:
+            True if at least one enabled destination has a publication record,
+            regardless of which version it holds.
+        """
+        return any(name in self.published for name in self.destinations)
+
+
+@dataclass(frozen=True)
+class SyncStatus:
+    """Where one document stands, as a value rather than a bare string.
+
+    Attributes:
+        key: The stable machine name, used in ``--json`` output. Renaming
+            ``label`` must never change this.
+        label: The words a user reads.
+        tone: How to colour it — ``"good"``, ``"warn"``, ``"bad"`` or
+            ``"muted"``. Named rather than a colour function so that this
+            module stays free of presentation imports.
+        needs_sync: Whether a run acts on a document in this state. The same
+            field drives the preview and the pipeline's filter, so the two
+            cannot disagree about what a sync is about to do.
+        matches: Predicate over a :class:`DocumentView`.
+    """
+
+    key: str
+    label: str
+    tone: str
+    needs_sync: bool
+    matches: Callable[[DocumentView], bool]
+
+    def __str__(self) -> str:
+        """Return the human-readable label.
+
+        Returns:
+            The label, so an f-string prints words rather than a repr.
+        """
+        return self.label
+
+
+#: The last attempt ended in an error that was never followed by a success.
+STATUS_FAILED = SyncStatus("failed", "failed", "bad", True, lambda view: bool(view.last_error))
+
+#: Owed to a destination that has never held it. Checked before ``changed``,
+#: and only when something is actually owed: with no destinations enabled
+#: nothing is pending, and "up to date" is the truthful answer rather than
+#: calling the whole library new.
+STATUS_NEW = SyncStatus(
+    "new", "new", "warn", True, lambda view: bool(view.pending) and not view.ever_published
+)
+
+#: Published before; the tablet has moved on since.
+STATUS_CHANGED = SyncStatus("changed", "changed", "warn", True, lambda view: bool(view.pending))
+
+#: Every enabled destination holds the current version.
+STATUS_UP_TO_DATE = SyncStatus("up_to_date", "up to date", "good", False, lambda view: True)
+
+#: Every status, in classification order: the first whose predicate holds wins,
+#: and the last matches everything. Order encodes a real decision — a document
+#: that both errored and changed is reported as failed, because that is the one
+#: worth acting on. Adding a status is one entry here; the summary counts, the
+#: row renderer and the pipeline's filter all iterate this tuple rather than
+#: naming statuses, so none of them needs editing.
+SYNC_STATUSES: Tuple[SyncStatus, ...] = (
+    STATUS_FAILED,
+    STATUS_NEW,
+    STATUS_CHANGED,
+    STATUS_UP_TO_DATE,
+)
+
+
+def classify(view: DocumentView) -> SyncStatus:
+    """Decide where one document stands.
+
+    Args:
+        view: The gathered facts about the document.
+
+    Returns:
+        The first status in :data:`SYNC_STATUSES` whose predicate holds.
+        :data:`STATUS_UP_TO_DATE` matches everything, so this always returns.
+    """
+    return next(status for status in SYNC_STATUSES if status.matches(view))
 
 
 def _now() -> str:
@@ -556,9 +661,9 @@ class StateStore:
         """Describe where every known document stands against each destination.
 
         This is the join the old per-destination JSON files could not do: a
-        document is only ``synced`` once every destination that wants it holds
+        document is only up to date once every destination that wants it holds
         its current version, and one destination lagging is enough to make it
-        ``pending``.
+        pending.
 
         Args:
             destinations: Destination class names that are currently enabled.
@@ -566,10 +671,10 @@ class StateStore:
                 rather than counted as missing.
 
         Returns:
-            One dict per document — its columns plus ``status``, ``pending``
-            (the destinations still owing it) and ``published`` (destination
-            to the version it holds) — in the order
-            :meth:`all_documents` returns them.
+            One dict per document — its columns plus ``status`` (a
+            :class:`SyncStatus`), ``pending`` (the destinations still owing it)
+            and ``published`` (destination to the version it holds) — in the
+            order :meth:`all_documents` returns them.
         """
         publications = self.all_publications()
         overview: List[Dict[str, Any]] = []
@@ -580,18 +685,92 @@ class StateStore:
             }
             pending = [name for name in destinations if published.get(name) != document["version"]]
 
-            if document.get("last_error"):
-                status = STATUS_FAILING
-            elif pending:
-                status = STATUS_PENDING
-            else:
-                status = STATUS_SYNCED
+            status = classify(
+                DocumentView(
+                    doc_id=document["id"],
+                    last_error=document.get("last_error"),
+                    published=published,
+                    pending=pending,
+                    destinations=destinations,
+                )
+            )
 
             overview.append(
                 {**document, "status": status, "pending": pending, "published": published}
             )
 
         return overview
+
+    def compare_with_listing(
+        self, listing: List[Dict[str, Any]], destinations: List[str]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Judge what the device is holding right now against what was published.
+
+        :meth:`sync_overview` answers from the database alone, so it reports
+        what the last run happened to see. This takes a live listing instead,
+        which is the difference between "what was pending last time" and "what
+        would a sync do if I ran it now".
+
+        The listing is plain dicts rather than transport models on purpose:
+        this module must not learn what a :class:`~living_ink.models.Document`
+        is.
+
+        Args:
+            listing: One dict per document currently on the device, with at
+                least ``id`` and ``version``; ``name``, ``folder`` and
+                ``doc_type`` are carried through to the caller when present,
+                and filled in from the database when not.
+            destinations: Destination class names that are currently enabled.
+
+        Returns:
+            ``(rows, orphans)``. ``rows`` is one dict per listed document —
+            the listing's fields plus ``status``, ``pending`` and
+            ``published`` — in listing order. ``orphans`` are documents the
+            database has published but that the listing does not mention,
+            which is what a deleted-on-the-tablet notebook looks like.
+        """
+        publications = self.all_publications()
+        known = {row["id"]: row for row in self.all_documents()}
+
+        rows: List[Dict[str, Any]] = []
+        for entry in listing:
+            doc_id = entry["id"]
+            record = known.get(doc_id, {})
+            published = {name: row["version"] for name, row in publications.get(doc_id, {}).items()}
+            pending = [name for name in destinations if published.get(name) != entry.get("version")]
+
+            status = classify(
+                DocumentView(
+                    doc_id=doc_id,
+                    last_error=record.get("last_error"),
+                    published=published,
+                    pending=pending,
+                    destinations=destinations,
+                )
+            )
+
+            rows.append(
+                {
+                    # The database fills the gaps the listing leaves: a
+                    # document's type costs a round trip to determine for
+                    # certain, and a previous run already paid for it.
+                    "doc_type": record.get("doc_type"),
+                    "folder": record.get("folder"),
+                    **{k: v for k, v in entry.items() if v is not None},
+                    "last_error": record.get("last_error"),
+                    "status": status,
+                    "pending": pending,
+                    "published": published,
+                }
+            )
+
+        listed = {entry["id"] for entry in listing}
+        orphans = [
+            record
+            for doc_id, record in known.items()
+            if doc_id not in listed and publications.get(doc_id)
+        ]
+        return rows, orphans
 
     # --- device -----------------------------------------------------------
 

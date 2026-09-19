@@ -24,6 +24,7 @@ from living_ink.cli import (
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
 from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
 from living_ink.setup_wizard import WizardResult
+from living_ink.state import STATUS_NEW, STATUS_UP_TO_DATE
 
 
 def test_find_repo_root_prefers_cwd(tmp_path):
@@ -85,7 +86,7 @@ def test_main_sync_command(mock_sync):
 
 def test_cmd_status_no_config(tmp_path, capsys):
     """StatusCommand reports cleanly when config is missing."""
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Not found" in captured.out
@@ -119,7 +120,7 @@ def _run_sync_capturing_pipeline(args, tmp_path):
 def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     """SyncCommand resolves --ssh into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
-    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False, status=False)
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -137,7 +138,7 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_p
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
@@ -159,7 +160,9 @@ def test_main_sync_command_with_cloud(mock_sync):
 def test_cmd_sync_cloud_flag_resolves_to_cloud(tmp_path, monkeypatch):
     """SyncCommand resolves --cloud into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
-    args = MagicMock(ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(
+        ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False, status=False
+    )
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -171,7 +174,9 @@ def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeyp
     """Resolved settings stay on the pipeline instead of leaking into os.environ."""
     for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
         monkeypatch.delenv(var, raising=False)
-    args = MagicMock(ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False)
+    args = MagicMock(
+        ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False, status=False
+    )
 
     _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -191,7 +196,7 @@ def test_cmd_status_ssh_unplugged_cloud_backup(
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  device_token: 'tok'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False)
+    args = MagicMock(json=False, status=False)
     StatusCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
@@ -678,101 +683,6 @@ class TestVerbosityFlags:
                 logs._console_mode = logs.ConsoleMode.PLAIN
 
 
-class TestListCommand:
-    """`list` answers "did my notes make it?" without a full inventory dump."""
-
-    ROWS = [
-        {
-            "id": "doc-1",
-            "name": "Meeting Notes",
-            "folder": "Work",
-            "status": "pending",
-            "pending": ["ObsidianDestination"],
-            "published": {},
-            "last_error": None,
-        },
-        {
-            "id": "doc-2",
-            "name": "Sketchbook",
-            "folder": "Art",
-            "status": "failing",
-            "pending": ["ObsidianDestination"],
-            "published": {},
-            "last_error": "Download timed out",
-        },
-        {
-            "id": "doc-3",
-            "name": "Journal",
-            "folder": None,
-            "status": "synced",
-            "pending": [],
-            "published": {"ObsidianDestination": "v1"},
-            "last_error": None,
-        },
-    ]
-
-    def _run(self, capsys, rows=None, **flags):
-        """Run the command against a stubbed inventory and return its output."""
-        from living_ink.cli import ListCommand
-
-        defaults = {"all": False, "json": False}
-        args = argparse.Namespace(**{**defaults, **flags})
-        with patch(
-            "living_ink.cli.collect_inventory", return_value=self.ROWS if rows is None else rows
-        ):
-            code = ListCommand().run(args)
-        return code, capsys.readouterr().out
-
-    def test_pending_and_failing_are_shown_by_default(self, capsys):
-        _, out = self._run(capsys)
-        assert "Meeting Notes" in out
-        assert "Sketchbook" in out
-
-    def test_synced_documents_are_hidden_by_default(self, capsys):
-        _, out = self._run(capsys)
-        assert "Journal" not in out
-        assert "1 synced" in out
-
-    def test_all_shows_everything(self, capsys):
-        _, out = self._run(capsys, all=True)
-        assert "Journal" in out
-
-    def test_the_failure_reason_is_printed(self, capsys):
-        _, out = self._run(capsys)
-        assert "Download timed out" in out
-
-    def test_a_pending_document_names_the_destination_it_owes(self, capsys):
-        _, out = self._run(capsys)
-        assert "Obsidian" in out
-
-    def test_a_clean_library_says_so(self, capsys):
-        clean = [dict(self.ROWS[2])]
-        _, out = self._run(capsys, rows=clean)
-        assert "Everything is up to date" in out
-
-    def test_an_empty_database_points_at_sync(self, capsys):
-        _, out = self._run(capsys, rows=[])
-        assert "living-ink sync" in out
-
-    def test_json_output_carries_rows_and_counts(self, capsys):
-        _, out = self._run(capsys, json=True)
-        payload = json.loads(out)
-        assert len(payload["documents"]) == 3
-        assert payload["counts"] == {"synced": 1, "pending": 1, "failing": 1}
-
-    def test_a_pending_document_is_not_an_error_exit(self, capsys):
-        """Scripts must not treat "someone wrote a new page" as a failure."""
-        code, _ = self._run(capsys)
-        assert code == 0
-
-    def test_the_command_is_registered(self):
-        assert "list" in LivingInkCLI().commands
-
-    def test_the_parser_accepts_the_flags(self):
-        args = LivingInkCLI().build_parser().parse_args(["list", "--all", "--json"])
-        assert (args.command, args.all, args.json) == ("list", True, True)
-
-
 class TestDestinationLabels:
     """Class names are an implementation detail; printed names are not."""
 
@@ -787,11 +697,11 @@ class TestDestinationLabels:
         assert short_destination("ObsidianDestination") == "Obsidian"
 
 
-class TestStatusDocumentCounts:
-    """`status` summarises the inventory in one line."""
+class TestStatusDefersTheDocumentQuestion:
+    """`status` reports the setup; the tablet is asked about separately."""
 
-    def _report(self, rows):
-        """Collect a report against a stubbed inventory, probing disabled."""
+    def _report(self):
+        """Collect a report with every probe stubbed out."""
         import tempfile
         from pathlib import Path as _Path
 
@@ -803,57 +713,23 @@ class TestStatusDocumentCounts:
             patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
             patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
             patch("living_ink.setup_wizard.verify_ai_provider", return_value=(False, "no")),
-            patch("living_ink.cli.collect_inventory", return_value=rows),
         ):
             return collect_status(tmp)
 
-    def test_the_counts_are_collected(self):
-        report = self._report(TestListCommand.ROWS)
-        assert (report.documents_synced, report.documents_pending, report.documents_failing) == (
-            1,
-            1,
-            1,
-        )
+    def test_no_document_tally_is_collected(self):
+        """A count from the database alone would be a guess about the tablet."""
+        assert "documents" not in self._report().to_dict()
 
-    def test_an_empty_inventory_is_reported_as_unknown(self):
-        report = self._report([])
-        assert report.documents_known is False
+    def test_the_console_points_at_the_live_comparison(self, capsys):
+        StatusCommand._render_console(self._report())
+        assert "living-ink sync --status" in capsys.readouterr().out
 
-    def test_an_unreadable_database_does_not_break_the_report(self):
-        import tempfile
-        from pathlib import Path as _Path
+    def test_list_is_gone(self):
+        assert "list" not in LivingInkCLI().commands
 
-        from living_ink.cli import collect_status
-
-        tmp = _Path(tempfile.mkdtemp()) / "config.yml"
-        tmp.write_text("sync: {}\n")
-        with (
-            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
-            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
-            patch("living_ink.setup_wizard.verify_ai_provider", return_value=(False, "no")),
-            patch("living_ink.cli.collect_inventory", side_effect=OSError("disk is gone")),
-        ):
-            report = collect_status(tmp)
-
-        assert report.documents_known is False
-        assert report.usable is True
-
-    def test_json_output_includes_the_counts(self):
-        report = self._report(TestListCommand.ROWS)
-        assert report.to_dict()["documents"] == {
-            "known": True,
-            "synced": 1,
-            "pending": 1,
-            "failing": 1,
-        }
-
-    def test_the_console_line_points_at_list_when_work_is_outstanding(self, capsys):
-        report = self._report(TestListCommand.ROWS)
-        StatusCommand._render_console(report)
-
-        out = capsys.readouterr().out
-        assert "1 pending" in out
-        assert "living-ink list" in out
+    def test_the_status_flags_parse(self):
+        args = LivingInkCLI().build_parser().parse_args(["sync", "--status", "--all", "--json"])
+        assert (args.command, args.status, args.all, args.json) == ("sync", True, True, True)
 
 
 class TestStateCommand:
@@ -1163,3 +1039,188 @@ class TestDeviceLineInStatus:
         out = capsys.readouterr().out
         assert "Device:" in out
         assert "assumed" in out
+
+
+class TestSyncStatusFlag:
+    """`sync --status` previews a sync instead of running one."""
+
+    def _rows(self, count, status=None):
+        """Build `count` comparison rows, all in the same state."""
+
+        return [
+            {
+                "id": f"doc-{n:04d}-aaaa",
+                "name": f"Note {n}",
+                "folder": "Work",
+                "doc_type": "notebook",
+                "status": status or STATUS_NEW,
+                "pending": ["ObsidianDestination"],
+                "published": {},
+                "last_error": None,
+            }
+            for n in range(count)
+        ]
+
+    def _show(self, capsys, rows, orphans=None, **flags):
+        """Run the command against a stubbed comparison and return its output."""
+        from living_ink.cli import SyncCommand
+
+        defaults = {"status": True, "all": False, "json": False}
+        args = argparse.Namespace(**{**defaults, **flags})
+        with patch("living_ink.cli.compare_with_device", return_value=(rows, orphans or [], None)):
+            code = SyncCommand().run(args)
+        return code, capsys.readouterr().out
+
+    def test_the_row_is_id_name_type_and_status(self):
+        from living_ink.cli import format_comparison_row
+
+        line = format_comparison_row(self._rows(1)[0])
+        assert line.startswith("doc-0000  Note 0")
+        assert ".notebook" in line
+
+    def test_a_long_name_is_truncated_with_an_ellipsis(self):
+        from living_ink.cli import format_comparison_row
+
+        row = {**self._rows(1)[0], "name": "A notebook with a very long title"}
+        line = format_comparison_row(row)
+        assert "A notebook wit…" in line
+        assert "very long title" not in line
+
+    def test_the_summary_counts_each_status(self, capsys):
+        rows = self._rows(2) + self._rows(1, status=STATUS_UP_TO_DATE)
+        _, out = self._show(capsys, rows)
+        assert "2  new" in out
+        assert "1  up to date" in out
+
+    def test_outstanding_work_is_listed_before_settled_work(self, capsys):
+        settled = self._rows(1, status=STATUS_UP_TO_DATE)
+        settled[0]["name"] = "Settled"
+        _, out = self._show(capsys, settled + self._rows(1))
+        assert out.index("Note 0") < out.index("Settled")
+
+    def test_only_ten_rows_are_shown_by_default(self, capsys):
+        _, out = self._show(capsys, self._rows(12))
+        assert "Note 9" in out
+        assert "Note 10" not in out
+        assert "10 of 12 shown · 2 more — use --all" in out
+
+    def test_all_shows_every_row(self, capsys):
+        with patch("sys.stdout.isatty", return_value=False):
+            _, out = self._show(capsys, self._rows(12), all=True)
+        assert "Note 11" in out
+        assert "use --all" not in out
+
+    def test_documents_gone_from_the_tablet_are_counted(self, capsys):
+        orphans = [{"id": "doc-old", "name": "Deleted"}]
+        _, out = self._show(capsys, self._rows(1), orphans=orphans)
+        assert "1  no longer on the tablet" in out
+
+    def test_an_empty_tablet_says_so(self, capsys):
+        code, out = self._show(capsys, [])
+        assert code == 0
+        assert "Nothing on the tablet" in out
+
+    def test_nothing_pending_says_everything_is_up_to_date(self, capsys):
+        _, out = self._show(capsys, self._rows(2, status=STATUS_UP_TO_DATE))
+        assert "Everything is up to date." in out
+
+    def test_json_keys_documents_by_the_stable_status_key(self, capsys):
+        orphans = [{"id": "doc-old", "name": "Deleted"}]
+        _, out = self._show(capsys, self._rows(1), orphans=orphans, json=True)
+        payload = json.loads(out)
+        assert payload["counts"] == {"failed": 0, "new": 1, "changed": 0, "up_to_date": 0}
+        assert payload["documents"][0]["status"] == "new"
+        assert payload["orphans"] == ["doc-old"]
+
+    def test_the_status_flag_never_runs_a_sync(self, capsys):
+        from living_ink.cli import SyncCommand
+
+        args = argparse.Namespace(status=True, all=False, json=False)
+        with patch("living_ink.cli.compare_with_device", return_value=([], [], None)):
+            with patch.object(SyncCommand, "execute_sync") as mock_sync:
+                SyncCommand().run(args)
+        mock_sync.assert_not_called()
+
+    def test_missing_configuration_does_not_launch_the_wizard(self, capsys):
+        from living_ink.cli import SyncCommand
+        from living_ink.config import ConfigurationMissing
+
+        args = argparse.Namespace(status=True, all=False, json=False)
+        with patch(
+            "living_ink.cli.compare_with_device", side_effect=ConfigurationMissing("no config")
+        ):
+            with patch.object(SyncCommand, "_handle_missing_config") as mock_wizard:
+                code = SyncCommand().run(args)
+
+        mock_wizard.assert_not_called()
+        assert code == 1
+        assert "living-ink setup" in capsys.readouterr().err
+
+
+class TestVersionOf:
+    """The preview and the run must agree on what "changed" means."""
+
+    def test_the_content_hash_wins(self):
+        from living_ink.cli import version_of
+
+        assert version_of({"hash": "abc123", "Version": 4}) == "abc123"
+
+    def test_the_version_number_is_the_fallback(self):
+        from living_ink.cli import version_of
+
+        assert version_of({"Version": 4}) == "4"
+
+    def test_metadata_with_neither_still_yields_a_version(self):
+        from living_ink.cli import version_of
+
+        assert version_of({}) == "1"
+
+
+class TestComparisonPaging:
+    """`--all` on a terminal stops every ten rows instead of scrolling away."""
+
+    def _rows(self, count):
+        """`count` rows, enough to span more than one page."""
+
+        return [
+            {
+                "id": f"doc-{n:04d}",
+                "name": f"Note {n}",
+                "doc_type": "notebook",
+                "status": STATUS_NEW,
+                "last_error": None,
+            }
+            for n in range(count)
+        ]
+
+    def _page(self, capsys, rows, answers, interactive=True):
+        """Page through `rows`, feeding `answers` to each prompt."""
+        from living_ink.cli import _print_paged
+
+        with patch("sys.stdout.isatty", return_value=interactive):
+            with patch("sys.stdin.isatty", return_value=interactive):
+                with patch("builtins.input", side_effect=answers) as mock_input:
+                    _print_paged(rows)
+        return capsys.readouterr().out, mock_input
+
+    def test_a_pipe_prints_everything_without_pausing(self, capsys):
+        out, mock_input = self._page(capsys, self._rows(25), [], interactive=False)
+        assert "Note 24" in out
+        mock_input.assert_not_called()
+
+    def test_a_terminal_pauses_between_pages(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), ["", ""])
+        assert "Note 24" in out
+
+    def test_q_stops_early(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), ["q"])
+        assert "Note 9" in out
+        assert "Note 10" not in out
+
+    def test_the_last_page_does_not_ask_for_more(self, capsys):
+        _, mock_input = self._page(capsys, self._rows(20), [""])
+        assert mock_input.call_count == 1
+
+    def test_giving_up_at_the_prompt_is_not_an_error(self, capsys):
+        out, _ = self._page(capsys, self._rows(25), KeyboardInterrupt())
+        assert "Note 9" in out

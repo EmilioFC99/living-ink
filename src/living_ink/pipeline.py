@@ -646,6 +646,30 @@ def get_val(item: Any, key: str) -> Any:
     return getattr(item, key, getattr(item, key.lower(), None))
 
 
+def document_version(item: Any) -> str:
+    """Return the value that decides whether a document has changed.
+
+    The content hash when the transport offers one, the version counter
+    otherwise. Lives here rather than inline in
+    :meth:`SyncPipeline.filter_pending_documents` because ``sync --status``
+    predicts that decision, and a preview that disagrees with the run it
+    predicts is worse than no preview.
+
+    Args:
+        item: A document from the transport's listing.
+
+    Returns:
+        The content hash, or the version number as a string, or ``"1"``.
+    """
+    value = get_val(item, "hash")
+    if value:
+        return str(value)
+    try:
+        return str(int(get_val(item, "Version")))
+    except (ValueError, TypeError):
+        return "1"
+
+
 def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
     """Construct the folder path for an item using the ID lookup map."""
     path = []
@@ -1417,38 +1441,48 @@ class SyncPipeline:
     ) -> Tuple[List[Any], Dict[str, List[Destination]], bool]:
         """Determine which notebooks need updating for active destinations.
 
+        The decision is not made here. The listing is handed to
+        :meth:`~living_ink.state.StateStore.compare_with_listing`, which is the
+        same call ``living-ink sync --status`` makes, so the preview and the run
+        it predicts share one classifier rather than two expressions of the same
+        rule that are free to drift apart.
+
         Returns:
             Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
         """
         active_dests = self.destinations or get_default_destinations()
-        needs_update: Dict[str, List[Destination]] = {}
-        dest_states = {}
-        for dest in active_dests:
-            dest_name = type(dest).__name__
-            dest_states[dest_name] = load_processed_log(dest_name)
+        by_name = {type(dest).__name__: dest for dest in active_dests}
 
+        listing = []
         for item in notebooks:
             doc_id = get_val(item, "ID")
-            curr_val = get_val(item, "hash")
-            if not curr_val:
-                try:
-                    curr_val = int(get_val(item, "Version"))
-                except (ValueError, TypeError):
-                    curr_val = 1
+            curr_val = document_version(item)
 
             # Recorded whether or not it needs publishing: an inventory of what
             # is on the device is what makes "what is pending" answerable
-            # without talking to the tablet again.
+            # without talking to the tablet again. Recorded *before* the
+            # comparison, so the classifier judges this run's facts.
             self._record_seen_document(item, doc_id, curr_val, id_map)
 
-            for dest in active_dests:
-                dest_name = type(dest).__name__
-                last_val = dest_states[dest_name].get(doc_id, -1)
+            listing.append(
+                {
+                    "id": doc_id,
+                    "name": get_val(item, "VissibleName") or get_val(item, "VisibleName"),
+                    "folder": get_notebook_path(item, id_map) or None,
+                    "doc_type": get_document_type(item),
+                    "version": curr_val,
+                }
+            )
 
-                if str(last_val) != str(curr_val):
-                    if doc_id not in needs_update:
-                        needs_update[doc_id] = []
-                    needs_update[doc_id].append(dest)
+        rows, _ = get_state_store().compare_with_listing(listing, list(by_name))
+        # ``pending`` as well as ``needs_sync``: a status can want attention
+        # without owing any enabled destination a publish, and there is nothing
+        # for this loop to do about one that does not.
+        needs_update: Dict[str, List[Destination]] = {
+            row["id"]: [by_name[name] for name in row["pending"]]
+            for row in rows
+            if row["pending"] and row["status"].needs_sync
+        }
 
         if self.target_notebook:
             target_name = self.target_notebook
