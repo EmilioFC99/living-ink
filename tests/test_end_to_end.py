@@ -155,7 +155,7 @@ def e2e(tmp_path, corpus_root, monkeypatch):
 
     provider = RecordingProvider()
     monkeypatch.setattr(clean, "_provider", provider)
-    monkeypatch.setattr(clean, "ENABLE_REPAIR", True)
+    monkeypatch.setattr(clean, "_repair_enabled", True)
 
     transport = CorpusTransport(corpus_root)
 

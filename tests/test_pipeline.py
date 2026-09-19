@@ -33,6 +33,7 @@ from living_ink.report import (
     DocumentOutcome,
     RunReport,
 )
+from living_ink.settings import Settings
 
 
 class MockDestination(Destination):
@@ -747,7 +748,7 @@ class TestConfigIsValidatedOnLoad:
 
     def test_a_valid_config_says_nothing(self, tmp_path, capsys):
         """Validation must not add noise to the normal path."""
-        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+        cfg = self._write(tmp_path, "sync:\n  limit: 5\n")
         pipeline.load_yaml_config(cfg)
         assert "⚠️" not in capsys.readouterr().out
 
@@ -766,6 +767,15 @@ class TestConfigIsValidatedOnLoad:
 class TestTheStoredApiKeyReachesTheProvider:
     """The key is stored per provider; nothing downstream should know that."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_provider(self):
+        """Configuring a provider is module state; do not leak it."""
+        from living_ink import clean
+
+        clean._provider = None
+        yield
+        clean._provider = None
+
     def _write(self, tmp_path, body):
         """Write a private config file and return its path."""
         cfg = tmp_path / "config.yml"
@@ -773,31 +783,46 @@ class TestTheStoredApiKeyReachesTheProvider:
         cfg.chmod(0o600)
         return cfg
 
-    def test_the_key_for_the_selected_provider_is_woven_in(self, tmp_path):
+    def _provider(self):
+        """Return the provider the last load configured."""
+        from living_ink import clean
+
+        return clean._get_provider()
+
+    def test_the_key_for_the_selected_provider_reaches_it(self, tmp_path):
         """A config with no key at all still configures the provider."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
         credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert loaded["ai"]["api_key"] == "AIza-stored"
+        assert self._provider().api_key == "AIza-stored"
 
     def test_another_provider_s_key_is_not_used(self, tmp_path):
         """The keys are separate slots, not a single one with a label."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
         credentials.write_secret("ai.api_key.openai", "sk-openai", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert "api_key" not in loaded["ai"]
+        assert self._provider().api_key == ""
 
     def test_a_key_left_in_the_config_still_works(self, tmp_path):
         """An install that has not been through the wizard again must keep syncing."""
         cfg = self._write(tmp_path, "ai:\n  provider: gemini\n  api_key: AIza-legacy\n")
 
+        pipeline.load_yaml_config(cfg)
+
+        assert self._provider().api_key == "AIza-legacy"
+
+    def test_the_key_never_reaches_the_dictionary_callers_hold(self, tmp_path):
+        """It is a credential. Nothing that walks the config should meet it."""
+        cfg = self._write(tmp_path, "ai:\n  provider: gemini\n")
+        credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
+
         loaded = pipeline.load_yaml_config(cfg)
 
-        assert loaded["ai"]["api_key"] == "AIza-legacy"
+        assert "api_key" not in loaded["ai"]
 
     def test_a_key_left_in_the_config_is_migrated(self, tmp_path):
         """Once, silently, on the next run — no prompt, no re-typing."""
@@ -818,14 +843,17 @@ class TestTheStoredApiKeyReachesTheProvider:
 
     def test_provider_none_looks_for_nothing(self, tmp_path):
         """Cleanup disabled means there is no key to want."""
+        from living_ink.providers import NoneProvider
+
         cfg = self._write(tmp_path, "ai:\n  provider: none\n")
+        credentials.write_secret("ai.api_key.gemini", "AIza-stored", config_path=cfg)
 
-        loaded = pipeline.load_yaml_config(cfg)
+        pipeline.load_yaml_config(cfg)
 
-        assert "api_key" not in loaded["ai"]
+        assert isinstance(self._provider(), NoneProvider)
 
     def test_no_ai_section_is_not_an_error(self, tmp_path):
-        cfg = self._write(tmp_path, "sync:\n  max_notebooks_per_run: 5\n")
+        cfg = self._write(tmp_path, "sync:\n  limit: 5\n")
 
         assert "ai" not in pipeline.load_yaml_config(cfg)
 
@@ -1318,17 +1346,15 @@ class TestRenderCaching:
             raising=True,
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
-        monkeypatch.setattr(
-            "living_ink.extract.get_background_color", lambda: "white", raising=True
-        )
         return calls
 
-    def _pipeline(self, tmp_path, enabled=True, device=None):
+    def _pipeline(self, tmp_path, enabled=True, device=None, background="white"):
         from living_ink.cache import RenderCache
         from living_ink.devices import default_reading
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.device = device or default_reading()
+        pipe.settings = Settings(render_background=background)
         pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
         pipe.report = RunReport()
         pipe.saved = []
@@ -1469,16 +1495,39 @@ class TestRenderCaching:
         again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         assert rendered == [1, 2]
 
-    def test_a_new_background_re_renders_everything(self, tmp_path, rendered, monkeypatch):
+    def test_a_new_background_re_renders_everything(self, tmp_path, rendered):
         """The background is baked into the PNG, so it belongs in the key."""
         pipe = self._pipeline(tmp_path)
         pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         rendered.clear()
 
-        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "yellow")
-        again = self._pipeline(tmp_path)
+        again = self._pipeline(tmp_path, background="yellow")
         again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
         assert rendered == [1, 2]
+
+    def test_the_background_reaches_the_renderer(self, tmp_path, monkeypatch):
+        """The colour in the key is the colour the page is rendered on.
+
+        It used to be in the key and nowhere else, so setting it invalidated
+        every cached render and produced byte-identical PNGs.
+        """
+        seen = {}
+
+        def fake_render(zip_path, page, **kwargs):
+            seen.update(kwargs)
+            return b"png"
+
+        monkeypatch.setattr(
+            "living_ink.extract.render_page_from_document_zip", fake_render, raising=True
+        )
+        monkeypatch.setattr(
+            "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
+        )
+
+        pipe = self._pipeline(tmp_path, background="#123456")
+        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 1)
+
+        assert seen["background_color"] == "#123456"
 
     def test_a_disabled_cache_renders_every_time(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path, enabled=False)
@@ -1501,7 +1550,6 @@ class TestRenderCaching:
             raising=True,
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp")
-        monkeypatch.setattr("living_ink.extract.get_background_color", lambda: "white")
 
         pipe = self._pipeline(tmp_path)
         pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
@@ -2247,13 +2295,11 @@ class TestRenderGeometryFollowsTheDevice:
             "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
-        monkeypatch.setattr(
-            "living_ink.extract.get_background_color", lambda: "white", raising=True
-        )
 
         def pipe_for(model):
             pipe = SyncPipeline.__new__(SyncPipeline)
             pipe.device = self._reading(model)
+            pipe.settings = Settings(render_background="white")
             pipe.renders = RenderCache(tmp_path / "renders", enabled=True)
             pipe.report = RunReport()
             pipe._save_page = lambda job, page, data, label="Saved": None
@@ -2297,6 +2343,7 @@ class TestRenderGeometryFollowsTheDevice:
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.device = self._reading("reMarkable Paper Pro")
+        pipe.settings = Settings(render_background="white")
         pipe.renders = RenderCache(tmp_path / "renders", enabled=False)
         pipe.report = RunReport()
         pipe._save_page = lambda job, page, data, label="Saved": None

@@ -180,27 +180,28 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
     )
 
 
-def _weave_stored_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
-    """Join the stored API key to the provider the config names.
+def _migrate_config_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
+    """Copy an API key left in ``config.yml`` into the credentials directory.
 
     The key is stored per provider — ``ai.api_key.gemini``, not ``ai.api_key``
     — so that trying OpenAI for an afternoon and going back does not mean
-    retyping the Gemini key. Nothing downstream should have to know that: by
-    the time :func:`configure_ai_provider` sees the section, the key for the
-    selected provider is simply in it.
-
-    A key still sitting in ``config.yml`` from an older install wins and is
-    copied into the credentials directory on the way past, so the move happens
-    once, silently, on the next run.
+    retyping the Gemini key. Reading it back out is
+    :class:`living_ink.settings.Settings`' job; this is only the move, which
+    happens once, silently, on the next run after an upgrade. The original is
+    left where it was, so downgrading does not mean retyping it either.
 
     Args:
-        yaml_config: The parsed config, modified in place.
+        yaml_config: The parsed config. Not modified.
         cfg_path: The config file the credentials directory is derived from.
     """
-    from living_ink.config.credentials import ai_key_name, migrate_secret, read_secret
+    from living_ink.config.credentials import ai_key_name, migrate_secret
 
     section = yaml_config.get("ai")
     if not isinstance(section, dict):
+        return
+
+    in_config = str(section.get("api_key", "") or "").strip()
+    if not in_config:
         return
 
     provider = str(section.get("provider", "")).strip().lower()
@@ -214,14 +215,7 @@ def _weave_stored_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
         # and get_provider is about to report it far better than this could.
         return
 
-    in_config = str(section.get("api_key", "") or "").strip()
-    if in_config:
-        migrate_secret(name, in_config, config_path=cfg_path)
-        return
-
-    stored = read_secret(name, config_path=cfg_path)
-    if stored:
-        section["api_key"] = stored
+    migrate_secret(name, in_config, config_path=cfg_path)
 
 
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -276,9 +270,10 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
                         "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
                     )
 
-                # 2. AI Provider — initialize from new 'ai' section or legacy 'openai' section
-                _weave_stored_ai_key(yaml_config, cfg_path)
-                configure_ai_provider(yaml_config)
+                # 2. AI Provider — configured from the settings this config
+                #    resolves to, which is where the stored key is read from.
+                _migrate_config_ai_key(yaml_config, cfg_path)
+                configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
 
         except Exception as e:
             # Deliberately broad. Everything downstream of the parse — env
@@ -306,8 +301,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     # Last, so that everything above sees the file as the user wrote it and
     # everything downstream sees only spellings this build still knows: dead
     # sections are gone and deprecated keys have been copied onto their
-    # replacements. The AI provider is configured above from the raw dict
-    # because it handles the legacy ``openai:`` section itself.
+    # replacements.
     return apply_status(yaml_config)
 
 
@@ -1849,7 +1843,6 @@ class SyncPipeline:
         """
         from living_ink.extract import (
             RenderError,
-            get_background_color,
             get_page_source_hashes,
             render_page_from_document_zip,
             renderer_fingerprint,
@@ -1866,8 +1859,9 @@ class SyncPipeline:
         # different tablet changes the size a boundless page renders at, and a
         # cache that ignored it would serve the other device's geometry.
         screen = self.device.info.screen
+        background = self.settings.render_background
         fingerprint = (
-            f"{renderer_fingerprint()}:{get_background_color()}:{screen[0]}x{screen[1]}"
+            f"{renderer_fingerprint()}:{background}:{screen[0]}x{screen[1]}"
             if source_hashes and self.renders.enabled
             else ""
         )
@@ -1879,7 +1873,9 @@ class SyncPipeline:
 
             if png_bytes is None:
                 try:
-                    png_bytes = render_page_from_document_zip(tmp_zip, page, screen=screen)
+                    png_bytes = render_page_from_document_zip(
+                        tmp_zip, page, background_color=background, screen=screen
+                    )
                 except RenderError as e:
                     # Named rather than counted: a page that renders to nothing
                     # used to publish as an empty note with no error anywhere.

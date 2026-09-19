@@ -1,10 +1,11 @@
 """Configuration: where it lives, what it may contain, and what it may not.
 
-Three concerns, one import path. :mod:`~living_ink.config.paths` resolves the
+Four concerns, one import path. :mod:`~living_ink.config.paths` resolves the
 config file, the data directory and the credentials directory;
-:mod:`~living_ink.config.validate` holds the schema every ``config.yml`` is
-checked against; :mod:`~living_ink.config.credentials` stores the secrets that
-must never be in that file.
+:mod:`~living_ink.config.schema` declares every setting there is;
+:mod:`~living_ink.config.validate` checks a parsed ``config.yml`` against that
+declaration; :mod:`~living_ink.config.credentials` stores the secrets that must
+never be in the file.
 
 Everything the rest of the package used to import from ``living_ink.config``
 is re-exported here, so a caller that only wants ``get_config_path`` does not
@@ -30,23 +31,38 @@ from living_ink.config.paths import (
     get_data_dir,
     get_logs_dir,
 )
-from living_ink.config.validate import (
+from living_ink.config.schema import (
     ACTIVE,
-    CONFIG_SCHEMA,
+    BY_FIELD,
+    CHOICE,
     DEPRECATED,
-    ERROR,
     FLAG,
+    LEGACY_KEYS,
+    LIST,
     NUMBER,
+    PATH,
     REMOVED,
-    SCHEMA_VERSION,
+    SECRET,
+    SECTION_KEYS,
+    SECTIONS,
+    SETTINGS,
+    STORE_CONFIG,
+    STORE_CREDENTIALS,
+    STORE_ENV_ONLY,
     TEXT,
-    WARNING,
     WHOLE,
+    Choice,
+    Section,
+    Setting,
+)
+from living_ink.config.validate import (
+    ERROR,
+    SCHEMA_VERSION,
+    WARNING,
     ConfigProblem,
     ConfigurationMissing,
-    Key,
-    Section,
     apply_status,
+    reads_as,
     split_problems,
     validate_config,
 )
@@ -54,22 +70,34 @@ from living_ink.config.validate import (
 __all__ = [
     "ACTIVE",
     "AI_KEY_PREFIX",
+    "BY_FIELD",
+    "CHOICE",
     "CLOUD_TOKEN",
-    "CONFIG_SCHEMA",
     "DEPRECATED",
     "ERROR",
     "FLAG",
+    "LEGACY_KEYS",
+    "LIST",
     "NUMBER",
+    "PATH",
     "REMOVED",
     "SCHEMA_VERSION",
+    "SECRET",
+    "SECTIONS",
+    "SECTION_KEYS",
+    "SETTINGS",
     "SSH_PASSWORD",
+    "STORE_CONFIG",
+    "STORE_CREDENTIALS",
+    "STORE_ENV_ONLY",
     "TEXT",
     "WARNING",
     "WHOLE",
+    "Choice",
     "ConfigProblem",
     "ConfigurationMissing",
-    "Key",
     "Section",
+    "Setting",
     "ai_key_name",
     "apply_status",
     "configured_ai_providers",
@@ -82,6 +110,7 @@ __all__ = [
     "list_secrets",
     "mask",
     "read_secret",
+    "reads_as",
     "split_problems",
     "validate_config",
     "write_secret",

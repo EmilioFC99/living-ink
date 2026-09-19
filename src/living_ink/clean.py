@@ -18,7 +18,7 @@ Backward compatibility:
 
 Example:
     >>> from living_ink.clean import configure, repair_text_with_openai, ocr_and_repair
-    >>> configure({"ai": {"provider": "gemini", "api_key": "..."}})
+    >>> configure(Settings(ai_provider="gemini", ai_api_key="..."))
     >>> cleaned = repair_text_with_openai("messy OCR text")
     >>> text = ocr_and_repair("/path/to/page.png")
 """
@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from living_ink.providers import NoneProvider, TextRepairProvider, get_provider
+from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,8 @@ OCR_PROMPT_FILE = Path(__file__).parent / "ocr_prompt.txt"
 # Module-level provider instance, initialized lazily via configure()
 _provider: Optional[TextRepairProvider] = None
 
-# Feature toggle (can be disabled via env var)
-ENABLE_REPAIR = os.environ.get("ENABLE_REPAIR", "true").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+# Whether the AI pass runs at all, as of the last configure(). None until then.
+_repair_enabled: Optional[bool] = None
 
 
 def _read_prompt_instructions() -> str:
@@ -63,20 +60,37 @@ def _read_prompt_instructions() -> str:
     return "Clean this OCR text."
 
 
-def configure(config: dict) -> None:
-    """Initialize the AI provider from the parsed YAML config.
+def configure(settings: Settings) -> None:
+    """Initialize the AI provider from the run's resolved settings.
 
     Should be called once at startup (from ``living_ink.pipeline`` or ``SyncPipeline``).
     If not called, ``repair_text_with_openai()`` will attempt to
     auto-configure from legacy env vars.
 
     Args:
-        config: The parsed YAML configuration dictionary containing
-            an ``ai`` section (or legacy ``openai`` section).
+        settings: The run's settings. Carries both the provider configuration
+            and whether the AI pass runs at all.
     """
-    global _provider
-    _provider = get_provider(config)
+    global _provider, _repair_enabled
+    _provider = get_provider(settings)
+    _repair_enabled = settings.repair_enabled
     logger.info("AI text cleanup provider: %s", _provider.name)
+
+
+def repair_enabled() -> bool:
+    """Report whether the AI pass runs at all.
+
+    Answered from the settings :func:`configure` was given. A caller reached
+    without one — a direct script, a test — falls back to the environment,
+    which is the only place this setting has ever been written.
+
+    Returns:
+        True unless the run has turned cleanup off.
+    """
+    global _repair_enabled
+    if _repair_enabled is None:
+        _repair_enabled = Settings.from_env().repair_enabled
+    return _repair_enabled
 
 
 def _get_provider() -> TextRepairProvider:
@@ -96,7 +110,7 @@ def _get_provider() -> TextRepairProvider:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if api_key:
         logger.info("Auto-configuring from OPENAI_API_KEY env var (legacy mode).")
-        _provider = get_provider({"openai": {"api_key": api_key}})
+        _provider = get_provider(Settings(ai_provider="openai", ai_api_key=api_key))
     else:
         logger.info("No AI provider configured. Text cleanup disabled.")
         _provider = NoneProvider()
@@ -116,9 +130,9 @@ def repair_text_with_openai(text: str) -> str:
 
     Returns:
         Cleaned text, or the original text if repair fails, is
-        disabled via ``ENABLE_REPAIR``, or the input is empty.
+        disabled via ``repair_enabled``, or the input is empty.
     """
-    if not ENABLE_REPAIR:
+    if not repair_enabled():
         return text
 
     if not text or not text.strip():
@@ -274,7 +288,7 @@ def vision_ocr_available() -> bool:
         ``True`` if the provider supports multimodal image input and
         text repair is enabled. ``False`` otherwise.
     """
-    if not ENABLE_REPAIR:
+    if not repair_enabled():
         return False
     provider = _get_provider()
     return provider.supports_vision
@@ -295,7 +309,7 @@ def ocr_and_repair(image_path: str) -> Optional[str]:
         Transcribed and cleaned text from the image, or ``None`` if
         the provider does not support vision OCR or if repair is disabled.
     """
-    if not ENABLE_REPAIR:
+    if not repair_enabled():
         return None
 
     provider = _get_provider()
