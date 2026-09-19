@@ -2450,7 +2450,10 @@ class SyncPipeline:
 
         # What this destination called the note last time, so it can replace
         # exactly that one instead of deleting whatever shares the title.
-        previous = get_state_store().get_publication(job.notebook_id, dest_name)
+        # Keyed by state_key, never by the display name: the row was written
+        # under the former, and a lookup under the latter silently finds
+        # nothing, which reads as "never published" and duplicates the note.
+        previous = get_state_store().get_publication(job.notebook_id, dest.state_key)
         existing_id = previous["external_id"] if previous else None
         # Where it landed last time. A notebook renamed or moved on the tablet
         # is the same note in a new place, not a second note.
