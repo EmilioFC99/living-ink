@@ -7,6 +7,7 @@ write is retried — all of that is the destination's own business.
 
 import abc
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Type
 
@@ -14,6 +15,22 @@ from living_ink.core.document import PublishResult
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class DestinationStatus:
+    """Whether a destination could publish right now, and what to do if not.
+
+    Attributes:
+        ok: Whether this destination can publish.
+        detail: One line naming the state it is in, for preflight and ``status``.
+        remedy: What the user should do about it, when there is an obvious
+            answer. A detail without a remedy is a fact; with one it is a fix.
+    """
+
+    ok: bool
+    detail: str
+    remedy: Optional[str] = None
 
 
 class DestinationError(Exception):
@@ -123,6 +140,23 @@ class Destination(abc.ABC):
             The destination's name and the setting a user would want confirmed.
         """
         return self.display_name or self.config_key or type(self).__name__
+
+    @abc.abstractmethod
+    def check(self) -> DestinationStatus:
+        """Report whether publishing would work, without publishing anything.
+
+        Called by preflight before a single page is rendered, and by ``status``.
+        Cheap by contract: a path test or one API ping, never a round trip.
+
+        This is where a bad vault is caught. Construction does not validate —
+        it used to, and the exception was swallowed into a warning, leaving a
+        run to discover it had no destinations only by publishing to none of
+        them and exiting 0.
+
+        Returns:
+            Whether this destination is ready, what state it is in, and the
+            remedy if there is one.
+        """
 
     @abc.abstractmethod
     def publish(

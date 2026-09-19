@@ -482,6 +482,9 @@ class StatusReport:
     obsidian_vault: str = ""
     obsidian_root_folder: str = ""
     obsidian_valid: bool = False
+    #: Why the vault is unusable, straight from ``ObsidianDestination.check()``
+    #: so status and preflight cannot disagree about it. Empty when it is fine.
+    obsidian_problem: str = ""
 
     apple_notes_enabled: bool = False
     apple_notes_folder: str = "Living Ink"
@@ -557,6 +560,7 @@ class StatusReport:
                 # this dataclass was introduced to remove.
                 "root_folder": self.obsidian_root_folder,
                 "valid": self.obsidian_valid,
+                "problem": self.obsidian_problem,
             },
             "apple_notes": {
                 "enabled": self.apple_notes_enabled,
@@ -664,6 +668,7 @@ def collect_status(config_path: Path) -> StatusReport:
     """
     import yaml
 
+    from living_ink.destinations import ObsidianDestination
     from living_ink.setup_wizard import (
         LAUNCH_AGENT_PLIST,
         verify_ai_provider,
@@ -735,7 +740,16 @@ def collect_status(config_path: Path) -> StatusReport:
     vault = Path(obs_cfg.get("vault_path", ""))
     report.obsidian_vault = str(vault)
     report.obsidian_root_folder = obs_cfg.get("root_folder", "")
-    report.obsidian_valid = bool(report.obsidian_enabled and vault.exists() and vault.is_dir())
+    if report.obsidian_enabled and obs_cfg.get("vault_path"):
+        # The destination's own check, not a second copy of it: a status that
+        # says the vault is fine while the sync refuses it is worse than no
+        # status at all, and that is what two implementations drift into.
+        vault_status = ObsidianDestination(vault_path=str(vault)).check()
+        report.obsidian_valid = vault_status.ok
+        report.obsidian_problem = "" if vault_status.ok else vault_status.detail
+    else:
+        report.obsidian_valid = False
+        report.obsidian_problem = "" if not report.obsidian_enabled else "No vault_path is set."
 
     # Apple Notes
     an_cfg = cfg.get("apple_notes", {})
@@ -1643,7 +1657,7 @@ class StatusCommand(BaseCommand):
                 )
                 print(f"Obsidian:      {green('Enabled')} -> {target}")
             else:
-                print(f"Obsidian:      {red('Vault path not found')} ({report.obsidian_vault})")
+                print(f"Obsidian:      {red('Not usable')} — {report.obsidian_problem}")
         else:
             print(f"Obsidian:      {dim('Disabled')}")
 

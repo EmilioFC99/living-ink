@@ -1306,6 +1306,46 @@ class SyncPipeline:
 
         return get_rmapi(self.settings)
 
+    def preflight_destinations(self) -> None:
+        """Refuse the run before a page is rendered if nowhere can receive it.
+
+        Two failures, and they used to look identical from the outside. A vault
+        that does not exist made ``build_destinations`` print one warning and
+        return an empty list; the run then compared every document against no
+        destinations, concluded nothing was pending, and exited 0 — reporting
+        success for having published nothing. Both are now a hard stop with the
+        reason and the remedy.
+
+        Every enabled destination is checked, not just the first to fail, so a
+        misconfigured pair is fixed in one pass rather than two runs.
+
+        Raises:
+            ConfigurationMissing: No destination is enabled, or at least one
+                cannot publish right now.
+        """
+        active = self.destinations or get_default_destinations()
+        if not active:
+            raise ConfigurationMissing(
+                "No destination is enabled, so there is nowhere to publish.",
+                hint="Enable one with 'living-ink setup', or set obsidian.vault_path.",
+            )
+
+        failures = []
+        for dest in active:
+            status = dest.check()
+            if status.ok:
+                _logger.info("%s ready: %s", dest.display_name, status.detail)
+                continue
+            failures.append(
+                status.detail if not status.remedy else f"{status.detail}\n   → {status.remedy}"
+            )
+
+        if failures:
+            raise ConfigurationMissing(
+                "A destination is not ready:\n" + "\n".join(f"❌ {f}" for f in failures),
+                hint="Run 'living-ink status' to see every destination's state.",
+            )
+
     def _learn_device(self, client: Any) -> None:
         """Identify the tablet once per run, and remember a USB reading.
 
@@ -2627,6 +2667,7 @@ class SyncPipeline:
         atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
 
         client = self.connect()
+        self.preflight_destinations()
         self._learn_device(client)
         notebooks, id_map = self.discover_documents(client)
         self._counts = (len(notebooks), 0, 0)

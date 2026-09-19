@@ -9,6 +9,7 @@ import html
 import json
 import logging
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ from PIL import Image
 from living_ink.core.document import PublishResult
 from living_ink.destinations.base import (
     Destination,
+    DestinationStatus,
     DestinationUnavailable,
     register_destination,
 )
@@ -52,6 +54,26 @@ class AppleNotesDestination(Destination):
     def describe(self) -> str:
         """Name this destination and the Apple Notes folder it writes to."""
         return f"Apple Notes (Folder: {self.folder_name})"
+
+    def check(self) -> DestinationStatus:
+        """Confirm this machine can run AppleScript at all.
+
+        Deliberately not a ``tell application "Notes"``: that launches Notes,
+        and on a first run it also raises the automation-permission dialog —
+        neither belongs in a check that only reports readiness. Whether the
+        user has granted automation access is discovered on the first publish,
+        where :class:`DestinationUnavailable` already explains it.
+
+        Returns:
+            Whether ``osascript`` exists, and what it means if it does not.
+        """
+        if shutil.which("osascript") is None:
+            return DestinationStatus(
+                ok=False,
+                detail="Apple Notes needs AppleScript, which only exists on macOS.",
+                remedy="Disable apple_notes in your config, or publish to Obsidian instead.",
+            )
+        return DestinationStatus(ok=True, detail=f"Notes folder '{self.folder_name}'.")
 
     def __init__(self, folder_name: str = "reMarkable") -> None:
         """Initialize AppleNotesDestination.

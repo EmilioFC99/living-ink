@@ -10,6 +10,7 @@ from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
     Destination,
+    DestinationStatus,
     ObsidianDestination,
     build_destinations,
     register_destination,
@@ -76,12 +77,13 @@ class TestShippedDestinations:
         assert built == []
         assert "vault_path" in capsys.readouterr().out
 
-    def test_an_unusable_vault_skips_only_that_destination(self, capsys):
+    def test_an_unusable_vault_is_built_anyway_and_fails_its_check(self):
+        """Building it is what lets preflight say which vault is wrong."""
         config = {"obsidian": {"enabled": True, "vault_path": "/nope/does/not/exist"}}
         built = build(config)
 
-        assert [type(d) for d in built] == [AppleNotesDestination]
-        assert "obsidian" in capsys.readouterr().out.lower()
+        assert [type(d) for d in built] == [AppleNotesDestination, ObsidianDestination]
+        assert built[1].check().ok is False
 
     def test_obsidian_reads_its_vault_from_the_environment(self, tmp_path):
         config = {"apple_notes": {"enabled": False}, "obsidian": {"enabled": True}}
@@ -175,6 +177,9 @@ class TestAddingADestination:
                 cls, section: Dict[str, Any], settings: Settings
             ) -> Optional[Destination]:
                 return cls(database_id=section["database_id"])
+
+            def check(self) -> DestinationStatus:
+                return DestinationStatus(ok=True, detail="ready")
 
             def publish(
                 self,

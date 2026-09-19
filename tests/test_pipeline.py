@@ -18,7 +18,13 @@ import pytest
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
 from living_ink.core.document import PublishResult
-from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
+from living_ink.destinations import (
+    AppleNotesDestination,
+    Destination,
+    DestinationError,
+    DestinationStatus,
+    ObsidianDestination,
+)
 from living_ink.pipeline import (
     LOG_PATH,
     DocumentJob,
@@ -52,6 +58,10 @@ class MockDestination(Destination):
         self.publish_target = None
         self.publish_warnings = ()
         self.publish_ok = True
+        self.ready = True
+
+    def check(self) -> DestinationStatus:
+        return DestinationStatus(ok=self.ready, detail="mock")
 
     def unpublish(self, target=None, external_id=None, doc_id=None) -> PublishResult:
         if self.unpublish_error:
@@ -1919,6 +1929,55 @@ class TestInterruptedRuns:
         assert "twice" not in capsys.readouterr().out
 
 
+class TestPreflightRefusesABadDestination:
+    """Nowhere to publish is a hard stop, not a quiet success.
+
+    A vault that did not exist used to be swallowed into one warning, leaving
+    the run to compare every document against zero destinations, report "no new
+    or updated notebooks", and exit 0.
+    """
+
+    def test_a_ready_destination_passes(self):
+        SyncPipeline(destinations=[MockDestination()]).preflight_destinations()
+
+    def test_no_destinations_at_all_is_refused(self):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.destinations = []
+
+        with patch("living_ink.pipeline.get_default_destinations", return_value=[]):
+            with pytest.raises(ConfigurationMissing, match="nowhere to publish"):
+                pipe.preflight_destinations()
+
+    def test_a_failing_check_stops_the_run_before_any_page_is_rendered(self):
+        dest = MockDestination()
+        dest.ready = False
+
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            SyncPipeline(destinations=[dest]).preflight_destinations()
+        assert "mock" in str(excinfo.value)
+
+    def test_every_destination_is_checked_not_just_the_first_to_fail(self):
+        """Two misconfigured destinations should cost one run, not two."""
+        first, second = MockDestination("one"), MockDestination("two")
+        first.ready = second.ready = False
+        checked = []
+        for dest in (first, second):
+            original = dest.check
+            dest.check = lambda d=dest, o=original: (checked.append(d.name), o())[1]
+
+        with pytest.raises(ConfigurationMissing):
+            SyncPipeline(destinations=[first, second]).preflight_destinations()
+        assert checked == ["one", "two"]
+
+    def test_the_remedy_is_shown_alongside_the_reason(self, tmp_path):
+        dest = ObsidianDestination(vault_path=str(tmp_path / "gone"))
+
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            SyncPipeline(destinations=[dest]).preflight_destinations()
+        assert "does not exist" in str(excinfo.value)
+        assert "LIVING_INK_OBSIDIAN_VAULT_PATH" in str(excinfo.value)
+
+
 class TestProgressIsRecordedPerNotebook:
     """A run interrupted mid-loop has still published what it published."""
 
@@ -1937,6 +1996,7 @@ class TestProgressIsRecordedPerNotebook:
 
         monkeypatch.setattr(pipe, "process_notebook_item", process)
         monkeypatch.setattr(pipe, "connect", lambda: object())
+        monkeypatch.setattr(pipe, "preflight_destinations", lambda: None)
         monkeypatch.setattr(pipe, "_learn_device", lambda client: None)
         monkeypatch.setattr(pipe, "discover_documents", lambda c: (["a", "bad", "c"], {}))
         monkeypatch.setattr(pipe, "_handle_orphans", lambda id_map: None)

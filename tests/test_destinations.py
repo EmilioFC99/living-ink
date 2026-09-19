@@ -18,6 +18,7 @@ from living_ink.destinations import (
     AppleNotesDestination,
     Destination,
     DestinationError,
+    DestinationStatus,
     DestinationUnavailable,
     ObsidianDestination,
 )
@@ -48,6 +49,9 @@ class TestDestinationABC:
         """A complete subclass can be instantiated and called."""
 
         class Complete(Destination):
+            def check(self):
+                return DestinationStatus(ok=True, detail="ready")
+
             def publish(self, notebook_name, text_content, image_paths, sub_folder=None):
                 return PublishResult(ok=True)
 
@@ -71,11 +75,12 @@ class TestObsidianDestinationInit:
         assert dest.root_folder == ""
         assert dest.mirror_folders is True
 
-    def test_nonexistent_vault_path_raises(self, tmp_path):
-        """Non-existent vault path raises ValueError."""
+    def test_a_nonexistent_vault_still_constructs(self, tmp_path):
+        """It used to raise, and the run then exited 0 having published nothing."""
         nonexistent = tmp_path / "does_not_exist"
-        with pytest.raises(ValueError, match="does not exist"):
-            ObsidianDestination(vault_path=str(nonexistent))
+        dest = ObsidianDestination(vault_path=str(nonexistent))
+
+        assert dest.vault_path == nonexistent.resolve()
 
     def test_custom_options(self, tmp_path):
         """Custom configuration options are stored properly."""
@@ -879,6 +884,9 @@ class TestUnpublishDefault:
             def from_config(cls, section, settings):
                 return cls()
 
+            def check(self):
+                return DestinationStatus(ok=True, detail="ready")
+
             def publish(self, notebook_name, text_content, image_paths, **kwargs):
                 return PublishResult(ok=True)
 
@@ -943,3 +951,37 @@ class TestObsidianNoteDates:
         self._dest(tmp_path).publish("Notes", "body", [], document_modified="2026-03-04")
         written = self._front(tmp_path)
         assert all(key in written for key in ("created:", "updated:", "synced:"))
+
+
+class TestObsidianCheck:
+    """A bad vault is reported by check(), never by a constructor."""
+
+    def test_a_writable_vault_is_ready(self, tmp_path):
+        assert ObsidianDestination(vault_path=str(tmp_path)).check().ok is True
+
+    def test_a_missing_vault_names_itself_and_the_remedy(self, tmp_path):
+        missing = tmp_path / "gone"
+        status = ObsidianDestination(vault_path=str(missing)).check()
+
+        assert status.ok is False
+        assert str(missing) in status.detail
+        assert "vault_path" in (status.remedy or "").lower() or "path" in (status.remedy or "")
+
+    def test_a_file_where_the_vault_should_be_is_its_own_failure(self, tmp_path):
+        """An unmounted drive and a typo'd path need different answers."""
+        not_a_vault = tmp_path / "vault.md"
+        not_a_vault.write_text("hello", encoding="utf-8")
+        status = ObsidianDestination(vault_path=str(not_a_vault)).check()
+
+        assert status.ok is False
+        assert "folder" in status.detail
+
+    def test_a_read_only_vault_is_caught_before_the_run(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir(mode=0o500)
+        try:
+            status = ObsidianDestination(vault_path=str(vault)).check()
+            assert status.ok is False
+            assert "writable" in status.detail
+        finally:
+            vault.chmod(0o700)

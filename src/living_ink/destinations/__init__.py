@@ -24,6 +24,7 @@ from living_ink.destinations.base import (
     DESTINATION_REGISTRY,
     Destination,
     DestinationError,
+    DestinationStatus,
     DestinationUnavailable,
     register_destination,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "AppleNotesDestination",
     "Destination",
     "DestinationError",
+    "DestinationStatus",
     "DestinationUnavailable",
     "ObsidianDestination",
     "build_destinations",

@@ -7,6 +7,7 @@ the user has also written in.
 
 import datetime
 import logging
+import os
 import re
 import shutil
 from pathlib import Path
@@ -17,6 +18,7 @@ from living_ink.core.document import PublishResult
 from living_ink.destinations.base import (
     Destination,
     DestinationError,
+    DestinationStatus,
     register_destination,
 )
 from living_ink.safeio import write_text_atomic
@@ -74,6 +76,39 @@ class ObsidianDestination(Destination):
         root = f" (Root: {self.root_folder})" if self.root_folder else ""
         return f"Obsidian (Vault: {self.vault_path}{root})"
 
+    def check(self) -> DestinationStatus:
+        """Confirm the vault is a directory this process can write into.
+
+        Three separate failures, because the remedy differs: the path is not
+        there, the path is a file, or the path is read-only. A vault on an
+        unmounted drive is the common one and looks like the first.
+
+        Returns:
+            Whether notes can be written, and what to fix if not.
+        """
+        if not self.vault_path.exists():
+            return DestinationStatus(
+                ok=False,
+                detail=f"The Obsidian vault '{self.vault_path}' does not exist.",
+                remedy=(
+                    "Check the path, or mount the drive it lives on, then set it with "
+                    "'living-ink config' or LIVING_INK_OBSIDIAN_VAULT_PATH."
+                ),
+            )
+        if not self.vault_path.is_dir():
+            return DestinationStatus(
+                ok=False,
+                detail=f"The Obsidian vault '{self.vault_path}' is a file, not a folder.",
+                remedy="Point vault_path at the vault folder itself.",
+            )
+        if not os.access(self.vault_path, os.W_OK):
+            return DestinationStatus(
+                ok=False,
+                detail=f"The Obsidian vault '{self.vault_path}' is not writable.",
+                remedy="Grant write access to the vault folder, or choose another vault.",
+            )
+        return DestinationStatus(ok=True, detail=f"Vault '{self.vault_path}' is writable.")
+
     def __init__(
         self,
         vault_path: str,
@@ -96,12 +131,14 @@ class ObsidianDestination(Destination):
                 are placed flat directly inside the vault/root_folder.
                 Defaults to True.
 
-        Raises:
-            ValueError: If ``vault_path`` does not exist on disk.
+        Note:
+            A vault that does not exist is not an error here. Construction
+            never validates; :meth:`check` reports, and preflight refuses the
+            run. Raising here meant ``build_destinations`` caught it, printed a
+            warning, and left the run with nothing to publish to and no way to
+            tell that apart from having nothing to publish.
         """
         self.vault_path = Path(vault_path).expanduser().resolve()
-        if not self.vault_path.exists():
-            raise ValueError(f"Obsidian Vault path does not exist: {self.vault_path}")
         self.attachments_folder = attachments_folder.strip() if attachments_folder else ""
         self.root_folder = root_folder.strip() if root_folder else ""
         self.mirror_folders = mirror_folders
