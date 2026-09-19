@@ -17,7 +17,15 @@ import pytest
 
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
-from living_ink.destinations import AppleNotesDestination, Destination, DestinationError
+from living_ink.core.document import PublishResult
+from living_ink.destinations import (
+    AppleNotesDestination,
+    Destination,
+    DestinationError,
+    DestinationStatus,
+    MergeUnit,
+    ObsidianDestination,
+)
 from living_ink.pipeline import (
     LOG_PATH,
     DocumentJob,
@@ -39,18 +47,28 @@ from living_ink.settings import Settings
 class MockDestination(Destination):
     """Mock destination for testing."""
 
+    state_key = "MockDestination"
+    display_name = "MockDestination"
+
     def __init__(self, name: str = "Mock"):
         self.name = name
         self.published = []
         self.unpublished = []
         self.unpublish_result = True
         self.unpublish_error = None
+        self.publish_target = None
+        self.publish_warnings = ()
+        self.publish_ok = True
+        self.ready = True
 
-    def unpublish(self, target=None, external_id=None, doc_id=None) -> bool:
+    def check(self) -> DestinationStatus:
+        return DestinationStatus(ok=self.ready, detail="mock")
+
+    def unpublish(self, target=None, external_id=None, doc_id=None) -> PublishResult:
         if self.unpublish_error:
             raise self.unpublish_error
         self.unpublished.append((target, external_id, doc_id))
-        return self.unpublish_result
+        return PublishResult(ok=self.unpublish_result, target=target)
 
     def publish(
         self,
@@ -58,7 +76,7 @@ class MockDestination(Destination):
         text_content: str,
         image_paths: list,
         **kwargs,
-    ) -> bool:
+    ) -> PublishResult:
         # Recorded as passed rather than named one by one, so a new argument on
         # the contract does not need this double edited to keep the suite green.
         self.published.append(
@@ -69,7 +87,9 @@ class MockDestination(Destination):
                 **kwargs,
             }
         )
-        return True
+        return PublishResult(
+            ok=self.publish_ok, target=self.publish_target, warnings=self.publish_warnings
+        )
 
 
 class TestSyncOptions:
@@ -202,7 +222,7 @@ def test_sync_pipeline_filter_pending_documents_limit():
 
 def test_sync_pipeline_run_no_notebooks():
     """SyncPipeline.run returns True gracefully when no items need updating."""
-    pipeline = SyncPipeline(destinations=[])
+    pipeline = SyncPipeline(destinations=[MockDestination()])
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
@@ -214,7 +234,9 @@ def test_sync_pipeline_run_no_notebooks():
 
 def test_sync_pipeline_run_targeted_not_found():
     """SyncPipeline.run returns False when a targeted notebook is not in the library."""
-    pipeline = SyncPipeline(SyncOptions(notebook="NonExistentBook"), destinations=[])
+    pipeline = SyncPipeline(
+        SyncOptions(notebook="NonExistentBook"), destinations=[MockDestination()]
+    )
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
@@ -233,7 +255,7 @@ def test_sync_pipeline_run_targeted_user_cancelled():
         "hash": "h1",
     }
     id_map = {"doc-123": doc_item}
-    pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[])
+    pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect"):
@@ -539,6 +561,26 @@ class TestDryRun:
 
         assert "Dry run" in out
         assert str(job.clean_out_txt) in out
+
+    def test_it_says_how_much_of_an_existing_note_would_be_rewritten(self, tmp_path, capsys):
+        """The whole-note promise is what a user needs before the run, not after."""
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert "Replaces the whole note" in capsys.readouterr().out
+
+    def test_a_page_level_destination_promises_something_different(self, tmp_path, capsys):
+        dest = MockDestination("MockDest")
+        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+
+        with patch.object(type(dest), "merge_unit", MergeUnit.PAGE):
+            pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        out = capsys.readouterr().out
+        assert "only the pages that changed" in out
+        assert "whole note" not in out
 
     def test_a_normal_run_still_publishes(self, tmp_path):
         dest = MockDestination("MockDest")
@@ -1595,9 +1637,36 @@ class TestPublicationIdentity:
 
         assert dest.published[0]["doc_id"] == "nb-1"
 
+    def test_a_destinations_warning_reaches_the_run_summary(self, tmp_path):
+        """A log line scrolls past; the summary is the last thing on screen."""
+        dest = MockDestination("MockDest")
+        dest.publish_warnings = ("Notes (2).md belongs to another document.",)
+        pipe = SyncPipeline(destinations=[dest])
+        pipe.report = RunReport()
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert pipe.report.warnings == [
+            "MockDestination: Notes (2).md belongs to another document."
+        ]
+
+    def test_a_warning_from_a_failed_publish_is_still_reported(self, tmp_path):
+        """The run that went wrong is the one whose warnings matter most."""
+        dest = MockDestination("MockDest")
+        dest.publish_warnings = ("The vault is read-only.",)
+        dest.publish_ok = False
+        pipe = SyncPipeline(destinations=[dest])
+        pipe.report = RunReport()
+
+        with patch("living_ink.pipeline.add_to_processed_log"):
+            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        assert pipe.report.warnings == ["MockDestination: The vault is read-only."]
+
     def test_where_the_note_landed_is_recorded(self, tmp_path):
         dest = MockDestination("MockDest")
-        dest.last_target = "Work/Notes.md"
+        dest.publish_target = "Work/Notes.md"
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
@@ -1639,6 +1708,7 @@ class TestOrphanedNotebooks:
         pipe.dry_run = dry_run
         pipe.prune = prune
         pipe.destinations = [dest]
+        pipe.report = None
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):
@@ -1882,6 +1952,55 @@ class TestInterruptedRuns:
         assert "twice" not in capsys.readouterr().out
 
 
+class TestPreflightRefusesABadDestination:
+    """Nowhere to publish is a hard stop, not a quiet success.
+
+    A vault that did not exist used to be swallowed into one warning, leaving
+    the run to compare every document against zero destinations, report "no new
+    or updated notebooks", and exit 0.
+    """
+
+    def test_a_ready_destination_passes(self):
+        SyncPipeline(destinations=[MockDestination()]).preflight_destinations()
+
+    def test_no_destinations_at_all_is_refused(self):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.destinations = []
+
+        with patch("living_ink.pipeline.get_default_destinations", return_value=[]):
+            with pytest.raises(ConfigurationMissing, match="nowhere to publish"):
+                pipe.preflight_destinations()
+
+    def test_a_failing_check_stops_the_run_before_any_page_is_rendered(self):
+        dest = MockDestination()
+        dest.ready = False
+
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            SyncPipeline(destinations=[dest]).preflight_destinations()
+        assert "mock" in str(excinfo.value)
+
+    def test_every_destination_is_checked_not_just_the_first_to_fail(self):
+        """Two misconfigured destinations should cost one run, not two."""
+        first, second = MockDestination("one"), MockDestination("two")
+        first.ready = second.ready = False
+        checked = []
+        for dest in (first, second):
+            original = dest.check
+            dest.check = lambda d=dest, o=original: (checked.append(d.name), o())[1]
+
+        with pytest.raises(ConfigurationMissing):
+            SyncPipeline(destinations=[first, second]).preflight_destinations()
+        assert checked == ["one", "two"]
+
+    def test_the_remedy_is_shown_alongside_the_reason(self, tmp_path):
+        dest = ObsidianDestination(vault_path=str(tmp_path / "gone"))
+
+        with pytest.raises(ConfigurationMissing) as excinfo:
+            SyncPipeline(destinations=[dest]).preflight_destinations()
+        assert "does not exist" in str(excinfo.value)
+        assert "LIVING_INK_OBSIDIAN_VAULT_PATH" in str(excinfo.value)
+
+
 class TestProgressIsRecordedPerNotebook:
     """A run interrupted mid-loop has still published what it published."""
 
@@ -1900,6 +2019,7 @@ class TestProgressIsRecordedPerNotebook:
 
         monkeypatch.setattr(pipe, "process_notebook_item", process)
         monkeypatch.setattr(pipe, "connect", lambda: object())
+        monkeypatch.setattr(pipe, "preflight_destinations", lambda: None)
         monkeypatch.setattr(pipe, "_learn_device", lambda client: None)
         monkeypatch.setattr(pipe, "discover_documents", lambda c: (["a", "bad", "c"], {}))
         monkeypatch.setattr(pipe, "_handle_orphans", lambda id_map: None)

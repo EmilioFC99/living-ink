@@ -533,6 +533,26 @@ class TestStatusSettingsReport:
         ):
             return collect_status(tmp)
 
+    def test_an_unusable_vault_is_reported_by_the_destinations_own_check(self, tmp_path):
+        """One implementation of "is this vault usable", not two that drift."""
+        report = self._report(f"obsidian:\n  enabled: true\n  vault_path: {tmp_path / 'gone'}\n")
+
+        assert report.obsidian_valid is False
+        assert "does not exist" in report.obsidian_problem
+        assert report.to_dict()["obsidian"]["problem"] == report.obsidian_problem
+
+    def test_a_good_vault_reports_no_problem(self, tmp_path):
+        report = self._report(f"obsidian:\n  enabled: true\n  vault_path: {tmp_path}\n")
+
+        assert report.obsidian_valid is True
+        assert report.obsidian_problem == ""
+
+    def test_an_enabled_obsidian_with_no_vault_says_so(self):
+        report = self._report("obsidian:\n  enabled: true\n")
+
+        assert report.obsidian_valid is False
+        assert "vault_path" in report.obsidian_problem
+
     def test_the_report_carries_resolved_settings(self):
         report = self._report("sync:\n  ocr_concurrency: 7\n")
 

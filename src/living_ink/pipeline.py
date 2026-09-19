@@ -37,11 +37,13 @@ from living_ink.config import (
     split_problems,
     validate_config,
 )
+from living_ink.core.document import PublishResult
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     AppleNotesDestination,
     Destination,
     DestinationError,
+    MergeUnit,
     build_destinations,
 )
 from living_ink.devices import default_reading
@@ -1305,6 +1307,46 @@ class SyncPipeline:
 
         return get_rmapi(self.settings)
 
+    def preflight_destinations(self) -> None:
+        """Refuse the run before a page is rendered if nowhere can receive it.
+
+        Two failures, and they used to look identical from the outside. A vault
+        that does not exist made ``build_destinations`` print one warning and
+        return an empty list; the run then compared every document against no
+        destinations, concluded nothing was pending, and exited 0 — reporting
+        success for having published nothing. Both are now a hard stop with the
+        reason and the remedy.
+
+        Every enabled destination is checked, not just the first to fail, so a
+        misconfigured pair is fixed in one pass rather than two runs.
+
+        Raises:
+            ConfigurationMissing: No destination is enabled, or at least one
+                cannot publish right now.
+        """
+        active = self.destinations or get_default_destinations()
+        if not active:
+            raise ConfigurationMissing(
+                "No destination is enabled, so there is nowhere to publish.",
+                hint="Enable one with 'living-ink setup', or set obsidian.vault_path.",
+            )
+
+        failures = []
+        for dest in active:
+            status = dest.check()
+            if status.ok:
+                _logger.info("%s ready: %s", dest.display_name, status.detail)
+                continue
+            failures.append(
+                status.detail if not status.remedy else f"{status.detail}\n   → {status.remedy}"
+            )
+
+        if failures:
+            raise ConfigurationMissing(
+                "A destination is not ready:\n" + "\n".join(f"❌ {f}" for f in failures),
+                hint="Run 'living-ink status' to see every destination's state.",
+            )
+
     def _learn_device(self, client: Any) -> None:
         """Identify the tablet once per run, and remember a USB reading.
 
@@ -1423,7 +1465,7 @@ class SyncPipeline:
             Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
         """
         active_dests = self.destinations or get_default_destinations()
-        by_name = {type(dest).__name__: dest for dest in active_dests}
+        by_name = {dest.state_key: dest for dest in active_dests}
 
         listing = []
         for item in notebooks:
@@ -2297,20 +2339,24 @@ class SyncPipeline:
 
             all_success = True
             for dest in targets:
-                if self._publish_to(dest, job, clean_text):
-                    job.published_to.append(type(dest).__name__)
+                result = self._publish_to(dest, job, clean_text)
+                self._report_destination_warnings(dest, result)
+                if result.ok:
+                    job.published_to.append(dest.state_key)
+                    if result.detail:
+                        log(f"   {result.detail}")
                     # Update state for THIS destination immediately.
                     add_to_processed_log(
-                        type(dest).__name__,
+                        dest.state_key,
                         job.notebook_id,
                         job.version,
                         run_id=self.run_id,
-                        external_id=dest.last_external_id,
-                        target=dest.last_target,
+                        external_id=result.external_id,
+                        target=result.target,
                     )
                 else:
                     all_success = False
-                    log(f"⚠️ Failed to publish to {type(dest).__name__}")
+                    log(f"⚠️ Failed to publish to {dest.display_name}")
 
             return all_success
         except Exception as e:
@@ -2329,12 +2375,17 @@ class SyncPipeline:
         Nothing is sent and no processed-log entry is written, so the same
         notebook is still pending afterwards and a later real run picks it up.
 
+        Each destination also says how much of an existing note it would
+        rewrite. "The whole note is replaced" is the fact a user needs before
+        the run rather than after, and it is read from
+        :attr:`Destination.merge_unit` rather than inferred from a class name.
+
         Args:
             job: The processed job.
             targets: The destinations a real run would have published to.
         """
         log(f"🔍 Dry run — not publishing '{job.display_title}'.")
-        job.would_publish_to = [type(dest).__name__ for dest in targets]
+        job.would_publish_to = [dest.state_key for dest in targets]
         for dest in targets:
             sub_folder = (
                 job.top_level_subfolder()
@@ -2343,13 +2394,33 @@ class SyncPipeline:
             )
             where = f" under '{sub_folder}'" if sub_folder else ""
             log(f"   Would publish to {dest.describe()}{where}")
+            if dest.merge_unit is MergeUnit.DOCUMENT:
+                log("      Replaces the whole note, including anything you added to it.")
+            else:
+                log("      Replaces only the pages that changed; your own text is kept.")
         log(f"   Transcript: {job.clean_out_txt}")
         if job.imgs:
             log(f"   {len(job.imgs)} page image(s) in {WHITE_DIR}")
         if job.tags:
             log(f"   Tags: {job.tags}")
 
-    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> bool:
+    def _report_destination_warnings(self, dest: Destination, result: PublishResult) -> None:
+        """Put a destination's warnings where the log lines cannot scroll past them.
+
+        A destination reports what the user has to fix by hand — a note it
+        stepped around, an attachment it could not copy — and the run summary
+        is the only place that survives a long run.
+
+        Args:
+            dest: The destination that produced the result.
+            result: What it returned.
+        """
+        if self.report is None:
+            return
+        for warning in result.warnings:
+            self.report.warn(f"{dest.display_name}: {warning}")
+
+    def _publish_to(self, dest: Destination, job: DocumentJob, clean_text: str) -> PublishResult:
         """Publish one note to one destination.
 
         A DestinationError is an expected, user-actionable failure (vault gone,
@@ -2363,9 +2434,10 @@ class SyncPipeline:
             clean_text: The note body.
 
         Returns:
-            True if the destination accepted the note.
+            What the destination reported, or a refusal carrying the reason it
+            could not be asked.
         """
-        dest_name = type(dest).__name__
+        dest_name = dest.display_name
         log(f"Publishing to {dest_name}...")
 
         # Apple Notes only supports 1 level of sub-folder under rootFolder.
@@ -2378,7 +2450,10 @@ class SyncPipeline:
 
         # What this destination called the note last time, so it can replace
         # exactly that one instead of deleting whatever shares the title.
-        previous = get_state_store().get_publication(job.notebook_id, dest_name)
+        # Keyed by state_key, never by the display name: the row was written
+        # under the former, and a lookup under the latter silently finds
+        # nothing, which reads as "never published" and duplicates the note.
+        previous = get_state_store().get_publication(job.notebook_id, dest.state_key)
         existing_id = previous["external_id"] if previous else None
         # Where it landed last time. A notebook renamed or moved on the tablet
         # is the same note in a new place, not a second note.
@@ -2406,7 +2481,7 @@ class SyncPipeline:
             )
         except DestinationError as e:
             log(f"⚠️ {dest_name}: {e}")
-            return False
+            return PublishResult(ok=False, detail=str(e))
         except Exception:
             # Deliberately broad, and the message says so: a destination is
             # contracted to raise DestinationError, so anything else reaching
@@ -2416,7 +2491,7 @@ class SyncPipeline:
 
             log(f"❌ Unexpected error publishing to {dest_name} — this is a bug:")
             log(traceback.format_exc())
-            return False
+            return PublishResult(ok=False, detail="Unexpected error; see the log.")
 
         return published
 
@@ -2487,9 +2562,9 @@ class SyncPipeline:
 
         Args:
             doc_id: reMarkable document id.
-            rows: Its publication rows, keyed by destination class name.
+            rows: Its publication rows, keyed by destination state key.
         """
-        by_name = {type(d).__name__: d for d in (self.destinations or get_default_destinations())}
+        by_name = {d.state_key: d for d in (self.destinations or get_default_destinations())}
         label = self._orphan_label(doc_id)
 
         for dest_name, row in rows.items():
@@ -2498,15 +2573,17 @@ class SyncPipeline:
                 log(f"  {label}: {dest_name} is not configured; its note was left alone.")
                 continue
             try:
-                removed = dest.unpublish(
+                result = dest.unpublish(
                     target=row.get("target"),
                     external_id=row.get("external_id"),
                     doc_id=doc_id,
                 )
             except DestinationError as e:
-                log(f"  ⚠️ {dest_name}: {e}")
+                log(f"  ⚠️ {dest.display_name}: {e}")
                 continue
-            log(f"  {label}: {'deleted from' if removed else 'left alone in'} {dest_name}.")
+            self._report_destination_warnings(dest, result)
+            verb = "deleted from" if result.ok else "left alone in"
+            log(f"  {label}: {verb} {dest.display_name}.")
 
         try:
             get_state_store().forget(doc_id)
@@ -2603,6 +2680,7 @@ class SyncPipeline:
         atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
 
         client = self.connect()
+        self.preflight_destinations()
         self._learn_device(client)
         notebooks, id_map = self.discover_documents(client)
         self._counts = (len(notebooks), 0, 0)
