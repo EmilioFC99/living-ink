@@ -1087,14 +1087,12 @@ class TestSyncStatusFlag:
         assert "very long title" not in line
 
     def test_the_summary_counts_each_status(self, capsys):
-
         rows = self._rows(2) + self._rows(1, status=STATUS_UP_TO_DATE)
         _, out = self._show(capsys, rows)
         assert "2  new" in out
         assert "1  up to date" in out
 
     def test_outstanding_work_is_listed_before_settled_work(self, capsys):
-
         settled = self._rows(1, status=STATUS_UP_TO_DATE)
         settled[0]["name"] = "Settled"
         _, out = self._show(capsys, settled + self._rows(1))
@@ -1123,7 +1121,6 @@ class TestSyncStatusFlag:
         assert "Nothing on the tablet" in out
 
     def test_nothing_pending_says_everything_is_up_to_date(self, capsys):
-
         _, out = self._show(capsys, self._rows(2, status=STATUS_UP_TO_DATE))
         assert "Everything is up to date." in out
 
