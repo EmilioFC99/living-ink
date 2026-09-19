@@ -1005,8 +1005,8 @@ class TestCacheCommand:
         assert "0 page(s)" in out
 
     def test_the_summary_counts_the_entries(self, cache, capsys):
-        cache.put("aa", "raw", "clean")
-        cache.put("bb", "raw", "clean")
+        cache.put("aa", "text")
+        cache.put("bb", "text")
         _, out = self._run(capsys)
         assert "2 page(s)" in out
 
@@ -1029,26 +1029,26 @@ class TestCacheCommand:
         assert "rendered page" in out
 
     def test_json_reports_the_same_numbers(self, cache, capsys):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         _, out = self._run(capsys, json=True)
         payload = json.loads(out)["transcribed page"]
         assert payload["entries"] == 1
         assert payload["size_bytes"] > 0
 
     def test_clearing_removes_everything(self, cache, capsys):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         code, out = self._run(capsys, clear=True)
         assert code == 0
         assert "1 cached transcribed page(s)" in out
         assert cache.stats() == (0, 0)
 
     def test_clearing_warns_that_the_pages_will_be_paid_for_again(self, cache, capsys):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         _, out = self._run(capsys, clear=True)
         assert "paid for" in out
 
     def test_pruning_keeps_fresh_entries(self, cache, capsys):
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         _, out = self._run(capsys, prune=30)
         assert "0 cached transcribed page(s)" in out
         assert cache.get("aa") is not None
@@ -1057,7 +1057,7 @@ class TestCacheCommand:
         import os
         import time
 
-        cache.put("aa", "raw", "clean")
+        cache.put("aa", "text")
         old = time.time() - 200 * 86400
         os.utime(cache._path_for("aa"), (old, old))
 

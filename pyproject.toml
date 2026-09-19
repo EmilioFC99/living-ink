@@ -38,11 +38,6 @@ dev = [
     "pytest-asyncio>=1.0.0",
     "ruff>=0.1.0",
 ]
-# Optional fallback OCR backend. Without it the pipeline uses AI vision OCR;
-# see pipeline.vision_ocr_image_service_account(), which degrades gracefully.
-ocr = [
-    "google-cloud-vision>=3.11.0",
-]
 
 [project.scripts]
 living-ink = "living_ink.cli:main"

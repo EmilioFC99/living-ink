@@ -88,8 +88,19 @@ class TestConfigSchema:
         assert validate_config({"sync": None}) == []
 
     def test_an_empty_value_is_valid(self):
-        """The wizard writes ``credentials_path:`` blank; that is not a type error."""
+        """An older wizard wrote ``credentials_path:`` blank; not a type error."""
         assert validate_config({"google_vision": {"credentials_path": None}}) == []
+
+    def test_a_section_this_build_no_longer_reads_still_loads(self):
+        """The second OCR backend is gone; the configs naming it are not.
+
+        Every config the wizard has ever written carries ``google_vision:``.
+        Dropping it from the schema the same day the code stopped reading it
+        would turn "this setting does nothing now" into "your config does not
+        load" for every existing install. It keeps validating until the
+        deprecation mechanism can say so properly.
+        """
+        assert validate_config({"google_vision": {"credentials_path": "/tmp/creds.json"}}) == []
 
     def test_the_legacy_destination_block_is_not_policed(self):
         """Its keys belong to whichever destination it names, not to this schema."""

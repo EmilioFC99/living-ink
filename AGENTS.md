@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to digital note apps (**Apple Notes** and **Obsidian**). It pulls documents over USB SSH or reMarkable Cloud, renders `.rm` pages to PNG, transcribes them with a multimodal LLM (with Google Cloud Vision as an optional fallback), and publishes structured notes to every configured destination.
+**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to digital note apps (**Apple Notes** and **Obsidian**). It pulls documents over USB SSH or reMarkable Cloud, renders `.rm` pages to PNG, transcribes them with a multimodal LLM, and publishes structured notes to every configured destination.
 
 - **Language**: Python 3.10+
 - **Package manager**: [uv](https://docs.astral.sh/uv/) — never raw `pip`
@@ -29,7 +29,7 @@ living-ink/
 │   ├── sync.py              # Cloud sync protocol (v3/v4)
 │   ├── ssh.py               # USB SSH transport (10.11.99.1)
 │   ├── extract.py           # .rm → SVG → PNG, PDF/EPUB handling
-│   ├── clean.py             # Vision OCR and text repair entry points
+│   ├── clean.py             # AI vision OCR and text repair entry points
 │   ├── providers.py         # AI provider presets + provider registry
 │   ├── destinations.py      # Destination ABC + destination registry
 │   ├── setup_wizard.py      # Interactive onboarding
@@ -53,9 +53,7 @@ Download document zip
     ↓
 Render pages: .rm → SVG → PNG (white background); PDFs composite annotations
     ↓
-Transcribe:
-    ├── AI vision OCR (default — reads handwriting and cleans in one call)
-    └── Google Cloud Vision → AI text repair (optional fallback)
+Transcribe: AI vision OCR (one multimodal call reads the page and cleans it)
     ↓
 Publish via Destination.publish()
     ├── AppleNotesDestination (AppleScript, one folder level)
@@ -80,7 +78,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 ## Things that will bite you
 
-- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env vars are the ones third-party SDKs read themselves (`OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`).
+- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env var is the one a third-party SDK reads itself (`OPENAI_API_KEY`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
 - **Secrets live beside `config.yml`, never in it.** `living_ink.config.credentials` stores one file per credential under `<config dir>/credentials/`, atomically at `0600`, registered with `redact` on every read and write. The directory is derived from the resolved config path, so a second profile gets its own secrets. The name carries the provider (`ai.api_key.<provider>`, composed only by `ai_key_name()`) so switching AI providers and back does not destroy a key; `_VALID_NAME` restricts a name rather than escaping it, because it is also a filename. `migrate_secret()` copies from the old locations (`config.yml`, `~/.rmapi`) and never deletes them, so a downgrade does not force re-pairing. Anything rendering a key uses `credentials.mask()`.
@@ -101,7 +99,6 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 | credentials | `ai.api_key.<provider>` | LLM API key, one file per provider |
 | credentials | `remarkable.cloud_token` | reMarkable Cloud auth token |
 | credentials | `remarkable.ssh_password` | SSH password, when the tablet has one |
-| `config.yml` | `google_vision.credentials_path` | Google Cloud Vision service account |
 | `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
 | `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |

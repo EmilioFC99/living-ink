@@ -629,15 +629,11 @@ def generate_config_yaml(
             },
         ),
         (
-            "3. Google Cloud Vision (OPTIONAL — Not needed when using Gemini or OpenAI)",
-            {"google_vision": {"credentials_path": ""}},
-        ),
-        (
-            "4. Sync Settings",
+            "3. Sync Settings",
             {"sync": {"max_notebooks_per_run": max_notebooks_per_run}},
         ),
         (
-            "5. Obsidian Destination",
+            "4. Obsidian Destination",
             {
                 "obsidian": {
                     "enabled": obsidian_enabled,
@@ -649,7 +645,7 @@ def generate_config_yaml(
             },
         ),
         (
-            "6. Apple Notes Destination",
+            "5. Apple Notes Destination",
             {
                 "apple_notes": {
                     "enabled": apple_notes_enabled,
