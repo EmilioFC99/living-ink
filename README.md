@@ -44,9 +44,15 @@ Once installed, you can use the global `living-ink` command from anywhere:
 ```bash
 living-ink           # Sync notes (or runs setup if unconfigured)
 living-ink sync      # Run the sync pipeline
+living-ink watch     # Keep syncing on a schedule until you stop it
 living-ink setup     # Re-run interactive setup wizard
 living-ink info      # Check tablet, AI, vault, caches, and sync state
+living-ink config    # Change any setting, edit the prompts, clear the caches
 ```
+
+`info` reads; `config` writes. Every setting `info` prints appears in the `config`
+menu under the same name, nothing is written until you confirm the summary, and
+your API keys stay out of `config.yml` — they live in a `0600` file of their own.
 
 ---
 
