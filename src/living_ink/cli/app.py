@@ -19,12 +19,48 @@ from living_ink.cli.commands.status import StatusCommand
 from living_ink.cli.commands.sync import SyncCommand
 from living_ink.cli.commands.watch import WatchCommand
 from living_ink.cli.flags import register_global_flags
-from living_ink.config import get_config_path
+from living_ink.config import get_config_path, read_config_file
+from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-def configure_logging(args: argparse.Namespace) -> None:
+def resolve_output_settings(args: argparse.Namespace, root: Optional[Path] = None) -> Settings:
+    """Work out how loud this run should be, from every layer that has a say.
+
+    ``output.verbosity`` is an ordinary setting, so ``--quiet`` is the top
+    layer of a ladder and not the whole of it: a config file that says
+    ``verbosity: quiet`` and an exported ``LIVING_INK_VERBOSITY`` have to be
+    honoured by a bare ``living-ink sync`` too. Reading only the flag made the
+    key inert — declared, documented, reported by ``status``, and ignored.
+
+    Args:
+        args: Parsed arguments. Read with ``getattr`` defaults: this runs
+            before dispatch, for every command, including ones with no output
+            flags at all.
+        root: Project root, for pinning config lookup in tests.
+
+    Returns:
+        The resolved settings. A config that cannot be parsed resolves from
+        the flags and the environment alone — the command about to run reports
+        the parse error properly, and this is the one caller that cannot,
+        because logging is what it is about to configure.
+    """
+    flags = {
+        field: getattr(args, field, None)
+        for field in ("verbosity", "output_json")
+        if getattr(args, field, None) is not None
+    }
+    config_path = get_config_path(root)
+    try:
+        raw = read_config_file(config_path)
+    except Exception:
+        logger.debug("Could not read %s while configuring logging", config_path, exc_info=True)
+        raw = {}
+    return Settings.resolve(raw, flags=flags, config_path=config_path)
+
+
+def configure_logging(args: argparse.Namespace, root: Optional[Path] = None) -> None:
     """Install the package log handlers for this invocation.
 
     Done once here rather than per command, so the modules that know most
@@ -34,15 +70,19 @@ def configure_logging(args: argparse.Namespace) -> None:
     Args:
         args: Parsed arguments; ``--verbose`` and ``--quiet`` arrive as the
             one ``verbosity`` value they both set.
+        root: Project root, forwarded to the config lookup.
     """
     from living_ink import logs
 
-    verbosity = getattr(args, "verbosity", None)
+    settings = resolve_output_settings(args, root)
     logs.configure(
         logs.LOG_PATH,
-        verbose=verbosity == "verbose",
-        quiet=verbosity == "quiet",
-        json_output=getattr(args, "output_json", False) or getattr(args, "json", False),
+        verbose=settings.verbosity == "verbose",
+        quiet=settings.verbosity == "quiet",
+        # ``status``, ``state`` and ``cache`` register a ``--json`` of their
+        # own, with no setting behind it, because they print a document rather
+        # than a run report. It keeps stdout clean the same way.
+        json_output=settings.output_json or getattr(args, "json", False),
     )
 
 
@@ -167,7 +207,7 @@ class LivingInkCLI:
         if getattr(args, "config", None):
             os.environ["LIVING_INK_CONFIG"] = str(Path(args.config).resolve())
 
-        configure_logging(args)
+        configure_logging(args, self.root)
 
         if args.command is None:
             # Default behavior: if config exists, sync; otherwise setup

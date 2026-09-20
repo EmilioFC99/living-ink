@@ -25,6 +25,7 @@ from living_ink.config import (
     get_config_path,
     get_data_dir,
     get_logs_dir,
+    read_config_file,
     split_problems,
     validate_config,
 )
@@ -256,38 +257,37 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         if restrict_permissions(cfg_path):
             print(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                try:
-                    yaml_config = yaml.safe_load(f) or {}
-                except yaml.YAMLError as ye:
-                    print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
-                    print("Please check your indentation. YAML is very sensitive to spaces.")
-                    if hasattr(ye, "problem_mark"):
-                        mark = ye.problem_mark
-                        print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
-                    print(f"Details: {ye}\n")
-                    yaml_config = {}
+            try:
+                yaml_config = read_config_file(cfg_path)
+            except (yaml.YAMLError, TypeError) as ye:
+                print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
+                print("Please check your indentation. YAML is very sensitive to spaces.")
+                if hasattr(ye, "problem_mark"):
+                    mark = ye.problem_mark
+                    print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
+                print(f"Details: {ye}\n")
+                yaml_config = {}
 
-                # Register credentials for masking as soon as they are read,
-                # not when a provider is eventually built: a run that fails
-                # during setup still writes a log the user may share.
-                for section in ("ai", "openai"):
-                    if isinstance(yaml_config.get(section), dict):
-                        register_secret(str(yaml_config[section].get("api_key", "")).strip())
-                rm_section = yaml_config.get("remarkable")
-                if isinstance(rm_section, dict):
-                    register_secret(str(rm_section.get("device_token", "")).strip())
+            # Register credentials for masking as soon as they are read, not
+            # when a provider is eventually built: a run that fails during
+            # setup still writes a log the user may share.
+            for section in ("ai", "openai"):
+                if isinstance(yaml_config.get(section), dict):
+                    register_secret(str(yaml_config[section].get("api_key", "")).strip())
+            rm_section = yaml_config.get("remarkable")
+            if isinstance(rm_section, dict):
+                register_secret(str(rm_section.get("device_token", "")).strip())
 
-                # 1. OpenAI
-                if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
-                    os.environ.setdefault(
-                        "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
-                    )
+            # 1. OpenAI
+            if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
+                os.environ.setdefault(
+                    "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
+                )
 
-                # 2. AI Provider — configured from the settings this config
-                #    resolves to, which is where the stored key is read from.
-                _migrate_config_ai_key(yaml_config, cfg_path)
-                configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
+            # 2. AI Provider — configured from the settings this config
+            #    resolves to, which is where the stored key is read from.
+            _migrate_config_ai_key(yaml_config, cfg_path)
+            configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
 
         except Exception as e:
             # Deliberately broad. Everything downstream of the parse — env

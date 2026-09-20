@@ -860,6 +860,63 @@ class TestVerbosityFlags:
                 logs._console_mode = logs.ConsoleMode.PLAIN
 
 
+class TestVerbosityResolvesLikeEverySetting:
+    """``output.verbosity`` is a setting, so the file and the environment count.
+
+    ``--quiet`` used to be the only thing the console ever read, which made the
+    config key inert: declared in the schema, listed by ``status``, documented,
+    and ignored. A user who wrote ``verbosity: quiet`` once and expected every
+    run to be quiet got a full run every time, with nothing to say why.
+    """
+
+    def _configure(self, tmp_path, argv, config_text=None, **env):
+        """Configure logging the way ``dispatch`` does and return the mode."""
+        from living_ink import logs
+        from living_ink.cli.app import configure_logging
+
+        config = tmp_path / "config.yml"
+        if config_text is not None:
+            config.write_text(config_text, encoding="utf-8")
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        with (
+            patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
+            patch.dict(os.environ, {"LIVING_INK_CONFIG": str(config), **env}, clear=False),
+        ):
+            try:
+                configure_logging(args)
+                return logs.console_mode()
+            finally:
+                logs.reset_handlers()
+                logs._console_mode = logs.ConsoleMode.PLAIN
+
+    def test_the_config_file_alone_makes_a_run_quiet(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync"], "output:\n  verbosity: quiet\n")
+        assert mode.name == "QUIET"
+
+    def test_the_environment_alone_makes_a_run_verbose(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync"], LIVING_INK_VERBOSITY="verbose")
+        assert mode.name == "VERBOSE"
+
+    def test_the_flag_beats_the_file(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync", "--verbose"], "output:\n  verbosity: quiet\n")
+        assert mode.name == "VERBOSE"
+
+    def test_an_unparseable_config_still_honours_the_flag(self, tmp_path):
+        """The command about to run reports the parse error; this one cannot.
+
+        Configuring logging is the first thing that happens, so raising here
+        would replace a readable "check your indentation" with a traceback
+        from the logging setup.
+        """
+        mode = self._configure(tmp_path, ["sync", "--quiet"], "output:\n\tverbosity: quiet\n")
+        assert mode.name == "QUIET"
+
+    def test_json_keeps_stdout_clean_from_the_config_file_too(self, tmp_path):
+        """``output.json`` is a setting as well, and it is orthogonal to volume."""
+        mode = self._configure(tmp_path, ["sync"], "output:\n  json: true\n")
+        assert mode.name == "JSON"
+
+
 class TestDestinationLabels:
     """Class names are an implementation detail; printed names are not."""
 

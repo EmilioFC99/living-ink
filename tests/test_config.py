@@ -1,5 +1,6 @@
 """Tests for configuration paths and the ``config.yml`` schema."""
 
+import pytest
 import yaml
 
 from living_ink.config import (
@@ -8,11 +9,51 @@ from living_ink.config import (
     WARNING,
     ConfigProblem,
     apply_status,
+    read_config_file,
     split_problems,
     validate_config,
 )
 from living_ink.settings import Settings
 from living_ink.setup_wizard import generate_config_yaml
+
+
+class TestReadingTheFile:
+    """One parser, two callers, and the errors reach both of them.
+
+    The pipeline reads the file to run against it and the front end reads it
+    before any command runs to learn how loud the console should be. Each
+    answers a broken file differently — one prints the line and column, the
+    other cannot print anything yet — so the reader raises and neither owns a
+    second ``yaml.safe_load`` with its own idea of what an empty file means.
+    """
+
+    def test_a_missing_file_is_an_empty_config(self, tmp_path):
+        """Not an error: every setting has a default, so no file is a valid state."""
+        assert read_config_file(tmp_path / "nope.yml") == {}
+
+    def test_a_file_of_only_comments_is_an_empty_config(self, tmp_path):
+        """``safe_load`` returns None for this, which is not a mapping."""
+        path = tmp_path / "config.yml"
+        path.write_text("# nothing here yet\n", encoding="utf-8")
+        assert read_config_file(path) == {}
+
+    def test_malformed_yaml_raises_rather_than_resolving_to_nothing(self, tmp_path):
+        """Silently reading a broken config as ``{}`` runs with every default.
+
+        That is the worst outcome available: the run succeeds, publishes to
+        the wrong place, and never mentions the file it could not read.
+        """
+        path = tmp_path / "config.yml"
+        path.write_text("output:\n\tverbosity: quiet\n", encoding="utf-8")
+        with pytest.raises(yaml.YAMLError):
+            read_config_file(path)
+
+    def test_a_top_level_list_is_refused(self, tmp_path):
+        """Valid YAML, wrong shape — and every reader downstream assumes a mapping."""
+        path = tmp_path / "config.yml"
+        path.write_text("- sync\n- obsidian\n", encoding="utf-8")
+        with pytest.raises(TypeError):
+            read_config_file(path)
 
 
 class TestConfigSchema:
