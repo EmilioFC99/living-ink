@@ -30,6 +30,7 @@ from living_ink.config.paths import (
     get_config_path,
     get_data_dir,
     get_logs_dir,
+    read_config_file,
 )
 from living_ink.config.schema import (
     ACTIVE,
@@ -39,6 +40,7 @@ from living_ink.config.schema import (
     FLAG,
     LEGACY_KEYS,
     LIST,
+    LIVE_SETTINGS,
     NUMBER,
     PATH,
     REMOVED,
@@ -79,6 +81,7 @@ __all__ = [
     "FLAG",
     "LEGACY_KEYS",
     "LIST",
+    "LIVE_SETTINGS",
     "NUMBER",
     "PATH",
     "REMOVED",
@@ -110,6 +113,7 @@ __all__ = [
     "get_logs_dir",
     "list_secrets",
     "mask",
+    "read_config_file",
     "read_secret",
     "reads_as",
     "settings_for_section",

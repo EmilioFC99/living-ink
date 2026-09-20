@@ -167,6 +167,23 @@ def reads_as(value: Any, kind: str) -> bool:
     return True
 
 
+def _split(raw: str) -> List[str]:
+    """Read a :data:`LIST` value written as one string.
+
+    The comma is the separator wherever a list has to fit in one word — an
+    environment variable, a single command-line argument — so the validator
+    reads the same shapes the resolver does rather than judging a legal value
+    as a single nonsense name.
+
+    Args:
+        raw: The written value, e.g. ``"notebook, pdf"``.
+
+    Returns:
+        The trimmed, non-empty parts, in the order given.
+    """
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _value_problem(path: str, setting: Setting, value: Any) -> Optional[ConfigProblem]:
     """Report that a value cannot be used as the setting it was written under.
 
@@ -185,13 +202,26 @@ def _value_problem(path: str, setting: Setting, value: Any) -> Optional[ConfigPr
     if not reads_as(value, setting.kind):
         return ConfigProblem(ERROR, path, f"expected {setting.kind}, found {value!r}")
 
-    if setting.kind == CHOICE and setting.choices:
-        allowed = [choice.value for choice in setting.choices]
-        if str(value).strip().lower() not in allowed:
+    if not setting.choices:
+        return None
+
+    allowed = [choice.value for choice in setting.choices]
+    if setting.kind == CHOICE:
+        written = [value]
+    elif setting.kind == LIST:
+        # A list of allowed names is policed item by item. ``types: [notbook]``
+        # is otherwise a config that parses, selects nothing and never says
+        # why — the same silent-typo failure the schema exists to end.
+        written = list(value) if isinstance(value, (list, tuple)) else _split(str(value))
+    else:
+        return None
+
+    for item in written:
+        if str(item).strip().lower() not in allowed:
             return ConfigProblem(
                 ERROR,
                 path,
-                f"expected one of {', '.join(allowed)}, found {value!r}",
+                f"expected one of {', '.join(allowed)}, found {item!r}",
             )
 
     return None
@@ -238,6 +268,39 @@ def _status_problem(path: str, section: Section) -> Optional[ConfigProblem]:
     elif section.status == REMOVED:
         message = "no longer used, and ignored"
         hint = f"delete it; {section.note}" if section.note else "delete it"
+    else:
+        return None
+
+    return ConfigProblem(WARNING, path, message, hint)
+
+
+def _retired_problem(path: str, setting: Setting) -> Optional[ConfigProblem]:
+    """Report that a key carries a status of its own worth mentioning.
+
+    The section-level counterpart of this, :func:`_status_problem`, can only
+    retire a whole section, which is why ``google_vision:`` could go and a
+    single key inside a surviving section could not. A key is the smaller unit
+    and the more common one: ``sync.types`` replaces two booleans without the
+    ``sync:`` section going anywhere.
+
+    Nothing is guessed at. A key that was merely *renamed* never reaches here —
+    that is :attr:`Setting.legacy_keys`, and its value is copied forward. This
+    is the case where the successor holds a different shape of answer, so the
+    only honest thing to do is name it and let the user write it.
+
+    Args:
+        path: Dotted location of the key, as written in the file.
+        setting: The schema entry found for it.
+
+    Returns:
+        A :data:`WARNING` problem for a deprecated or retired key, or None.
+    """
+    if setting.status == DEPRECATED:
+        message = "deprecated"
+        hint = f"use {setting.replacement}" if setting.replacement else ""
+    elif setting.status == REMOVED:
+        message = "no longer used, and ignored"
+        hint = f"use {setting.replacement} instead" if setting.replacement else "delete it"
     else:
         return None
 
@@ -331,6 +394,14 @@ def _check_section(name: str, value: Any, check_keys: bool = True) -> List[Confi
         # them to rename it and hit the same wall again.
         if path in LEGACY_KEYS:
             problems.append(_legacy_problem(path, setting))
+            continue
+
+        # A legacy spelling and a retired key are different things, and a path
+        # is never both: the first resolves to a setting that survived under
+        # another name, the second to one that did not survive at all.
+        retired = _retired_problem(path, setting)
+        if retired is not None:
+            problems.append(retired)
 
     return problems
 
@@ -409,6 +480,10 @@ def validate_config(
                 problems.append(problem)
             elif key in LEGACY_KEYS:
                 problems.append(_legacy_problem(key, setting))
+            else:
+                retired = _retired_problem(key, setting)
+                if retired is not None:
+                    problems.append(retired)
             continue
 
         if key in extra_sections and key not in SECTIONS:
@@ -481,10 +556,10 @@ def apply_status(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the config the rest of the package should read.
 
     The schema's statuses are declarations; this is where they take effect.
-    :data:`REMOVED` sections are dropped, so nothing downstream has to remember
-    that a dead setting might still be sitting in the file, and legacy keys are
-    copied onto their current spelling, so nothing downstream has to know the
-    old one. Both happen in memory.
+    :data:`REMOVED` sections and :data:`REMOVED` keys are dropped, so nothing
+    downstream has to remember that a dead setting might still be sitting in
+    the file, and legacy keys are copied onto their current spelling, so
+    nothing downstream has to know the old one. All of it happens in memory.
 
     **No config file is ever rewritten.** The alternative — migrating the file
     in place behind a backup — loses the user's comments and ordering, and a
@@ -512,6 +587,18 @@ def apply_status(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     for name in list(result):
         if section_status(str(name)).status == REMOVED:
             del result[name]
+
+    # Then the retired keys inside the sections that survived. Dropped for the
+    # same reason a removed section is: nothing downstream should have to
+    # remember that a dead key might still be sitting in the file, and a
+    # retired setting has no field on Settings to resolve it onto anyway.
+    for setting in SETTINGS:
+        if setting.status != REMOVED or setting.key is None:
+            continue
+        if setting.section == "":
+            result.pop(setting.leaf, None)
+        elif isinstance(result.get(setting.section), dict):
+            result[setting.section].pop(setting.leaf, None)
 
     # Read from the original so that a legacy key inside a section this loop
     # also writes to cannot be seen half-updated.

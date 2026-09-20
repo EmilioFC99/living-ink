@@ -3,7 +3,7 @@
 Everything that narrows a sync used to be spread across three places that were
 free to disagree — a discovery filter in the pipeline, a comparison in
 :mod:`living_ink.state`, and a second listing pass in the CLI that answered
-``sync --status``. A preview that predicts something other than what the run
+``sync --preview``. A preview that predicts something other than what the run
 does is worse than no preview at all, in a feature whose entire purpose is
 "tell me what will happen". So :func:`select` is the only function that
 decides, and the preview and the run call it with the same arguments.
@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Optional, Sequence
 
 from living_ink.core.listing import (
     document_name,
+    document_path,
     document_version,
     get_document_type,
     get_notebook_path,
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 TRASHED = "in the trash"
 WRONG_TYPE = "type not enabled"
 EXCLUDED = "in an excluded folder"
-OUTSIDE_FOLDER = "outside the selected folder"
+OUTSIDE_PATH = "outside the selected path"
 NO_MATCHING_TAG = "no matching tag"
 NOT_TARGETED = "not the requested notebook"
 UNCHANGED = "unchanged"
@@ -70,10 +71,17 @@ class SelectionCriteria:
     """Everything that narrows a run. Built once, from flags plus settings.
 
     Attributes:
-        source_path: Case-insensitive substring match on the folder path.
-        source_regex: Case-sensitive regex on the folder path. Mutually
-            exclusive with :attr:`source_path` — two filters over one field
-            silently intersect, and a user who passes both means one of them.
+        source_path: Case-insensitive substring match on the document's full
+            path, title included. A fragment means "the ones called roughly
+            this", so it is wrapped in implicit wildcards rather than compared
+            for equality; matching the *full* path is what makes
+            ``--source-path "Work/"`` a folder filter without a second flag.
+        source_regex: Case-sensitive regex searched against that same full
+            path. Case-sensitive because a regex user who wants otherwise
+            writes ``(?i)``, and forcing a flag onto someone's pattern is
+            worse than making them state it. Mutually exclusive with
+            :attr:`source_path` — two filters over one field silently
+            intersect, and a user who passes both means one of them.
         exclude: Folder names never synced — ``Templates`` and ``Quick
             sheets`` by default. Matched against each segment of the folder
             path, so excluding ``Templates`` excludes what is under it too.
@@ -106,14 +114,67 @@ class SelectionCriteria:
                 failing before the tablet is contacted.
         """
         if self.source_path and self.source_regex:
-            raise ValueError(
-                "give a folder path or a folder regex, not both — they would silently intersect"
-            )
+            raise ValueError("use --source-path or --source-regex, not both")
         if self.source_regex:
             try:
                 re.compile(self.source_regex)
             except re.error as exc:
-                raise ValueError(f"invalid folder regex {self.source_regex!r}: {exc}") from exc
+                raise ValueError(f"invalid path regex {self.source_regex!r}: {exc}") from exc
+
+
+def criteria_for(
+    settings: Settings,
+    *,
+    target: Optional[str] = None,
+    source_path: Optional[str] = None,
+    source_regex: Optional[str] = None,
+    force: bool = False,
+) -> SelectionCriteria:
+    """Build a run's criteria from its settings and its four run-shaping flags.
+
+    Here rather than on the pipeline for the same reason :func:`select` is the
+    only classifier: the preview has to narrow the run exactly as the run
+    narrows itself, and it cannot do that by assembling a second
+    :class:`SelectionCriteria` from the same fields in its own words. The four
+    keywords are the filters with no persisted form — everything else is read
+    off ``settings``, which is where a flag has already been merged over the
+    environment and the file.
+
+    Args:
+        settings: The run's resolved settings.
+        target: A document named on the command line, by id, title or path.
+        source_path: Case-insensitive substring of the document's full path.
+        source_regex: Case-sensitive pattern over that same path.
+        force: Publish whatever the comparison concludes.
+
+    Returns:
+        What narrows this run.
+
+    Raises:
+        ValueError: If a path and a regex were both given, or the regex does
+            not compile.
+    """
+    named = target.strip() if target else None
+    return SelectionCriteria(
+        target=named,
+        source_path=source_path.strip() if source_path else None,
+        source_regex=source_regex or None,
+        types=frozenset(settings.sync_types or ()),
+        # Both come from the config file and had no reader at all, so
+        # ``config`` and ``info`` reported Templates and Quick Sheets as
+        # excluded while every run rendered and transcribed them at cost.
+        exclude=frozenset(settings.sync_exclude or ()),
+        tags=frozenset(settings.sync_tags or ()),
+        # A named document is not part of a sweep, so the sweep's cap does not
+        # apply to it — and applying it would deal the second of two
+        # same-named matches into ``deferred``, where the prompt that asks the
+        # user which one they meant can no longer see it.
+        limit=None if named else (settings.max_notebooks_per_run or None),
+        # Naming a document is asking for that document, whether or not the
+        # comparison thinks it is current — the one thing that behaved like
+        # ``--force`` before ``--force`` existed, and still does without it.
+        force=force or bool(named),
+    )
 
 
 @dataclass(frozen=True)
@@ -290,10 +351,16 @@ def _out_of_scope(
     folder = get_notebook_path(item, id_map)
     if _is_excluded(folder, criteria.exclude):
         return EXCLUDED
-    if criteria.source_path and criteria.source_path.lower() not in folder.lower():
-        return OUTSIDE_FOLDER
-    if criteria.source_regex and not re.search(criteria.source_regex, folder):
-        return OUTSIDE_FOLDER
+
+    # The full path, not the folder: a user filtering on "diary" means the
+    # notebook called that as readily as the folder holding it, and the two
+    # filters below are documented against the path the flag is named for.
+    if criteria.source_path or criteria.source_regex:
+        path = document_path(item, id_map)
+        if criteria.source_path and criteria.source_path.lower() not in path.lower():
+            return OUTSIDE_PATH
+        if criteria.source_regex and not re.search(criteria.source_regex, path):
+            return OUTSIDE_PATH
 
     if criteria.types and get_document_type(item, client) not in criteria.types:
         return WRONG_TYPE

@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -135,14 +136,6 @@ def test_sync_pipeline_custom_destinations():
     assert pipeline.destinations[0] is mock_dest
 
 
-def test_sync_pipeline_properties_all_types():
-    """SyncPipeline(all_types=True) enables sync_pdfs and sync_epubs."""
-    pipeline = SyncPipeline(all_types=True)
-    assert pipeline.all_types is True
-    assert pipeline.sync_pdfs is True
-    assert pipeline.sync_epubs is True
-
-
 def test_sync_pipeline_properties_ssh_and_cloud():
     """SyncPipeline sets connection properties and synchronizes environment."""
     pipeline_ssh = SyncPipeline(ssh=True)
@@ -154,18 +147,13 @@ def test_sync_pipeline_properties_ssh_and_cloud():
     assert pipeline_cloud.use_ssh is False
 
 
-def test_the_type_flags_become_selection_criteria():
-    """The flags narrow the run by naming source types, nothing more."""
-    from living_ink.sources import SOURCE_REGISTRY
-
-    default = SyncPipeline(sync_pdfs=False, sync_epubs=False, destinations=[])
+def test_the_configured_types_become_selection_criteria():
+    """One setting narrows the run by naming source types, nothing more."""
+    default = SyncPipeline(destinations=[])
     assert default._criteria().types == frozenset({"notebook"})
 
-    with_pdfs = SyncPipeline(sync_pdfs=True, sync_epubs=False, destinations=[])
-    assert with_pdfs._criteria().types == frozenset({"notebook", "pdf"})
-
-    everything = SyncPipeline(all_types=True, destinations=[])
-    assert everything._criteria().types == frozenset(SOURCE_REGISTRY)
+    chosen = SyncPipeline(flags={"sync_types": ("pdf", "epub")}, destinations=[])
+    assert chosen._criteria().types == frozenset({"pdf", "epub"})
 
 
 def test_the_per_run_cap_becomes_the_selection_limit():
@@ -272,6 +260,29 @@ class TestImportPurity:
         """A bare import does not build destinations, so it stays quiet."""
         result = self._import_in_subprocess(tmp_path)
         assert result.stdout == ""
+
+    def test_import_does_not_reconfigure_a_third_party_logger(self, tmp_path):
+        """The old suppression block raised rmscene to ERROR at import time.
+
+        Two things were wrong with it and only the second was cosmetic: it
+        threw away the only signal that a page parsed incompletely, and it did
+        so to any application that merely imported Living Ink.
+        """
+        env = {**os.environ, "LIVING_INK_DATA_DIR": str(tmp_path / "data")}
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import logging, living_ink.pipeline;"
+                "print(logging.getLogger('rmscene').level,"
+                "logging.getLogger('rmscene').handlers)",
+            ],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.strip() == "0 []"
 
     def test_default_config_is_loaded_once(self, monkeypatch):
         """get_default_config caches, so config is read a single time."""
@@ -684,9 +695,15 @@ class TestDryRun:
         assert len(dest.published) == 1
         recorded.assert_called_once()
 
-    def test_dry_run_keeps_the_artifacts_it_points_at(self):
-        assert SyncPipeline(dry_run=True).keep_temp is True
-        assert SyncPipeline().keep_temp is False
+    def test_a_dry_run_does_not_secretly_keep_the_artifacts(self):
+        """It used to, and one flag turning on another is a third concept.
+
+        The transcripts a rehearsal leaves behind are a debugging artifact, so
+        a user who wants them asks for them; the implication meant a rehearsal
+        littered the temp directory that a real sync would have purged.
+        """
+        assert SyncPipeline(dry_run=True).keep_temp is False
+        assert SyncPipeline(dry_run=True, keep_temp=True).keep_temp is True
 
 
 class TestOrderedDurability:
@@ -947,13 +964,13 @@ class TestConfigPermissionRepair:
         cfg = self._write_config(tmp_path, 0o644)
         pipeline.load_yaml_config(cfg)
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
-        assert "Tightened permissions" in capsys.readouterr().out
+        assert "Tightened permissions" in capsys.readouterr().err
 
     def test_an_already_private_config_is_left_alone(self, tmp_path, capsys):
         cfg = self._write_config(tmp_path, 0o600)
         pipeline.load_yaml_config(cfg)
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
-        assert "Tightened permissions" not in capsys.readouterr().out
+        assert "Tightened permissions" not in capsys.readouterr().err
 
     def test_the_config_is_still_read(self, tmp_path):
         cfg = self._write_config(tmp_path, 0o666)
@@ -1955,6 +1972,104 @@ class TestTheRendererContractDrivesTheRun:
         assert source.renderer.calls.count("render:1") == 1
 
 
+class TestParserWarningsReachTheReport:
+    """rmscene's complaints are the only sign a page parsed incompletely.
+
+    They used to be discarded — both parser loggers were raised to ``ERROR``
+    when ``pipeline`` was imported — so a partial render published silently.
+    Letting them out untouched is no better: they repeat per page, they name a
+    block type and not a document, and they land in the middle of whatever the
+    run is printing. They belong in the run report, attributed to the notebook.
+    """
+
+    @pytest.fixture
+    def contract(self):
+        """The renderer-contract fixtures, reused rather than copied."""
+        return TestTheRendererContractDrivesTheRun()
+
+    class WarningRenderer(TestTheRendererContractDrivesTheRun.RecordingRenderer):
+        """A renderer whose parser complains the way rmscene does."""
+
+        def __init__(self, *args, complaints=(), at="render", **kwargs):
+            super().__init__(*args, **kwargs)
+            self._complaints = list(complaints)
+            self._at = at
+
+        def _complain(self):
+            for message in self._complaints:
+                logging.getLogger("rmscene.scene_stream").warning(message)
+
+        def prepare(self, bundle, ctx):
+            if self._at == "prepare":
+                self._complain()
+            return super().prepare(bundle, ctx)
+
+        def render(self, bundle, page, ctx):
+            if self._at == "render":
+                self._complain()
+            return super().render(bundle, page, ctx)
+
+    def _run(self, contract, tmp_path, renderer):
+        """Render one document and return the pipeline that did it."""
+        pipe = contract._pipeline(tmp_path)
+        pipe._render_source(contract._job(), contract._source(renderer), contract._bundle())
+        return pipe
+
+    def test_a_parse_warning_becomes_a_report_warning(self, contract, tmp_path):
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(pages=contract._refs(1), complaints=["Unknown block type 42"]),
+        )
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_it_never_reaches_a_stream(self, contract, tmp_path, capsys):
+        """The whole point: a ``--json`` run writes one document to stdout."""
+        self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(pages=contract._refs(1), complaints=["Unknown block type 42"]),
+        )
+        captured = capsys.readouterr()
+        assert "Unknown block type" not in captured.out
+        assert "Unknown block type" not in captured.err
+
+    def test_one_complaint_repeated_per_page_is_reported_once(self, contract, tmp_path):
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(
+                pages=contract._refs(1, 2, 3), complaints=["Some data has not been read"]
+            ),
+        )
+        assert pipe.report.warnings == ["Notes: Some data has not been read"]
+
+    def test_a_complaint_made_while_preparing_is_caught_too(self, contract, tmp_path):
+        """rmscene reads the document in ``prepare`` and ``pages``, not only render."""
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(
+                pages=contract._refs(1), complaints=["Unknown block type 42"], at="prepare"
+            ),
+        )
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_a_document_that_stopped_early_still_reports_them(self, contract, tmp_path):
+        """That document is exactly the one whose warnings explain why."""
+        renderer = self.WarningRenderer(
+            pages=(), text=None, complaints=["Unknown block type 42"], at="prepare"
+        )
+        pipe = contract._pipeline(tmp_path)
+        with pytest.raises(pipeline._StopProcessing):
+            pipe._render_source(contract._job(), contract._source(renderer), contract._bundle())
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_a_quiet_render_reports_nothing(self, contract, tmp_path):
+        pipe = self._run(contract, tmp_path, self.WarningRenderer(pages=contract._refs(1)))
+        assert pipe.report.warnings == []
+
+
 class TestTheDownloadedZipHonoursKeepTemp:
     """``--keep-temp`` is what CLAUDE.md tells people to debug rendering with."""
 
@@ -2112,10 +2227,11 @@ class TestOrphanedNotebooks:
     def _pipeline(self, dest, prune=False, dry_run=False):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.dry_run = dry_run
-        pipe.prune = prune
         pipe.destinations = [dest]
         pipe.report = None
-        pipe.settings = None
+        # ``prune`` is a view onto the resolved settings, not an attribute, so
+        # a bare pipeline is given the settings that say it.
+        pipe.settings = Settings.resolve({}, flags={"prune": prune or None})
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):
@@ -2701,7 +2817,7 @@ class TestProgressIsRecordedPerNotebook:
         pipe._counts = (0, 0, 0)
         pipe.dry_run = False
         pipe.keep_temp = True
-        pipe.json_output = False
+        pipe.settings = Settings.resolve({})
         pipe.target_notebook = None
         seen_counts = []
 
@@ -2829,6 +2945,7 @@ class TestRunSummary:
     def _pipeline(self):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.report = RunReport()
+        pipe.settings = Settings.resolve({})
         pipe.target_notebook = None
         return pipe
 
@@ -2906,7 +3023,6 @@ class TestRunSummary:
 
     def test_the_summary_is_printed_at_the_end(self, capsys):
         pipe = self._pipeline()
-        pipe.json_output = False
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
 
         pipe._print_summary()
@@ -2915,7 +3031,7 @@ class TestRunSummary:
 
     def test_json_output_is_machine_readable(self, capsys):
         pipe = self._pipeline()
-        pipe.json_output = True
+        pipe.settings = Settings.resolve({}, flags={"output_json": True})
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
 
         pipe._print_summary()
@@ -2987,7 +3103,7 @@ class TestJsonSummaryReachesStdout:
     def _pipeline(self, json_output):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.report = RunReport()
-        pipe.json_output = json_output
+        pipe.settings = Settings.resolve({}, flags={"output_json": json_output or None})
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED, reason="unchanged"))
         return pipe
 

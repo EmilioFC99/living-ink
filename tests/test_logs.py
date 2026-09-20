@@ -295,3 +295,82 @@ class TestLogPersistence:
 
         assert capsys.readouterr().out == ""
         assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
+
+
+class TestParserWarningsAreCollected:
+    """rmscene reports an unreadable block by logging and carrying on.
+
+    The package used to raise both parser loggers to ``ERROR`` at import time,
+    so a page that parsed incompletely rendered a partial image and said so
+    nowhere. Collecting instead of suppressing keeps the signal without
+    letting a third-party log line land in the middle of a ``--json`` run.
+    """
+
+    def test_a_warning_is_captured_instead_of_printed(self, capsys):
+        with logs.collect_parser_warnings() as collected:
+            logging.getLogger("rmscene").warning("Unknown block type 42")
+
+        assert collected == ["Unknown block type 42"]
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_a_child_logger_is_covered_by_its_root(self):
+        """Naming ``rmscene`` has to be enough; there are six emitters."""
+        with logs.collect_parser_warnings() as collected:
+            logging.getLogger("rmscene.text").warning("Unknown formatting code")
+            logging.getLogger("rmc.exporters.svg").warning("no bounding box")
+
+        assert collected == ["Unknown formatting code", "no bounding box"]
+
+    def test_the_same_complaint_is_kept_once(self):
+        """A 40-page notebook logs one bad block shape 40 times."""
+        with logs.collect_parser_warnings() as collected:
+            for _ in range(40):
+                logging.getLogger("rmscene").warning("Some data has not been read")
+
+        assert collected == ["Some data has not been read"]
+
+    def test_a_mismatched_format_string_does_not_take_the_render_down(self):
+        """The library owns its format strings, and one of them is wrong."""
+        with logs.collect_parser_warnings() as collected:
+            logging.getLogger("rmscene").warning("needs %s and %s", "one")
+            logging.getLogger("rmscene").warning("readable")
+
+        assert collected == ["readable"]
+
+    def test_info_is_not_worth_reporting(self):
+        with logs.collect_parser_warnings() as collected:
+            logging.getLogger("rmscene").info("read 12 blocks")
+
+        assert collected == []
+
+    def test_the_loggers_are_left_exactly_as_they_were(self):
+        library = logging.getLogger("rmscene")
+        before = (library.level, library.propagate, list(library.handlers))
+
+        with logs.collect_parser_warnings():
+            pass
+
+        assert (library.level, library.propagate, list(library.handlers)) == before
+
+    def test_they_are_restored_even_when_the_block_raises(self):
+        library = logging.getLogger("rmscene")
+        before = (library.level, library.propagate, list(library.handlers))
+
+        with pytest.raises(RuntimeError):
+            with logs.collect_parser_warnings():
+                raise RuntimeError("render failed")
+
+        assert (library.level, library.propagate, list(library.handlers)) == before
+
+    def test_what_was_collected_before_a_failure_survives(self):
+        """A document that stopped early is the one whose warnings explain it."""
+        collected = None
+        with pytest.raises(RuntimeError):
+            with logs.collect_parser_warnings() as messages:
+                collected = messages
+                logging.getLogger("rmscene").warning("Unknown block type 42")
+                raise RuntimeError("render failed")
+
+        assert collected == ["Unknown block type 42"]

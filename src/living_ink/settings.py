@@ -18,7 +18,7 @@ Precedence, highest first:
 4. The defaults in :mod:`living_ink.config.schema`.
 
 **There is no table of fields in this module.** Every field, key, environment
-variable and default comes from :data:`living_ink.config.schema.SETTINGS`, and
+variable and default comes from :data:`living_ink.config.schema.LIVE_SETTINGS`, and
 :meth:`resolve` and :meth:`explain` walk it. A parallel list is how ``explain``
 came to be blind to two settings that shape every run; the parity test in
 ``tests/test_settings.py`` is what keeps the two from drifting again.
@@ -49,13 +49,14 @@ from living_ink.config.schema import (
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_USER,
     DEFAULT_SYNC_EXCLUDE,
+    DEFAULT_SYNC_TYPES,
     DEFAULT_TRANSCRIPT_CACHE,
     DEFAULT_VERBOSITY,
     FLAG,
     LIST,
+    LIVE_SETTINGS,
     NUMBER,
     PATH,
-    SETTINGS,
     STORE_CREDENTIALS,
     TEXT,
     WHOLE,
@@ -247,7 +248,7 @@ class Settings:
     using it. Per-run CLI overrides are applied by building a new instance with
     :func:`dataclasses.replace`, not by mutation.
 
-    The fields below must match :data:`living_ink.config.schema.SETTINGS`
+    The fields below must match :data:`living_ink.config.schema.LIVE_SETTINGS`
     exactly, one for one. That is asserted by a test rather than maintained by
     hand: a field with no schema entry cannot be resolved from anything, and a
     schema entry with no field is invisible to every reader at once.
@@ -268,8 +269,7 @@ class Settings:
         ai_language: Language to transcribe in, or ``"auto"``.
         ai_prompt_dir: Directory of user-owned prompt overrides, if any.
         ocr_concurrency: How many pages to transcribe at once. 1 is serial.
-        sync_pdfs: Whether annotated PDFs are synced alongside notebooks.
-        sync_epubs: Whether annotated EPUBs are synced alongside notebooks.
+        sync_types: Document types this run syncs, e.g. ``("notebook", "pdf")``.
         sync_tags: Only sync documents carrying one of these tablet tags.
         sync_exclude: Tablet folders never synced.
         skip_empty: Whether a document that transcribes to nothing is skipped.
@@ -311,8 +311,7 @@ class Settings:
     ai_prompt_dir: Optional[str] = None
     ocr_concurrency: int = DEFAULT_OCR_CONCURRENCY
 
-    sync_pdfs: bool = False
-    sync_epubs: bool = False
+    sync_types: Tuple[str, ...] = DEFAULT_SYNC_TYPES
     sync_tags: Tuple[str, ...] = ()
     sync_exclude: Tuple[str, ...] = DEFAULT_SYNC_EXCLUDE
     skip_empty: bool = False
@@ -407,7 +406,7 @@ class Settings:
         resolved: List[Tuple[str, Any, str, str]] = []
         seen: Dict[str, Any] = {}
 
-        for setting in SETTINGS:
+        for setting in LIVE_SETTINGS:
             value, source, detail = cls._pick(setting, raw, environ, given, config_path, seen)
             value = _coerce(setting, value, seen)
             seen[setting.field] = value
@@ -487,7 +486,7 @@ class Settings:
             One :class:`SettingOrigin` per setting, in schema order.
         """
         layers = cls._layers(config, env, flags, config_path)
-        by_field = {setting.field: setting for setting in SETTINGS}
+        by_field = {setting.field: setting for setting in LIVE_SETTINGS}
 
         origins = []
         for name, value, source, detail in layers:
@@ -654,7 +653,7 @@ def _assert_parity() -> None:
             test suite asserts the same thing with a readable message; this is
             the belt, so that a mismatch cannot survive even an unrun test.
     """
-    declared = {setting.field for setting in SETTINGS}
+    declared = {setting.field for setting in LIVE_SETTINGS}
     present = {f.name for f in fields(Settings)}
     if declared != present:
         missing = ", ".join(sorted(declared - present)) or "none"

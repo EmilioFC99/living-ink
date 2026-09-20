@@ -766,7 +766,7 @@ class StateStore:
         A deleted destination leaves its rows behind, and every later run reads
         them as real: the selection pass reports the document as still
         published somewhere, ``_prune_orphan`` declines to prune because the
-        destination "is not configured", and ``sync --status`` prints a dead
+        destination "is not configured", and ``sync --preview`` prints a dead
         key in each row's published map. None of that is recoverable by the
         user, because there is no longer any code that could unpublish.
 
@@ -994,6 +994,19 @@ class StateStore:
             table: [dict(row) for row in self._conn.execute(f"SELECT * FROM {table}").fetchall()]
             for table in tables
         }
+
+    def schema_version(self) -> int:
+        """Return the schema version the open file actually carries.
+
+        Read from the file rather than reported as :data:`SCHEMA_VERSION`:
+        the constant says what this build writes, and the two differ for
+        exactly as long as it takes :meth:`_migrate` to run — which is the
+        window a health check exists to describe.
+
+        Returns:
+            The ``user_version`` pragma, 0 on a database that predates it.
+        """
+        return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
 
     def integrity_check(self) -> str:
         """Ask SQLite whether the file is intact.

@@ -8,7 +8,9 @@ explicitly points them there.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
+
+import yaml
 
 
 def find_repo_root() -> Optional[Path]:
@@ -159,3 +161,41 @@ def credentials_dir(config_path: Optional[Path] = None) -> Path:
     """
     resolved = Path(config_path) if config_path else get_config_path()
     return resolved.parent / "credentials"
+
+
+def read_config_file(config_path: Path) -> Dict[str, Any]:
+    """Parse ``config.yml`` and return it, with no interpretation applied.
+
+    The one place the file is turned into a dictionary. Two callers need that
+    dictionary for different reasons and would otherwise each have their own
+    ``yaml.safe_load``: the pipeline loads it to run against, and the front end
+    reads it before any command runs to learn how loud the console should be.
+    A second parser is a second set of rules about what an empty file, a list
+    at the top level, or a tab means.
+
+    Errors are raised rather than swallowed, because the two callers answer
+    them differently — one prints the line and column, the other cannot print
+    anything yet because logging is what it is about to configure.
+
+    Args:
+        config_path: The resolved ``config.yml``.
+
+    Returns:
+        The parsed mapping. Empty for a file that does not exist, is empty, or
+        holds only comments.
+
+    Raises:
+        OSError: If the file exists but cannot be read.
+        yaml.YAMLError: If the file is not valid YAML.
+        TypeError: If the file parses to something other than a mapping.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        parsed = yaml.safe_load(handle)
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise TypeError(f"{path} must hold a mapping of sections, not {type(parsed).__name__}")
+    return parsed

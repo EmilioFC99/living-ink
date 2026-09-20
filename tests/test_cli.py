@@ -1,26 +1,27 @@
 """Tests for living_ink.cli module.
 
 Covers the CLI argument parsing, Command Pattern architecture,
-and subcommands (status, setup, sync).
+and subcommands (info, setup, sync).
 """
 
 import argparse
 import json
 import os
+import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from living_ink.cli import (
     BaseCommand,
+    InfoCommand,
     LivingInkCLI,
     SetupCommand,
-    StatusCommand,
     SyncCommand,
     WatchCommand,
-    _describe_connected_device,
     main,
 )
+from living_ink.cli.status import _describe_connected_device
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
 from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
 from living_ink.setup_wizard import WizardResult
@@ -58,12 +59,12 @@ def test_get_config_path(tmp_path, monkeypatch):
     assert p == custom_dir / "config.yml"
 
 
-@patch.object(StatusCommand, "run", return_value=0)
-def test_main_status_command(mock_status):
-    """'living-ink status' invokes StatusCommand.run."""
-    with patch("sys.argv", ["living-ink", "status"]):
+@patch.object(InfoCommand, "run", return_value=0)
+def test_main_info_command(mock_info):
+    """'living-ink info' invokes InfoCommand.run."""
+    with patch("sys.argv", ["living-ink", "info"]):
         main()
-        mock_status.assert_called_once()
+        mock_info.assert_called_once()
 
 
 @patch.object(SetupCommand, "run", return_value=0)
@@ -84,22 +85,44 @@ def test_main_sync_command(mock_sync):
         assert args.notebook == "TestBook"
 
 
-def test_cmd_status_no_config(tmp_path, capsys):
-    """StatusCommand reports cleanly when config is missing."""
-    args = MagicMock(json=False, status=False)
-    StatusCommand(root=tmp_path).run(args)
+def test_cmd_info_no_config(tmp_path, capsys):
+    """InfoCommand reports cleanly when config is missing."""
+    args = MagicMock(json=False)
+    InfoCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Not found" in captured.out
 
 
 @patch.object(SyncCommand, "run", return_value=0)
 def test_main_sync_command_with_ssh(mock_sync):
-    """'living-ink sync --ssh' passes ssh flag to SyncCommand.run."""
+    """'living-ink sync --ssh' reaches SyncCommand.run as its setting."""
     with patch("sys.argv", ["living-ink", "sync", "--ssh"]):
         main()
         mock_sync.assert_called_once()
         args = mock_sync.call_args[0][0]
-        assert args.ssh is True
+        assert args.preferred_connection == "ssh"
+
+
+def sync_namespace(**overrides):
+    """Build a sync namespace the way the parser would, with no mock in it.
+
+    A :class:`MagicMock` cannot stand in for a parsed namespace here: every
+    generated flag is read with ``getattr``, and a mock answers all of them
+    with a truthy attribute, so the pipeline is handed an override for every
+    setting in the schema. Real parsing is the point of these tests.
+
+    Args:
+        **overrides: Attributes to set, by their ``dest`` name.
+
+    Returns:
+        A namespace with ``sync``'s defaults and the overrides applied.
+    """
+    from living_ink.cli import LivingInkCLI
+
+    args = LivingInkCLI().build_parser().parse_args(["sync"])
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    return args
 
 
 def _run_sync_capturing_pipeline(args, tmp_path):
@@ -120,7 +143,7 @@ def _run_sync_capturing_pipeline(args, tmp_path):
 def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     """SyncCommand resolves --ssh into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
-    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False, status=False)
+    args = sync_namespace(preferred_connection="ssh")
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -128,18 +151,20 @@ def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     assert pipeline.settings.preferred_connection == "ssh"
 
 
-@patch("living_ink.cli._describe_connected_device", return_value="reMarkable 2 (1404\u00d71872)")
+@patch(
+    "living_ink.cli.status._describe_connected_device", return_value="reMarkable 2 (1404\u00d71872)"
+)
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_path, capsys):
-    """StatusCommand verifies SSH when remarkable.use_ssh is true."""
+def test_cmd_info_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_path, capsys):
+    """InfoCommand verifies SSH when remarkable.use_ssh is true."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  ssh_host: '10.11.99.1'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False, status=False)
-    StatusCommand(root=tmp_path).run(args)
+    args = MagicMock(json=False)
+    InfoCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
     assert "USB SSH — Preferred" in captured.out
@@ -149,20 +174,18 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_p
 
 @patch.object(SyncCommand, "run", return_value=0)
 def test_main_sync_command_with_cloud(mock_sync):
-    """'living-ink sync --cloud' passes cloud flag to SyncCommand.run."""
+    """'living-ink sync --cloud' reaches SyncCommand.run as its setting."""
     with patch("sys.argv", ["living-ink", "sync", "--cloud"]):
         main()
         mock_sync.assert_called_once()
         args = mock_sync.call_args[0][0]
-        assert args.cloud is True
+        assert args.preferred_connection == "cloud"
 
 
 def test_cmd_sync_cloud_flag_resolves_to_cloud(tmp_path, monkeypatch):
     """SyncCommand resolves --cloud into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
-    args = MagicMock(
-        ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False, status=False
-    )
+    args = sync_namespace(preferred_connection="cloud")
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -174,9 +197,7 @@ def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeyp
     """Resolved settings stay on the pipeline instead of leaking into os.environ."""
     for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
         monkeypatch.delenv(var, raising=False)
-    args = MagicMock(
-        ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False, status=False
-    )
+    args = sync_namespace(preferred_connection="ssh")
 
     _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -187,17 +208,17 @@ def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeyp
 @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-def test_cmd_status_ssh_unplugged_cloud_backup(
+def test_cmd_info_ssh_unplugged_cloud_backup(
     mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, capsys
 ):
-    """StatusCommand reports Cloud backup active when preferred SSH is unplugged."""
+    """InfoCommand reports Cloud backup active when preferred SSH is unplugged."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     (cfg_dir / "config.yml").write_text(
         "remarkable:\n  preferred_connection: 'ssh'\n  use_ssh: true\n  device_token: 'tok'\nai:\n  provider: 'none'\n"
     )
-    args = MagicMock(json=False, status=False)
-    StatusCommand(root=tmp_path).run(args)
+    args = MagicMock(json=False)
+    InfoCommand(root=tmp_path).run(args)
     captured = capsys.readouterr()
     assert "Connected" in captured.out
     assert "Cloud backup active" in captured.out
@@ -206,7 +227,7 @@ def test_cmd_status_ssh_unplugged_cloud_backup(
 @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-def test_cmd_status_finds_a_token_registration_left_in_rmapi(
+def test_cmd_info_finds_a_token_registration_left_in_rmapi(
     mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, isolated_home, capsys
 ):
     """Registration stores the token in ~/.rmapi and leaves device_token empty.
@@ -221,7 +242,7 @@ def test_cmd_status_finds_a_token_registration_left_in_rmapi(
     )
     (isolated_home / ".rmapi").write_text("registered-token", encoding="utf-8")
 
-    StatusCommand(root=tmp_path).run(MagicMock(json=False))
+    InfoCommand(root=tmp_path).run(MagicMock(json=False))
 
     assert "Disconnected" not in capsys.readouterr().out
     mock_verify_cloud.assert_called_once_with("registered-token")
@@ -230,7 +251,7 @@ def test_cmd_status_finds_a_token_registration_left_in_rmapi(
 @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "Unplugged"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-def test_cmd_status_reads_the_token_beside_the_config_it_resolved(
+def test_cmd_info_reads_the_token_beside_the_config_it_resolved(
     mock_verify_ai, mock_verify_ssh, mock_verify_cloud, tmp_path, capsys
 ):
     """A second profile reports on its own account, not the default one."""
@@ -245,7 +266,7 @@ def test_cmd_status_reads_the_token_beside_the_config_it_resolved(
     credentials.write_secret(credentials.CLOUD_TOKEN, "default-profile-token")
     credentials.write_secret(credentials.CLOUD_TOKEN, "this-profile-token", config_path=cfg_file)
 
-    StatusCommand(root=tmp_path).run(MagicMock(json=False))
+    InfoCommand(root=tmp_path).run(MagicMock(json=False))
 
     mock_verify_cloud.assert_called_once_with("this-profile-token")
 
@@ -307,12 +328,9 @@ def test_sync_command_execution(tmp_path):
     cmd = SyncCommand(root=tmp_path)
     args = argparse.Namespace(
         notebook="MyNotes",
-        limit=5,
-        ssh=True,
-        cloud=False,
-        sync_pdfs=True,
-        sync_epubs=False,
-        all_types=False,
+        max_notebooks_per_run=5,
+        preferred_connection="ssh",
+        sync_types=["pdf"],
         keep_temp=True,
     )
     with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None) as mock_init:
@@ -322,12 +340,15 @@ def test_sync_command_execution(tmp_path):
             mock_init.assert_called_once()
             opts = mock_init.call_args.kwargs
             assert opts["notebook"] == "MyNotes"
-            assert opts["limit"] == 5
-            assert opts["ssh"] is True
-            assert opts["sync_pdfs"] is True
-            # An unset store-true flag must defer to config, not force False.
-            assert opts["sync_epubs"] is None
             assert opts["keep_temp"] is True
+            assert opts["flags"] == {
+                "max_notebooks_per_run": 5,
+                "preferred_connection": "ssh",
+                "sync_types": ["pdf"],
+            }
+            # A flag nobody gave is absent, not empty: an empty list would
+            # overrule a config that names the types it wants.
+            assert "sync_tags" not in opts["flags"]
             mock_run.assert_called_once()
 
 
@@ -388,7 +409,9 @@ class TestWizardSyncHandoff:
             ):
                 with patch("sys.stdin.isatty", return_value=False):
                     assert cmd.run(args) == 1
-        assert "run: living-ink setup" in capsys.readouterr().out
+        # stderr: a `--json` run that never got as far as a report still has
+        # to say why, and stdout is reserved for the document.
+        assert "run: living-ink setup" in capsys.readouterr().err
 
     def test_sync_launched_by_the_wizard_does_not_reoffer_it(self, tmp_path, capsys):
         """A still-broken config after setup reports the problem, it does not loop."""
@@ -406,13 +429,13 @@ class TestWizardSyncHandoff:
                             mock_input.assert_not_called()
 
 
-def test_status_command_json_output(tmp_path, capsys):
-    """StatusCommand with --json outputs structured JSON."""
+def test_info_command_json_output(tmp_path, capsys):
+    """InfoCommand with --json outputs structured JSON."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     (cfg_dir / "config.yml").write_text("ai:\n  provider: 'none'\n")
 
-    cmd = StatusCommand(root=tmp_path)
+    cmd = InfoCommand(root=tmp_path)
     args = argparse.Namespace(json=True)
     code = cmd.run(args)
     assert code == 0
@@ -423,9 +446,9 @@ def test_status_command_json_output(tmp_path, capsys):
     assert "ai" in data
 
 
-def test_status_command_json_missing_config(tmp_path, capsys):
-    """StatusCommand with --json returns 1 when config is missing."""
-    cmd = StatusCommand(root=tmp_path)
+def test_info_command_json_missing_config(tmp_path, capsys):
+    """InfoCommand with --json returns 1 when config is missing."""
+    cmd = InfoCommand(root=tmp_path)
     args = argparse.Namespace(json=True)
     code = cmd.run(args)
     assert code == 1
@@ -457,8 +480,12 @@ def test_cli_default_routing_to_setup(tmp_path):
         mock_setup_run.assert_called_once()
 
 
-def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
-    """--dry-run is an option on the run, not a setting on disk."""
+def test_cmd_sync_the_rehearsal_reaches_the_pipeline(tmp_path):
+    """Publishing nothing is an option on the run, not a setting on disk.
+
+    ``--keep-temp`` is asserted off on purpose: the rehearsal used to turn it
+    on behind the user's back, which left artifacts a real sync would purge.
+    """
     args = argparse.Namespace(
         notebook=None,
         limit=0,
@@ -469,12 +496,13 @@ def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
         sync_epubs=False,
         all_types=False,
         keep_temp=False,
-        dry_run=True,
+        preview=True,
+        transcribe=True,
     )
     pipeline_obj = _run_sync_capturing_pipeline(args, tmp_path)
 
     assert pipeline_obj.dry_run is True
-    assert pipeline_obj.keep_temp is True
+    assert pipeline_obj.keep_temp is False
 
 
 def test_cmd_sync_prune_flag_reaches_the_pipeline(tmp_path):
@@ -511,11 +539,11 @@ def test_cmd_sync_does_not_prune_by_default(tmp_path):
     assert _run_sync_capturing_pipeline(args, tmp_path).prune is False
 
 
-class TestStatusSettingsReport:
-    """`status` reports the effective settings, not just connectivity."""
+class TestInfoSettingsReport:
+    """`info` reports the effective settings, not just connectivity."""
 
     def _report(self, config_text, env=None):
-        """Collect a status report for a config file, with probing stubbed out."""
+        """Collect a health report for a config file, with probing stubbed out."""
         import tempfile
         from pathlib import Path as _Path
 
@@ -589,18 +617,18 @@ class TestStatusSettingsReport:
     def test_console_output_names_the_overriding_variable(self, capsys):
         report = self._report("sync: {}\n", env={"SYNC_OCR_CONCURRENCY": "3"})
 
-        StatusCommand._render_settings(report)
+        InfoCommand._render_settings(report)
 
         out = capsys.readouterr().out
         assert "ocr_concurrency" in out
         assert "SYNC_OCR_CONCURRENCY" in out
 
 
-class TestStatusChecksStoredCredentials:
-    """`status` verifies the provider with the key it will actually use."""
+class TestInfoChecksStoredCredentials:
+    """`info` verifies the provider with the key it will actually use."""
 
     def _collect(self, tmp_path, config_text, secrets=(), verify=None):
-        """Collect a status report against an isolated config directory.
+        """Collect a health report against an isolated config directory.
 
         Args:
             tmp_path: Pytest temporary directory.
@@ -649,7 +677,7 @@ class TestStatusChecksStoredCredentials:
         assert seen == ["AIza-stored"]
 
     def test_a_key_still_in_the_config_is_the_fallback(self, tmp_path):
-        """`status` may run before the first sync, which is what migrates it."""
+        """`info` may run before the first sync, which is what migrates it."""
         seen = []
 
         def _verify(provider, api_key="", model=""):
@@ -694,7 +722,7 @@ class TestStatusChecksStoredCredentials:
         report = self._collect(tmp_path, "ai:\n  provider: none\n")
         capsys.readouterr()
 
-        StatusCommand._render_console(report)
+        InfoCommand._render_console(report)
 
         out = capsys.readouterr().out
         assert str(loose) in out
@@ -713,20 +741,25 @@ class TestWatchCommand:
             interval: Value for --interval.
 
         Returns:
-            (exit code, execute_sync mock, sleep mock).
+            (exit code, execute_sync mock, sleep mock). The interrupt is
+            turned into 130 here exactly the way ``main`` turns it into 130,
+            so each test can state what the shell would see.
         """
         args = argparse.Namespace(interval=interval)
         with (
             patch.object(SyncCommand, "execute_sync", side_effect=side_effects) as sync,
-            patch("living_ink.cli.time.sleep") as sleep,
+            patch("living_ink.cli.commands.watch.time.sleep") as sleep,
         ):
-            code = WatchCommand().run(args)
+            try:
+                code = WatchCommand().run(args)
+            except KeyboardInterrupt:
+                code = 130
         return code, sync, sleep
 
     def test_syncs_repeatedly_until_interrupted(self):
         code, sync, sleep = self._watch([True, True, KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 3
         assert sleep.call_count == 2
 
@@ -734,14 +767,29 @@ class TestWatchCommand:
         """An unplugged tablet is the condition watch exists to ride out."""
         code, sync, _ = self._watch([False, KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 2
 
     def test_an_unexpected_error_does_not_end_the_watch(self):
         code, sync, _ = self._watch([RuntimeError("tablet vanished"), KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 2
+
+    def test_a_stopped_watch_is_never_reported_as_a_clean_finish(self):
+        """Converting Ctrl+C to 0 is what makes a supervised watch unstoppable.
+
+        `launchd` with `KeepAlive` and systemd with `Restart=always` both read
+        exit 0 as "the job is done" and start it straight back up, so the
+        interrupt has to leave the loop intact for `main` to answer 130.
+        """
+        args = argparse.Namespace(interval=30)
+        with (
+            patch.object(SyncCommand, "execute_sync", side_effect=KeyboardInterrupt),
+            patch("living_ink.cli.commands.watch.time.sleep"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            WatchCommand().run(args)
 
     def test_a_missing_config_stops_the_watch(self):
         """That failure will still be there next tick, so looping is pointless."""
@@ -756,7 +804,7 @@ class TestWatchCommand:
         with (
             patch.object(SyncCommand, "execute_sync", side_effect=ConfigurationMissing("nope")),
             patch("builtins.input", side_effect=AssertionError("must not prompt")),
-            patch("living_ink.cli.time.sleep"),
+            patch("living_ink.cli.commands.watch.time.sleep"),
         ):
             assert WatchCommand().run(args) == 1
 
@@ -766,24 +814,26 @@ class TestWatchCommand:
 
         sleep.assert_called_once_with(WatchCommand.MIN_INTERVAL)
 
-    def test_interrupting_the_wait_stops_cleanly(self):
+    def test_interrupting_the_wait_stops_it_the_same_way(self):
+        """Ctrl+C lands in the sleep far more often than in a sync."""
         args = argparse.Namespace(interval=30)
         with (
             patch.object(SyncCommand, "execute_sync", return_value=True),
-            patch("living_ink.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch("living_ink.cli.commands.watch.time.sleep", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
         ):
-            assert WatchCommand().run(args) == 0
+            WatchCommand().run(args)
 
     def test_watch_is_registered_and_takes_every_sync_option(self):
         parser = LivingInkCLI().build_parser()
 
         args = parser.parse_args(["watch", "--interval", "60", "--notebook", "Foo", "--cloud"])
 
-        assert (args.command, args.interval, args.notebook, args.cloud) == (
+        assert (args.command, args.interval, args.notebook, args.preferred_connection) == (
             "watch",
             60,
             "Foo",
-            True,
+            "cloud",
         )
 
     def test_watch_interval_defaults_to_half_an_hour(self):
@@ -793,33 +843,43 @@ class TestWatchCommand:
 
 
 class TestVerbosityFlags:
-    """--verbose and --quiet are accepted on either side of the subcommand."""
+    """--verbose and --quiet are accepted on either side of the subcommand.
+
+    Both set one value, ``output.verbosity``, because they are two answers to
+    one question rather than two switches: a config file that says ``quiet``
+    and a command line that says ``--verbose`` have to be comparable, and two
+    independent booleans give no answer for the pair that are both on.
+    """
 
     def _parse(self, argv):
         return LivingInkCLI().build_parser().parse_args(argv)
 
     def test_verbose_after_the_subcommand(self):
-        assert self._parse(["sync", "--verbose"]).verbose is True
+        assert self._parse(["sync", "--verbose"]).verbosity == "verbose"
 
     def test_verbose_before_the_subcommand(self):
         """A subparser default would silently overwrite the flag given here."""
-        assert self._parse(["--verbose", "sync"]).verbose is True
+        assert self._parse(["--verbose", "sync"]).verbosity == "verbose"
 
     def test_quiet_after_the_subcommand(self):
-        assert self._parse(["sync", "-q"]).quiet is True
+        assert self._parse(["sync", "-q"]).verbosity == "quiet"
 
-    def test_neither_flag_leaves_both_unset(self):
-        args = self._parse(["sync"])
-        assert getattr(args, "verbose", False) is False
-        assert getattr(args, "quiet", False) is False
+    def test_neither_flag_leaves_the_value_unset(self):
+        """Absent, not "normal": an unset flag must defer to the config file."""
+        assert getattr(self._parse(["sync"]), "verbosity", None) is None
+
+    def test_the_later_flag_wins(self):
+        """One dest, so a contradictory pair resolves by position, not by luck."""
+        assert self._parse(["--verbose", "sync", "--quiet"]).verbosity == "quiet"
+        assert self._parse(["--quiet", "sync", "--verbose"]).verbosity == "verbose"
 
     def test_dispatch_configures_logging(self, tmp_path):
         from living_ink import logs
 
-        args = argparse.Namespace(command="status", config=None, verbose=True, quiet=False)
+        args = argparse.Namespace(command="info", config=None, verbosity="verbose")
         with (
             patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
-            patch.object(StatusCommand, "run", return_value=0),
+            patch.object(InfoCommand, "run", return_value=0),
         ):
             try:
                 LivingInkCLI().dispatch(args)
@@ -827,6 +887,189 @@ class TestVerbosityFlags:
             finally:
                 logs.reset_handlers()
                 logs._console_mode = logs.ConsoleMode.PLAIN
+
+
+class TestVerbosityResolvesLikeEverySetting:
+    """``output.verbosity`` is a setting, so the file and the environment count.
+
+    ``--quiet`` used to be the only thing the console ever read, which made the
+    config key inert: declared in the schema, listed by ``info``, documented,
+    and ignored. A user who wrote ``verbosity: quiet`` once and expected every
+    run to be quiet got a full run every time, with nothing to say why.
+    """
+
+    def _configure(self, tmp_path, argv, config_text=None, **env):
+        """Configure logging the way ``dispatch`` does and return the mode."""
+        from living_ink import logs
+        from living_ink.cli.app import configure_logging
+
+        config = tmp_path / "config.yml"
+        if config_text is not None:
+            config.write_text(config_text, encoding="utf-8")
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        with (
+            patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
+            patch.dict(os.environ, {"LIVING_INK_CONFIG": str(config), **env}, clear=False),
+        ):
+            try:
+                configure_logging(args)
+                return logs.console_mode()
+            finally:
+                logs.reset_handlers()
+                logs._console_mode = logs.ConsoleMode.PLAIN
+
+    def test_the_config_file_alone_makes_a_run_quiet(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync"], "output:\n  verbosity: quiet\n")
+        assert mode.name == "QUIET"
+
+    def test_the_environment_alone_makes_a_run_verbose(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync"], LIVING_INK_VERBOSITY="verbose")
+        assert mode.name == "VERBOSE"
+
+    def test_the_flag_beats_the_file(self, tmp_path):
+        mode = self._configure(tmp_path, ["sync", "--verbose"], "output:\n  verbosity: quiet\n")
+        assert mode.name == "VERBOSE"
+
+    def test_an_unparseable_config_still_honours_the_flag(self, tmp_path):
+        """The command about to run reports the parse error; this one cannot.
+
+        Configuring logging is the first thing that happens, so raising here
+        would replace a readable "check your indentation" with a traceback
+        from the logging setup.
+        """
+        mode = self._configure(tmp_path, ["sync", "--quiet"], "output:\n\tverbosity: quiet\n")
+        assert mode.name == "QUIET"
+
+    def test_json_keeps_stdout_clean_from_the_config_file_too(self, tmp_path):
+        """``output.json`` is a setting as well, and it is orthogonal to volume."""
+        mode = self._configure(tmp_path, ["sync"], "output:\n  json: true\n")
+        assert mode.name == "JSON"
+
+
+class TestJsonKeepsStdoutToOneDocument:
+    """``--json`` promises stdout holds one JSON value and nothing else.
+
+    It is a promise about the *stream*, not about the summary: the report was
+    always valid JSON, and the run still printed a deprecation warning, a
+    permissions repair and a failover notice around it with a bare ``print``.
+    Anything piping the output got a parse error on line one, which is the
+    single failure ``--json`` exists to prevent.
+    """
+
+    @pytest.fixture
+    def _sandbox(self, tmp_path, monkeypatch):
+        """Point every path this run would touch at a temp directory."""
+        from living_ink import pipeline as pipeline_module
+
+        monkeypatch.setattr(pipeline_module, "DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(pipeline_module, "ensure_runtime_dirs", lambda: None)
+        monkeypatch.setattr(pipeline_module, "validate_environment", lambda: None)
+        monkeypatch.setattr(pipeline_module, "cleanup_temp_artifacts", lambda **kw: None)
+        monkeypatch.setattr(pipeline_module, "register_temp_cleanup", lambda **kw: None)
+        # The config is read once per process, so a test that ran earlier has
+        # already spent the warnings this one is about.
+        pipeline_module.reset_caches()
+        yield
+        pipeline_module.reset_caches()
+
+    def _run(self, tmp_path, monkeypatch, argv, config_text):
+        """Run the real CLI over an empty tablet and return what it printed."""
+        from types import SimpleNamespace
+
+        from living_ink import logs
+        from living_ink.pipeline import SyncPipeline
+
+        config = tmp_path / "config.yml"
+        config.write_text(config_text, encoding="utf-8")
+        monkeypatch.setenv("LIVING_INK_CONFIG", str(config))
+        monkeypatch.setattr(logs, "LOG_PATH", tmp_path / "pipeline.log")
+        monkeypatch.setattr(
+            SyncPipeline, "connect", lambda self: SimpleNamespace(get_meta_items=lambda: [])
+        )
+        monkeypatch.setattr(SyncPipeline, "preflight_destinations", lambda self: None)
+        monkeypatch.setattr(SyncPipeline, "_learn_device", lambda self, client: None)
+        try:
+            LivingInkCLI().run(argv)
+        finally:
+            logs.reset_handlers()
+            logs._console_mode = logs.ConsoleMode.PLAIN
+
+    def test_a_deprecated_config_key_does_not_break_the_document(
+        self, tmp_path, monkeypatch, capsys, _sandbox
+    ):
+        """The exact leak: five ``⚠️ config.yml — …`` lines ahead of the JSON."""
+        self._run(
+            tmp_path,
+            monkeypatch,
+            ["sync", "--json", "--verbose"],
+            "use_ssh: true\nopenai:\n  model: gpt-4o\n",
+        )
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)
+        # Not merely absent from stdout — the user still has to be told.
+        assert "config.yml" in captured.err
+
+    def test_verbose_page_lines_go_to_stderr(self, tmp_path, monkeypatch, capsys, _sandbox):
+        """§15.4: verbosity picks the volume, ``--json`` picks the stream."""
+        self._run(tmp_path, monkeypatch, ["sync", "--json", "--verbose"], "sync: {}\n")
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)
+        assert "Pipeline started" in captured.err
+
+    def test_quiet_and_json_still_print_the_document(self, tmp_path, monkeypatch, capsys, _sandbox):
+        """``--quiet`` silences the human stream, never the report itself."""
+        self._run(tmp_path, monkeypatch, ["sync", "--json", "--quiet"], "sync: {}\n")
+        assert json.loads(capsys.readouterr().out)
+
+
+class TestNoticeIsNotProgress:
+    """A problem is not chatter, so no verbosity may swallow it."""
+
+    @pytest.fixture(autouse=True)
+    def _restore(self):
+        from living_ink import logs
+
+        yield
+        logs._console_mode = logs.ConsoleMode.PLAIN
+
+    @pytest.mark.parametrize("mode", ["PLAIN", "QUIET", "VERBOSE", "JSON"])
+    def test_every_mode_says_it_on_stderr(self, mode, capsys):
+        from living_ink import logs
+
+        logs._console_mode = logs.ConsoleMode[mode]
+        logs.notice("deprecated key")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "deprecated key" in captured.err
+
+    def test_a_secret_is_redacted_on_the_way_out(self, capsys):
+        from living_ink import logs
+        from living_ink.redact import register_secret
+
+        register_secret("AIzaSyTOPSECRETVALUE")
+        logs.notice("key AIzaSyTOPSECRETVALUE is deprecated")
+        assert "TOPSECRET" not in capsys.readouterr().err
+
+
+class TestReconfiguringKeepsTheMode:
+    """``ensure_configured`` carries every mode forward, JSON included."""
+
+    @pytest.mark.parametrize("mode", ["QUIET", "VERBOSE", "JSON"])
+    def test_a_moved_log_file_does_not_reset_the_console(self, mode, tmp_path):
+        from living_ink import logs
+
+        try:
+            logs.configure(
+                tmp_path / "first.log",
+                quiet=mode == "QUIET",
+                verbose=mode == "VERBOSE",
+                json_output=mode == "JSON",
+            )
+            logs.ensure_configured(tmp_path / "second.log")
+            assert logs.console_mode() is logs.ConsoleMode[mode]
+        finally:
+            logs.reset_handlers()
+            logs._console_mode = logs.ConsoleMode.PLAIN
 
 
 class TestDestinationLabels:
@@ -843,8 +1086,8 @@ class TestDestinationLabels:
         assert short_destination("ObsidianDestination") == "Obsidian"
 
 
-class TestStatusDefersTheDocumentQuestion:
-    """`status` reports the setup; the tablet is asked about separately."""
+class TestInfoDefersTheDocumentQuestion:
+    """`info` reports the setup; the tablet is asked about separately."""
 
     def _report(self):
         """Collect a report with every probe stubbed out."""
@@ -866,24 +1109,41 @@ class TestStatusDefersTheDocumentQuestion:
         """A count from the database alone would be a guess about the tablet."""
         assert "documents" not in self._report().to_dict()
 
-    def test_the_console_points_at_the_live_comparison(self, capsys):
-        StatusCommand._render_console(self._report())
-        assert "living-ink sync --status" in capsys.readouterr().out
+    def test_the_console_says_nothing_about_documents(self, capsys):
+        """Not even a pointer: a line about documents that reports no documents
+        reads as an answer, and the answer is somewhere else."""
+        InfoCommand._render_console(self._report())
+        assert "Documents" not in capsys.readouterr().out
 
     def test_list_is_gone(self):
         assert "list" not in LivingInkCLI().commands
 
-    def test_the_status_flags_parse(self):
-        args = LivingInkCLI().build_parser().parse_args(["sync", "--status", "--all", "--json"])
-        assert (args.command, args.status, args.all, args.json) == ("sync", True, True, True)
+    def test_the_preview_flags_parse(self):
+        args = LivingInkCLI().build_parser().parse_args(["sync", "--preview", "--all", "--json"])
+        assert (args.command, args.preview, args.all, args.output_json) == (
+            "sync",
+            True,
+            True,
+            True,
+        )
 
 
-class TestStateCommand:
-    """`state` is the hand tool for the file everything else depends on."""
+class TestInfoReportsTheStores:
+    """The two files a sync depends on, reported where `state` and `cache` were.
+
+    Both commands are gone; what they said about the database and the caches is
+    now a block of one `info` report, so these exercise the reader and the
+    renderer rather than a command each.
+    """
 
     @pytest.fixture
     def store(self, tmp_path, monkeypatch):
-        """A real store on a throwaway database, wired into the command."""
+        """A real store on a throwaway database, wired into the status reader.
+
+        Both `caches.state_db_path` and `pipeline.get_state_store` read
+        `pipeline.DATA_DIR` when they are called, so redirecting it is enough to
+        keep the developer's own `state.db` out of the test.
+        """
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
@@ -896,204 +1156,131 @@ class TestStateCommand:
         yield opened
         pipeline.reset_state_store()
 
-    def _run(self, capsys, **flags):
-        """Run the command and return its exit code and output."""
-        from living_ink.cli import StateCommand
+    def _report(self, tmp_path):
+        """Collect the state half of a report, which needs no probes stubbed."""
+        from living_ink.cli import status as status_module
 
-        defaults = {
-            "dump": False,
-            "forget": None,
-            "repair": False,
-            "destination": None,
-            "json": False,
-        }
-        code = StateCommand().run(argparse.Namespace(**{**defaults, **flags}))
-        return code, capsys.readouterr().out
+        report = status_module.StatusReport(config_path=tmp_path / "config.yml")
+        status_module._collect_state(report)
+        return report
 
-    def test_the_summary_counts_the_tables(self, store, capsys):
-        _, out = self._run(capsys)
-        assert "documents" in out
-        assert "schema" in out
+    def test_the_summary_counts_the_tables(self, store, tmp_path):
+        report = self._report(tmp_path)
 
-    def test_a_missing_database_is_reported_not_created(self, tmp_path, monkeypatch, capsys):
+        assert report.state_exists
+        assert report.state_counts["documents"] == 1
+        assert report.state_counts["publications"] == 1
+
+    def test_the_schema_version_comes_from_the_file(self, store, tmp_path):
+        """The constant says what this build writes; the pragma says what is there."""
+        from living_ink import state
+
+        assert self._report(tmp_path).state_schema == state.SCHEMA_VERSION
+
+    def test_a_missing_database_is_reported_not_created(self, tmp_path, monkeypatch):
+        from living_ink import pipeline
+
+        empty = tmp_path / "empty"
+        monkeypatch.setattr(pipeline, "DATA_DIR", empty)
+        report = self._report(tmp_path)
+
+        assert not report.state_exists
+        assert report.state_path is not None
+        assert not empty.exists()
+
+    def test_an_unreadable_database_does_not_take_the_rest_down(self, store, tmp_path, monkeypatch):
+        """A corrupt state file is the condition a health check exists to find."""
+        from living_ink import pipeline
+
+        monkeypatch.setattr(
+            pipeline,
+            "get_state_store",
+            MagicMock(side_effect=sqlite3.DatabaseError("file is not a database")),
+        )
+        report = self._report(tmp_path)
+
+        assert not report.state_exists
+        assert report.state_counts == {}
+
+    def test_the_console_names_what_is_recorded(self, store, tmp_path, capsys):
+        InfoCommand._render_state(self._report(tmp_path))
+        out = capsys.readouterr().out
+
+        assert "1 document(s)" in out
+        assert "1 publication(s)" in out
+
+    def test_a_fresh_install_says_so_rather_than_printing_zeros(
+        self, tmp_path, monkeypatch, capsys
+    ):
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "empty")
-        code, out = self._run(capsys)
+        InfoCommand._render_state(self._report(tmp_path))
 
-        assert code == 1
-        assert "living-ink sync" in out
-        assert not (tmp_path / "empty").exists()
+        assert "living-ink sync" in capsys.readouterr().out
 
-    def test_dump_prints_the_rows(self, store, capsys):
-        _, out = self._run(capsys, dump=True)
-        assert "Journal" in out
-        assert "[publications]" in out
+    def test_the_last_run_is_printed_with_its_outcome(self, store, tmp_path, capsys):
+        store.finish_run(store.start_run(), outcome="interrupted")
 
-    def test_dump_json_is_parseable(self, store, capsys):
-        _, out = self._run(capsys, dump=True, json=True)
-        assert json.loads(out)["documents"][0]["name"] == "Journal"
+        InfoCommand._render_state(self._report(tmp_path))
 
-    def test_forget_drops_the_publication(self, store, capsys):
-        code, out = self._run(capsys, forget="Journal")
+        assert "interrupted" in capsys.readouterr().out
 
-        assert code == 0
-        assert store.published_versions("ObsidianDestination") == {}
-        assert "next sync" in out
+    def test_the_rows_are_the_dump_that_state_used_to_print(self, store):
+        from living_ink.cli import state_rows
 
-    def test_forget_accepts_a_folder_path(self, store, capsys):
-        code, _ = self._run(capsys, forget="Personal/Journal")
-        assert code == 0
+        assert state_rows()["documents"][0]["name"] == "Journal"
 
-    def test_forget_can_target_one_destination(self, store, capsys):
-        store.record_publication("id-1", "FakeApiDestination", "v1", recipe="")
+    def test_the_rows_are_empty_without_a_database(self, tmp_path, monkeypatch):
+        from living_ink import pipeline
+        from living_ink.cli import state_rows
 
-        self._run(capsys, forget="id-1", destination="ObsidianDestination")
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "empty")
 
-        assert store.published_versions("FakeApiDestination") == {"id-1": "v1"}
+        assert state_rows() == {}
 
-    def test_forget_refuses_an_unknown_document(self, store, capsys):
-        code, out = self._run(capsys, forget="nope")
-        assert code == 1
-        assert "No document matches" in out
+    def test_json_carries_the_summary_and_the_rows(self, store, tmp_path, capsys):
+        """One `--json`, where `status`, `state` and `cache` had three."""
+        config = tmp_path / "config.yml"
+        config.write_text("sync: {}\n")
+        with (
+            patch("living_ink.cli.commands.info.get_config_path", return_value=config),
+            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_ai_provider", return_value=(False, "no")),
+        ):
+            InfoCommand().run(MagicMock(json=True))
 
-    def test_forget_refuses_to_guess_between_two_matches(self, store, capsys):
-        """Picking one would silently re-OCR the wrong notebook."""
-        store.record_document("id-2", name="Journal", folder="Work", version="v1")
+        payload = json.loads(capsys.readouterr().out)["state"]
+        assert payload["counts"]["documents"] == 1
+        assert payload["rows"]["documents"][0]["name"] == "Journal"
 
-        code, out = self._run(capsys, forget="Journal")
-
-        assert code == 1
-        assert "id-1" in out and "id-2" in out
-        assert store.published_versions("ObsidianDestination") == {"id-1": "v1"}
-
-    def test_repair_reports_a_healthy_database(self, store, capsys):
-        code, out = self._run(capsys, repair=True)
-        assert code == 0
-        assert "ok" in out
-
-    def test_repair_reports_damage_without_deleting_anything(self, store, capsys, monkeypatch):
-        monkeypatch.setattr(store, "integrity_check", lambda: "page 4 is never used")
-
-        code, out = self._run(capsys, repair=True)
-
-        assert code == 1
-        assert "page 4 is never used" in out
-        assert store.path.exists()
-
-    def test_the_command_is_registered(self):
-        assert "state" in LivingInkCLI().commands
-
-    def test_the_actions_are_mutually_exclusive(self):
-        parser = LivingInkCLI().build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args(["state", "--dump", "--repair"])
-
-
-class TestCacheCommand:
-    """`cache` is the hand tool for the thing that saves the money."""
-
-    @pytest.fixture
-    def cache(self, tmp_path, monkeypatch):
-        """A real transcript cache in a throwaway directory, wired into the command.
-
-        The render cache is redirected alongside it so the command never reads
-        the developer's own.
-        """
-        from living_ink import cli as cli_module
+    def test_the_cache_line_totals_every_cache(self, tmp_path, monkeypatch, capsys):
+        """`cache` reported the caches and `status` measured them; now one does."""
         from living_ink.cache import RenderCache, TranscriptCache
+        from living_ink.cli import caches as caches_module
+        from living_ink.cli import status as status_module
 
-        built = TranscriptCache(tmp_path / "transcripts")
-        renders = RenderCache(tmp_path / "renders")
-        monkeypatch.setattr(cli_module, "transcript_cache", lambda: built)
-        monkeypatch.setattr(cli_module, "render_cache", lambda: renders)
-        return built
+        transcripts = TranscriptCache(tmp_path / "transcripts")
+        transcripts.put("aa", "text")
+        monkeypatch.setattr(
+            caches_module,
+            "all_caches",
+            lambda: [transcripts, RenderCache(tmp_path / "renders")],
+        )
+        monkeypatch.setattr(caches_module, "state_db_path", lambda: tmp_path / "state.db")
+        config = tmp_path / "config.yml"
+        config.write_text("sync: {}\n")
+        with (
+            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_ai_provider", return_value=(False, "no")),
+        ):
+            report = status_module.collect_status(config)
 
-    def _run(self, capsys, **flags):
-        """Run the command and return its exit code and output."""
-        from living_ink.cli import CacheCommand
-
-        defaults = {"clear": False, "prune": None, "json": False}
-        code = CacheCommand().run(argparse.Namespace(**{**defaults, **flags}))
-        return code, capsys.readouterr().out
-
-    def test_an_empty_cache_is_not_an_error(self, cache, capsys):
-        code, out = self._run(capsys)
-        assert code == 0
-        assert "0 page(s)" in out
-
-    def test_the_summary_counts_the_entries(self, cache, capsys):
-        cache.put("aa", "text")
-        cache.put("bb", "text")
-        _, out = self._run(capsys)
-        assert "2 page(s)" in out
-
-    def test_the_summary_says_where_it_lives(self, cache, capsys):
-        _, out = self._run(capsys)
-        assert str(cache.root) in out
-
-    def test_a_disabled_cache_says_so(self, cache, tmp_path, monkeypatch, capsys):
-        from living_ink import cli as cli_module
-        from living_ink.cache import TranscriptCache
-
-        off = TranscriptCache(tmp_path / "t", enabled=False)
-        monkeypatch.setattr(cli_module, "transcript_cache", lambda: off)
-        _, out = self._run(capsys)
-        assert "disabled" in out
-
-    def test_both_caches_are_reported(self, cache, capsys):
-        _, out = self._run(capsys)
-        assert "transcribed page" in out
-        assert "rendered page" in out
-
-    def test_json_reports_the_same_numbers(self, cache, capsys):
-        cache.put("aa", "text")
-        _, out = self._run(capsys, json=True)
-        payload = json.loads(out)["transcribed page"]
-        assert payload["entries"] == 1
-        assert payload["size_bytes"] > 0
-
-    def test_clearing_removes_everything(self, cache, capsys):
-        cache.put("aa", "text")
-        code, out = self._run(capsys, clear=True)
-        assert code == 0
-        assert "1 cached transcribed page(s)" in out
-        assert cache.stats() == (0, 0)
-
-    def test_clearing_warns_that_the_pages_will_be_paid_for_again(self, cache, capsys):
-        cache.put("aa", "text")
-        _, out = self._run(capsys, clear=True)
-        assert "paid for" in out
-
-    def test_pruning_keeps_fresh_entries(self, cache, capsys):
-        cache.put("aa", "text")
-        _, out = self._run(capsys, prune=30)
-        assert "0 cached transcribed page(s)" in out
-        assert cache.get("aa") is not None
-
-    def test_pruning_drops_stale_entries(self, cache, capsys):
-        import os
-        import time
-
-        cache.put("aa", "text")
-        old = time.time() - 200 * 86400
-        os.utime(cache._path_for("aa"), (old, old))
-
-        _, out = self._run(capsys, prune=90)
-        assert "1 cached transcribed page(s)" in out
-        assert cache.get("aa") is None
-
-    def test_a_bare_prune_uses_the_configured_age(self, cache, capsys):
-        _, out = self._run(capsys, prune=-1, json=True)
-        assert json.loads(out)["max_age_days"] == cache.max_age_days
-
-    def test_reading_the_cache_does_not_create_it(self, cache, capsys):
-        self._run(capsys)
-        assert not cache.root.exists()
-
-    def test_clearing_reports_the_render_cache_too(self, cache, capsys):
-        _, out = self._run(capsys, clear=True)
-        assert "0 cached rendered page(s)" in out
+        assert report.cache_entries == 1
+        InfoCommand._render_console(report)
+        assert "1 page(s)" in capsys.readouterr().out
 
 
 class TestInterruptExitCode:
@@ -1107,14 +1294,14 @@ class TestInterruptExitCode:
         assert exit_info.value.code == 130
 
 
-class TestDeviceLineInStatus:
-    """Naming the tablet is useful; failing to name it must not break status."""
+class TestDeviceLineInInfo:
+    """Naming the tablet is useful; failing to name it must not break info."""
 
     @pytest.fixture
     def empty_store(self, tmp_path):
         """Point the device memory at a throwaway database.
 
-        Without this the status probe would read — and a USB reading would
+        Without this the health probe would read — and a USB reading would
         write — the developer's own ``state.db``.
 
         Args:
@@ -1180,15 +1367,15 @@ class TestDeviceLineInStatus:
             "remarkable:\n  preferred_connection: 'cloud'\nai:\n  provider: 'none'\n"
         )
         with patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK")):
-            StatusCommand(root=tmp_path).run(MagicMock(json=False))
+            InfoCommand(root=tmp_path).run(MagicMock(json=False))
 
         out = capsys.readouterr().out
         assert "Device:" in out
         assert "assumed" in out
 
 
-class TestSyncStatusFlag:
-    """`sync --status` previews a sync instead of running one."""
+class TestSyncPreviewFlag:
+    """`sync --preview` previews a sync instead of running one."""
 
     def _rows(self, count, status=None):
         """Build `count` comparison rows, all in the same state."""
@@ -1211,9 +1398,11 @@ class TestSyncStatusFlag:
         """Run the command against a stubbed comparison and return its output."""
         from living_ink.cli import SyncCommand
 
-        defaults = {"status": True, "all": False, "json": False}
+        defaults = {"preview": True, "all": False, "output_json": False}
         args = argparse.Namespace(**{**defaults, **flags})
-        with patch("living_ink.cli.compare_with_device", return_value=(rows, orphans or [], None)):
+        with patch(
+            "living_ink.cli.inventory.compare_with_device", return_value=(rows, orphans or [], None)
+        ):
             code = SyncCommand().run(args)
         return code, capsys.readouterr().out
 
@@ -1251,8 +1440,13 @@ class TestSyncStatusFlag:
         assert "10 of 12 shown · 2 more — use --all" in out
 
     def test_all_shows_every_row(self, capsys):
-        with patch("sys.stdout.isatty", return_value=False):
-            _, out = self._show(capsys, self._rows(12), all=True)
+        """And it prints them straight through — there is no pager to stop at.
+
+        ``--all`` used to pause every ten rows on a terminal and wait for a
+        keypress, which made a read-only question something a script could
+        hang on.
+        """
+        _, out = self._show(capsys, self._rows(12), all=True)
         assert "Note 11" in out
         assert "use --all" not in out
 
@@ -1272,17 +1466,17 @@ class TestSyncStatusFlag:
 
     def test_json_keys_documents_by_the_stable_status_key(self, capsys):
         orphans = [{"id": "doc-old", "name": "Deleted"}]
-        _, out = self._show(capsys, self._rows(1), orphans=orphans, json=True)
+        _, out = self._show(capsys, self._rows(1), orphans=orphans, output_json=True)
         payload = json.loads(out)
         assert payload["counts"] == {"failed": 0, "new": 1, "changed": 0, "up_to_date": 0}
         assert payload["documents"][0]["status"] == "new"
         assert payload["orphans"] == ["doc-old"]
 
-    def test_the_status_flag_never_runs_a_sync(self, capsys):
+    def test_the_preview_flag_never_runs_a_sync(self, capsys):
         from living_ink.cli import SyncCommand
 
-        args = argparse.Namespace(status=True, all=False, json=False)
-        with patch("living_ink.cli.compare_with_device", return_value=([], [], None)):
+        args = argparse.Namespace(preview=True, all=False, json=False)
+        with patch("living_ink.cli.inventory.compare_with_device", return_value=([], [], None)):
             with patch.object(SyncCommand, "execute_sync") as mock_sync:
                 SyncCommand().run(args)
         mock_sync.assert_not_called()
@@ -1291,9 +1485,10 @@ class TestSyncStatusFlag:
         from living_ink.cli import SyncCommand
         from living_ink.config import ConfigurationMissing
 
-        args = argparse.Namespace(status=True, all=False, json=False)
+        args = argparse.Namespace(preview=True, all=False, json=False)
         with patch(
-            "living_ink.cli.compare_with_device", side_effect=ConfigurationMissing("no config")
+            "living_ink.cli.inventory.compare_with_device",
+            side_effect=ConfigurationMissing("no config"),
         ):
             with patch.object(SyncCommand, "_handle_missing_config") as mock_wizard:
                 code = SyncCommand().run(args)
@@ -1303,51 +1498,135 @@ class TestSyncStatusFlag:
         assert "living-ink setup" in capsys.readouterr().err
 
 
-class TestComparisonPaging:
-    """`--all` on a terminal stops every ten rows instead of scrolling away."""
+class TestThePreviewNarrowsExactlyLikeTheRun:
+    """``--preview`` answers "what would *this exact command* do".
 
-    def _rows(self, count):
-        """`count` rows, enough to span more than one page."""
+    It used to answer a different question — "where does everything stand" —
+    and build its own :class:`SelectionCriteria` holding nothing but the
+    configured exclusions. So ``sync --preview --pdf`` previewed notebooks,
+    ``--limit 1`` previewed forty documents, ``--tag`` was ignored outright,
+    and ``--ssh`` was read from a ``dest`` the generated parser had stopped
+    using, so a forced transport silently did nothing. Each of those is a
+    preview predicting something the run does not do, in the one feature whose
+    entire purpose is to say what will happen.
+    """
 
-        return [
-            {
-                "id": f"doc-{n:04d}",
-                "name": f"Note {n}",
-                "doc_type": "notebook",
-                "status": STATUS_NEW,
-                "last_error": None,
-            }
-            for n in range(count)
-        ]
+    def _probe(self, monkeypatch, tmp_path, argv, config=None):
+        """Run the real comparison against stubbed seams and report what it asked.
 
-    def _page(self, capsys, rows, answers, interactive=True):
-        """Page through `rows`, feeding `answers` to each prompt."""
-        from living_ink.cli import _print_paged
+        Args:
+            monkeypatch: Pytest's patcher.
+            tmp_path: Throwaway directory for the state database.
+            argv: The command line, without the program name.
+            config: The config file's contents, if any.
 
-        with patch("sys.stdout.isatty", return_value=interactive):
-            with patch("sys.stdin.isatty", return_value=interactive):
-                with patch("builtins.input", side_effect=answers) as mock_input:
-                    _print_paged(rows)
-        return capsys.readouterr().out, mock_input
+        Returns:
+            ``(criteria, settings, client, passed_client)`` — what the
+            classifier was handed.
+        """
+        from living_ink import api as api_module
+        from living_ink import pipeline as pipeline_module
+        from living_ink.cli import LivingInkCLI, inventory
+        from living_ink.core import selection as selection_module
+        from living_ink.core.selection import Selection
+        from living_ink.state import StateStore
 
-    def test_a_pipe_prints_everything_without_pausing(self, capsys):
-        out, mock_input = self._page(capsys, self._rows(25), [], interactive=False)
-        assert "Note 24" in out
-        mock_input.assert_not_called()
+        client = MagicMock()
+        client.get_meta_items.return_value = []
+        client.get_device_info.return_value = None
 
-    def test_a_terminal_pauses_between_pages(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), ["", ""])
-        assert "Note 24" in out
+        seen = {}
 
-    def test_q_stops_early(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), ["q"])
-        assert "Note 9" in out
-        assert "Note 10" not in out
+        def _select(collection, criteria, store, destinations, *, settings, client=None):
+            seen.update(criteria=criteria, settings=settings, client=client)
+            return Selection()
 
-    def test_the_last_page_does_not_ask_for_more(self, capsys):
-        _, mock_input = self._page(capsys, self._rows(20), [""])
-        assert mock_input.call_count == 1
+        store = StateStore(tmp_path / "state.db")
+        monkeypatch.setattr(selection_module, "select", _select)
+        monkeypatch.setattr(api_module, "get_rmapi", lambda settings: client)
+        monkeypatch.setattr(inventory, "get_config_path", lambda root=None: tmp_path / "none.yml")
+        monkeypatch.setattr(pipeline_module, "get_default_config", lambda: config or {})
+        monkeypatch.setattr(pipeline_module, "get_default_destinations", lambda: [])
+        monkeypatch.setattr(pipeline_module, "get_state_store", lambda: store)
 
-    def test_giving_up_at_the_prompt_is_not_an_error(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), KeyboardInterrupt())
-        assert "Note 9" in out
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        try:
+            inventory.compare_with_device(args)
+        finally:
+            store.close()
+        return seen["criteria"], seen["settings"], client, seen["client"]
+
+    def _run_criteria(self, tmp_path, argv, config=None):
+        """Return the criteria the run itself would build for the same argv."""
+        from living_ink.cli import LivingInkCLI
+        from living_ink.cli.commands.sync import sync_arguments
+        from living_ink.pipeline import SyncPipeline
+
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        pipe = SyncPipeline(**sync_arguments(args), data_dir=tmp_path, destinations=[])
+        return pipe._criteria()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["sync", "--preview"], id="bare"),
+            pytest.param(["sync", "--preview", "--pdf"], id="type"),
+            pytest.param(["sync", "--preview", "--limit", "3"], id="limit"),
+            pytest.param(["sync", "--preview", "--tag", "work"], id="tag"),
+            pytest.param(["sync", "--preview", "--source-path", "Journal/"], id="path"),
+            pytest.param(["sync", "--preview", "--source-regex", r"^Work/"], id="regex"),
+            pytest.param(["sync", "--preview", "--notebook", "Standup"], id="target"),
+            pytest.param(["sync", "--preview", "--force"], id="force"),
+            pytest.param(["sync", "--preview", "--exclude", "Templates"], id="exclude"),
+        ],
+    )
+    def test_it_builds_the_criteria_the_run_would_build(self, monkeypatch, tmp_path, argv):
+        """The strongest form of the promise: the two objects are equal.
+
+        Compared whole rather than field by field, so a criterion added later
+        is covered here the day it lands instead of the day somebody
+        remembers to extend a list.
+        """
+        criteria, _, _, _ = self._probe(monkeypatch, tmp_path, argv)
+
+        assert criteria == self._run_criteria(tmp_path, argv)
+
+    def test_the_configured_answer_still_shows_through(self, monkeypatch, tmp_path):
+        """A preview with no flags previews the config, not the schema defaults."""
+        config = {"sync": {"types": ["pdf"], "limit": 4, "tags": ["work"]}}
+
+        criteria, _, _, _ = self._probe(monkeypatch, tmp_path, ["sync", "--preview"], config)
+
+        assert criteria.types == frozenset({"pdf"})
+        assert criteria.limit == 4
+        assert criteria.tags == frozenset({"work"})
+
+    def test_a_forced_transport_reaches_the_preview(self, monkeypatch, tmp_path):
+        """``--ssh`` was looked for under a ``dest`` that no longer exists.
+
+        The flag arrives as ``preferred_connection`` — the settings field the
+        generated parser names — so reading ``args.ssh`` found nothing and the
+        preview quietly used the configured preference instead.
+        """
+        config = {"remarkable": {"preferred_connection": "cloud"}}
+
+        _, settings, _, _ = self._probe(
+            monkeypatch, tmp_path, ["sync", "--preview", "--ssh"], config
+        )
+
+        assert settings.preferred_connection == "ssh"
+
+        _, unflagged, _, _ = self._probe(monkeypatch, tmp_path, ["sync", "--preview"], config)
+
+        assert unflagged.preferred_connection == "cloud"
+
+    def test_the_classifier_is_given_the_transport(self, monkeypatch, tmp_path):
+        """Without it the type is guessed from the title and no tag can be read.
+
+        ``_keep_tagged`` drops nothing when it has no client — a filter that
+        cannot run must not silently exclude everything — so a clientless
+        preview would list documents ``--tag`` excludes from the run.
+        """
+        _, _, client, passed = self._probe(monkeypatch, tmp_path, ["sync", "--preview"])
+
+        assert passed is client

@@ -8,6 +8,7 @@ reads False and the notebook the user threw away gets published.
 
 from living_ink.core.listing import (
     document_name,
+    document_path,
     document_version,
     get_notebook_path,
     get_val,
@@ -62,6 +63,37 @@ class TestATrashedDocumentIsNotACandidate:
 
         assert get_notebook_path(item, {"f-1": folder, "doc-1": item}) == "[TRASH]"
         assert is_trashed(item, {"f-1": folder, "doc-1": item}) is True
+
+
+class TestTheTwoWaysAPathIsWritten:
+    """One walk up the tree, joined for a table or joined for a pattern.
+
+    ``get_notebook_path`` spaces its separators out because it is read in the
+    summary; ``document_path`` does not, because it is matched against
+    something a user typed, and ``--source-path "Work/"`` has to be a folder
+    filter without a second flag to make it one.
+    """
+
+    def _tree(self):
+        outer = {"ID": "f-1", "Type": "CollectionType", "VissibleName": "Journal", "Parent": ""}
+        inner = {"ID": "f-2", "Type": "CollectionType", "VissibleName": "2026", "Parent": "f-1"}
+        item = doc(VissibleName="diary", Parent="f-2")
+        return {"f-1": outer, "f-2": inner, "doc-1": item}, item
+
+    def test_the_full_path_carries_the_title(self):
+        id_map, item = self._tree()
+
+        assert document_path(item, id_map) == "Journal/2026/diary"
+
+    def test_the_folder_path_stops_short_of_it_and_spaces_out(self):
+        id_map, item = self._tree()
+
+        assert get_notebook_path(item, id_map) == "Journal / 2026"
+
+    def test_a_document_at_the_root_is_just_its_title(self):
+        item = doc()
+
+        assert document_path(item, {"doc-1": item}) == "Notes"
 
 
 class TestReadingTheFieldsATransportSpellsTwoWays:

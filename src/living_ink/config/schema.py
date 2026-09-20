@@ -118,6 +118,10 @@ DEFAULT_ATTACHMENTS_FOLDER = "_attachments"
 # The folders every tablet has and nobody wants synced.
 DEFAULT_SYNC_EXCLUDE: Tuple[str, ...] = ("Trash", "Templates", "Quick sheets")
 
+# Handwriting only. A tablet's PDFs and EPUBs are usually a library rather than
+# a body of notes, and transcribing one costs an OCR call per annotated page.
+DEFAULT_SYNC_TYPES: Tuple[str, ...] = ("notebook",)
+
 #: Standard reMarkable paper colour — a light cream rather than pure white.
 DEFAULT_RENDER_BACKGROUND = "#FBFBFB"
 
@@ -132,7 +136,7 @@ DEFAULT_VERBOSITY = "normal"
 
 @dataclass(frozen=True)
 class Choice:
-    """One allowed value of a :data:`CHOICE` setting.
+    """One allowed value of a :data:`CHOICE` or :data:`LIST` setting.
 
     Attributes:
         value: The stored value.
@@ -140,11 +144,16 @@ class Choice:
         flag: A dedicated flag that selects this value, e.g. ``--ssh``. Choices
             sharing their setting's :attr:`Setting.exclusive_group` are mutually
             exclusive on the command line.
+        short: A one-letter alias for :attr:`flag`, e.g. ``-q``. Declared here
+            rather than invented by the flag generator, because which values
+            deserve a single letter is a judgement about how often they are
+            typed, and there are only ever a handful of letters to give out.
     """
 
     value: str
     label: str
     flag: Optional[str] = None
+    short: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +172,14 @@ class Setting:
         env: Environment variable that overrides it, or None.
         flag: Long flag, or None for a setting with no command-line form.
         negated: The ``--no-x`` form for a boolean, or None.
-        choices: Allowed values when :attr:`kind` is :data:`CHOICE`.
+        choices: Allowed values. A :data:`CHOICE` takes one of them and a
+            :data:`LIST` takes any number, which is the difference between
+            ``--ssh`` and ``--pdf``: the first replaces the transport, the
+            second adds a type to a set this run's flags are building from
+            scratch. Either way a flag naming a value *replaces* what the
+            config said, because the flags are one layer of
+            :meth:`~living_ink.settings.Settings._pick` and a layer is never
+            merged into the one below it.
         exclusive_group: Flags sharing a group become one mutually exclusive
             argparse group.
         store: :data:`STORE_CONFIG`, :data:`STORE_CREDENTIALS` or
@@ -177,6 +193,14 @@ class Setting:
             :attr:`key` in memory at load time. Declaring the pairing here, on
             the surviving setting, is what keeps a rename from being written
             down in two places that can disagree.
+        replacement: Key named in the warning when this setting is retired.
+            Distinct from :attr:`legacy_keys`, which is for a pure rename: a
+            rename copies the value forward, and this is for the case where it
+            cannot, because the successor holds a different *shape* of answer.
+            ``sync.sync_pdfs: true`` and ``sync.types: [notebook, pdf]`` say
+            the same thing in two forms nothing can mechanically convert
+            between, so the user is told the new spelling rather than guessed
+            at.
         commands: Which commands get the flag. ``watch`` gets none: a
             supervised process is restarted without its arguments, so a flag
             would stop applying without saying so.
@@ -197,6 +221,7 @@ class Setting:
     credential: Optional[str] = None
     status: str = ACTIVE
     legacy_keys: Tuple[str, ...] = ()
+    replacement: Optional[str] = None
     commands: Tuple[str, ...] = ("sync",)
     secret: bool = False
 
@@ -460,13 +485,31 @@ SETTINGS: Tuple[Setting, ...] = (
     ),
     # ── What to sync ───────────────────────────────────────────────────────
     Setting(
+        field="sync_types",
+        key="sync.types",
+        kind=LIST,
+        default=DEFAULT_SYNC_TYPES,
+        help="Document types to sync.",
+        env="SYNC_TYPES",
+        choices=(
+            Choice("notebook", "Handwritten notebooks.", flag="--notebooks"),
+            Choice("pdf", "Annotated PDFs.", flag="--pdf"),
+            Choice("epub", "Annotated EPUBs.", flag="--epub"),
+        ),
+    ),
+    # Retired, not deleted: an unrecognised key is a hard ERROR, so a config
+    # still naming one of these has to be recognised in order to be warned
+    # about. Neither is a rename — a bool and a list of names are two shapes
+    # nothing can mechanically convert between, which is why the user is told
+    # the new spelling rather than having a value guessed at.
+    Setting(
         field="sync_pdfs",
         key="sync.sync_pdfs",
         kind=FLAG,
         default=False,
         help="Sync annotated PDFs alongside notebooks.",
-        env="SYNC_PDFS",
-        flag="--pdf",
+        status=REMOVED,
+        replacement="sync.types",
     ),
     Setting(
         field="sync_epubs",
@@ -474,8 +517,8 @@ SETTINGS: Tuple[Setting, ...] = (
         kind=FLAG,
         default=False,
         help="Sync annotated EPUBs alongside notebooks.",
-        env="SYNC_EPUBS",
-        flag="--epub",
+        status=REMOVED,
+        replacement="sync.types",
     ),
     Setting(
         field="sync_tags",
@@ -669,7 +712,7 @@ SETTINGS: Tuple[Setting, ...] = (
         help="How much a run prints.",
         env="LIVING_INK_VERBOSITY",
         choices=(
-            Choice("quiet", "The run report and nothing else", flag="--quiet"),
+            Choice("quiet", "The run report and nothing else", flag="--quiet", short="-q"),
             Choice("normal", "Three lines per document"),
             Choice("verbose", "A line per page", flag="--verbose"),
         ),
@@ -764,7 +807,20 @@ def _section_keys() -> Dict[str, Dict[str, Setting]]:
 
 
 #: Section name to the keys it accepts, current and legacy alike.
+#:
+#: Retired settings stay in here, which is the whole point of retiring one
+#: rather than deleting it: an unrecognised key is a hard error, so a key that
+#: disappears from the index stops every config still naming it from loading.
 SECTION_KEYS: Dict[str, Dict[str, Setting]] = _section_keys()
+
+#: The settings that still have a value — everything but the retired ones.
+#:
+#: :data:`SETTINGS` is what the *validator* reads, because a config naming a
+#: dead key has to be recognised in order to be warned about. This is what
+#: everything else reads: a retired setting has no field on
+#: :class:`living_ink.settings.Settings` and no flag, so resolving one would
+#: mean handing the dataclass a keyword it does not have.
+LIVE_SETTINGS: Tuple[Setting, ...] = tuple(s for s in SETTINGS if s.status != REMOVED)
 
 #: Dotted legacy path to the setting that superseded it.
 LEGACY_KEYS: Dict[str, Setting] = {

@@ -25,6 +25,7 @@ from living_ink.config import (
     get_config_path,
     get_data_dir,
     get_logs_dir,
+    read_config_file,
     split_problems,
     validate_config,
 )
@@ -41,6 +42,7 @@ from living_ink.core.selection import (
     Candidate,
     Selection,
     SelectionCriteria,
+    criteria_for,
     select,
 )
 from living_ink.core.stages import Transcriber, judge_pages, prepare_pages, write_transcript
@@ -53,7 +55,7 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.devices import default_reading
-from living_ink.logs import log
+from living_ink.logs import collect_parser_warnings, log, notice
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
     DEFERRED,
@@ -72,43 +74,6 @@ if TYPE_CHECKING:  # pragma: no cover - names for annotations only
     # registry is reached at call time, so a source module can import from the
     # pipeline's neighbours without a cycle.
     from living_ink.sources import PageRef, RenderContext, SourceBundle, SourceType
-
-
-# --- LOGGING SUPPRESSION ---
-# Suppress specific benign warnings from rmscene/rmc that scare users
-class WarningFilter(logging.Filter):
-    def filter(self, record):
-        try:
-            msg = record.getMessage()
-            if any(
-                p in msg
-                for p in (
-                    "Unknown formatting code",
-                    "Some data has not been read",
-                    "Unknown block type",
-                )
-            ):
-                return False
-        except (TypeError, ValueError, KeyError):
-            # getMessage() interpolates the record's args; a library that logs
-            # a mismatched format string must not take the filter down with it.
-            pass
-        return True
-
-
-# Apply filter and elevate log level for rmscene / rmc
-_suppress_filter = WarningFilter()
-for logger_name in [
-    "rmscene",
-    "rmscene.tagged_block_reader",
-    "rmscene.scene_stream",
-    "rmscene.scene_tree",
-    "rmscene.text",
-    "rmc",
-]:
-    _l = logging.getLogger(logger_name)
-    _l.addFilter(_suppress_filter)
-    _l.setLevel(logging.ERROR)
 
 
 ROOT = find_repo_root()
@@ -180,7 +145,7 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
 
     for problem in warnings:
         message = f"config.yml — {problem.describe()}"
-        print(f"⚠️  {message}")
+        notice(f"⚠️  {message}")
         _logger.warning(message)
 
     if not errors:
@@ -254,40 +219,39 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         # umask, leaving the API key and device token readable by every account
         # on the machine. Repair on the way past rather than only warning.
         if restrict_permissions(cfg_path):
-            print(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
+            notice(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                try:
-                    yaml_config = yaml.safe_load(f) or {}
-                except yaml.YAMLError as ye:
-                    print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
-                    print("Please check your indentation. YAML is very sensitive to spaces.")
-                    if hasattr(ye, "problem_mark"):
-                        mark = ye.problem_mark
-                        print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
-                    print(f"Details: {ye}\n")
-                    yaml_config = {}
+            try:
+                yaml_config = read_config_file(cfg_path)
+            except (yaml.YAMLError, TypeError) as ye:
+                notice("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
+                notice("Please check your indentation. YAML is very sensitive to spaces.")
+                if hasattr(ye, "problem_mark"):
+                    mark = ye.problem_mark
+                    notice(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
+                notice(f"Details: {ye}\n")
+                yaml_config = {}
 
-                # Register credentials for masking as soon as they are read,
-                # not when a provider is eventually built: a run that fails
-                # during setup still writes a log the user may share.
-                for section in ("ai", "openai"):
-                    if isinstance(yaml_config.get(section), dict):
-                        register_secret(str(yaml_config[section].get("api_key", "")).strip())
-                rm_section = yaml_config.get("remarkable")
-                if isinstance(rm_section, dict):
-                    register_secret(str(rm_section.get("device_token", "")).strip())
+            # Register credentials for masking as soon as they are read, not
+            # when a provider is eventually built: a run that fails during
+            # setup still writes a log the user may share.
+            for section in ("ai", "openai"):
+                if isinstance(yaml_config.get(section), dict):
+                    register_secret(str(yaml_config[section].get("api_key", "")).strip())
+            rm_section = yaml_config.get("remarkable")
+            if isinstance(rm_section, dict):
+                register_secret(str(rm_section.get("device_token", "")).strip())
 
-                # 1. OpenAI
-                if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
-                    os.environ.setdefault(
-                        "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
-                    )
+            # 1. OpenAI
+            if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
+                os.environ.setdefault(
+                    "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
+                )
 
-                # 2. AI Provider — configured from the settings this config
-                #    resolves to, which is where the stored key is read from.
-                _migrate_config_ai_key(yaml_config, cfg_path)
-                configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
+            # 2. AI Provider — configured from the settings this config
+            #    resolves to, which is where the stored key is read from.
+            _migrate_config_ai_key(yaml_config, cfg_path)
+            configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
 
         except Exception as e:
             # Deliberately broad. Everything downstream of the parse — env
@@ -295,7 +259,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             # whatever shape the user's YAML happens to have, and a config that
             # cannot be understood has to degrade to one printed line and an
             # empty dict rather than abort the run before it reports anything.
-            print(f"Critical error loading config.yml: {e}")
+            notice(f"Critical error loading config.yml: {e}")
             logging.debug("Loading %s failed", cfg_path, exc_info=True)
 
         # Outside the try above on purpose: that block exists to keep a
@@ -733,9 +697,16 @@ def select_notebook_interactive(
                 .strip()
                 .lower()
             )
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
+            # Stdin closed under a prompt we already decided was interactive:
+            # nothing left to ask, so select nothing rather than everything.
             print_func("\nCancelled by user.")
             return []
+        except KeyboardInterrupt:
+            # Ctrl+C is not "process no notebooks", it is "end this run", and
+            # only the entry point may decide what that exits with (130).
+            print_func("\nCancelled by user.")
+            raise
 
         if raw in ("", "a", "all"):
             return matches
@@ -903,16 +874,17 @@ class SyncPipeline:
         self,
         *,
         notebook: Optional[str] = None,
+        source_path: Optional[str] = None,
+        source_regex: Optional[str] = None,
+        force: bool = False,
         limit: Optional[int] = None,
         ssh: bool = False,
         cloud: bool = False,
-        sync_pdfs: Optional[bool] = None,
-        sync_epubs: Optional[bool] = None,
-        all_types: bool = False,
         keep_temp: bool = False,
         dry_run: bool = False,
         prune: bool = False,
         json_output: bool = False,
+        flags: Optional[Dict[str, Any]] = None,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
@@ -935,17 +907,33 @@ class SyncPipeline:
 
         Args:
             notebook: Target a single document by name, folder path, or id.
+            source_path: Case-insensitive substring of the document's full
+                path. Narrows a sweep; does not name one document.
+            source_regex: Case-sensitive pattern searched against that same
+                path. Giving both this and ``source_path`` is an error, raised
+                when the criteria are built rather than resolved by a
+                precedence rule that would only hide the mistake.
+            force: Publish every selected document, whatever the comparison
+                concluded. Overrides the verdict, it does not skip the
+                comparison — the recipe digest a run records has to describe
+                the inputs it actually used, and the report can still say how
+                many would have been picked up anyway.
             limit: Most documents to process. 0 or None defers to config.
             ssh: Force the USB transport for this run.
             cloud: Force the reMarkable Cloud transport for this run.
-            sync_pdfs: Include annotated PDFs. None defers to config.
-            sync_epubs: Include annotated EPUBs. None defers to config.
-            all_types: Include every registered source type, whatever the
-                config and the two flags above say.
             keep_temp: Preserve rendered PNGs and transcripts for debugging.
-            dry_run: Do everything except publish.
+            dry_run: Do everything except publish — what the front end
+                spells ``--preview --transcribe``.
             prune: Delete notes whose document is gone from the tablet.
             json_output: Print the run report as JSON instead of a table.
+            flags: Further settings overrides for this run, keyed by
+                :class:`~living_ink.settings.Settings` field name. This is how
+                the front end hands over everything the schema declares a flag
+                for: registering a new flag must not mean widening this
+                signature, or the schema stops being the one declaration. The
+                named keywords above win where both name the same field, so a
+                library caller's explicit argument is never quietly overruled
+                by a mapping it did not build.
             config_path: Path to YAML config file. Defaults to standard config path.
             data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
@@ -959,11 +947,11 @@ class SyncPipeline:
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = dry_run
-        self.prune = prune
-        self.json_output = json_output
-        # A dry run's whole output is the transcripts it leaves behind, so it
-        # implies --keep-temp; purging them would delete what it points at.
-        self.keep_temp = keep_temp or dry_run
+        # Not implied by dry_run any more. One flag quietly turning on another
+        # is a third concept where the product needs one, and the transcripts
+        # a rehearsal leaves behind are a debugging artifact: anyone who wants
+        # them asks for them, which is what CLAUDE.md already tells them to do.
+        self.keep_temp = keep_temp
 
         if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)
@@ -979,26 +967,28 @@ class SyncPipeline:
             )
 
         self.target_notebook = notebook.strip() if notebook else None
-        self.all_types = all_types
+        # No config key on purpose: a permanent substring filter is a mistake
+        # waiting to be forgotten, and a permanent regex is the same with
+        # sharper edges. Both shape one run and nothing else.
+        self.source_path = source_path.strip() if source_path else None
+        self.source_regex = source_regex or None
+        self.force = force
 
         # None means "this flag was not given", which is what lets config and
         # the environment be heard; a False here would be an explicit "off"
-        # and would silently overrule the file. ``--all-types`` is the one
-        # switch that does overrule it, which is why it resolves to True
-        # rather than to None.
+        # and would silently overrule the file.
+        named = {
+            "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
+            "use_ssh": True if ssh else False if cloud else None,
+            "max_notebooks_per_run": limit,
+            "prune": prune or None,
+            "output_json": json_output or None,
+        }
         self.settings = Settings.resolve(
             self.raw_config,
             flags={
-                "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
-                "use_ssh": True if ssh else False if cloud else None,
-                "sync_pdfs": True if all_types else sync_pdfs,
-                "sync_epubs": True if all_types else sync_epubs,
-                # Not greater than zero is "no override", never "process none":
-                # ``--limit 0`` is what the parser hands over when the flag was
-                # left off entirely.
-                "max_notebooks_per_run": limit if limit and limit > 0 else None,
-                "prune": prune or None,
-                "output_json": json_output or None,
+                **(flags or {}),
+                **{field: value for field, value in named.items() if value is not None},
             },
         )
 
@@ -1045,19 +1035,24 @@ class SyncPipeline:
         return self.settings.use_ssh
 
     @property
-    def sync_pdfs(self) -> bool:
-        """Whether annotated PDFs are included in this run."""
-        return self.settings.sync_pdfs
-
-    @property
-    def sync_epubs(self) -> bool:
-        """Whether annotated EPUBs are included in this run."""
-        return self.settings.sync_epubs
+    def sync_types(self) -> Tuple[str, ...]:
+        """The document types this run syncs."""
+        return tuple(self.settings.sync_types)
 
     @property
     def limit(self) -> int:
         """Maximum number of documents to process in this run."""
         return self.settings.max_notebooks_per_run
+
+    @property
+    def prune(self) -> bool:
+        """Whether notes whose document is gone from the tablet are deleted."""
+        return self.settings.prune
+
+    @property
+    def json_output(self) -> bool:
+        """Whether the run report is printed as JSON instead of a table."""
+        return self.settings.output_json
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
@@ -1102,7 +1097,7 @@ class SyncPipeline:
         if failures:
             raise ConfigurationMissing(
                 "A destination is not ready:\n" + "\n".join(f"❌ {f}" for f in failures),
-                hint="Run 'living-ink status' to see every destination's state.",
+                hint="Run 'living-ink info' to see every destination's state.",
             )
 
     def _learn_device(self, client: Any) -> None:
@@ -1130,44 +1125,22 @@ class SyncPipeline:
             _logger.info("Device: %s", reading.describe())
 
     def _criteria(self) -> SelectionCriteria:
-        """Translate this run's resolved options into what narrows it.
+        """Return what narrows this run.
 
-        The one place the pipeline's long-standing attribute names are turned
-        into the vocabulary :mod:`living_ink.core.selection` speaks, so the
-        preview and the run can be handed the same object.
+        Delegated rather than assembled here: the preview builds the same
+        object from the same settings and the same four flags, and two call
+        sites spelling one rule in their own words is how a preview starts
+        predicting something the run does not do.
 
         Returns:
             The criteria for this run.
         """
-        from living_ink.sources import SOURCE_REGISTRY
-
-        if self.all_types:
-            types = frozenset(SOURCE_REGISTRY)
-        else:
-            enabled = {"notebook"}
-            if self.sync_pdfs:
-                enabled.add("pdf")
-            if self.sync_epubs:
-                enabled.add("epub")
-            types = frozenset(enabled)
-
-        return SelectionCriteria(
+        return criteria_for(
+            self.settings,
             target=self.target_notebook,
-            types=types,
-            # Both come from the config file and had no reader at all, so
-            # ``config`` and ``info`` reported Templates and Quick Sheets as
-            # excluded while every run rendered and transcribed them at cost.
-            exclude=frozenset(self.settings.sync_exclude or ()),
-            tags=frozenset(self.settings.sync_tags or ()),
-            # A named notebook is not part of a sweep, so the sweep's cap does
-            # not apply to it — and applying it would deal the second of two
-            # same-named matches into ``deferred``, where the prompt that asks
-            # the user which one they meant can no longer see it.
-            limit=None if self.target_notebook else self.limit,
-            # Naming a notebook is asking for that notebook, whether or not the
-            # comparison thinks it is current. There is no --force flag yet;
-            # this is the one thing that already behaved like one.
-            force=bool(self.target_notebook),
+            source_path=self.source_path,
+            source_regex=self.source_regex,
+            force=self.force,
         )
 
     def select_documents(self, listing: Sequence[Any], client: Any) -> Optional[Selection]:
@@ -1718,21 +1691,46 @@ class SyncPipeline:
         ctx = self._render_context()
         renderer = source.renderer
 
-        if not renderer.prepare(bundle, ctx):
-            self._nothing_to_render(job, source)
+        # Wrapped around the whole contract, not just the render call: rmscene
+        # reads the document in `prepare` and `pages` too, and a warning that
+        # escaped there would land in the middle of a `--json` document.
+        with collect_parser_warnings() as parser_warnings:
+            try:
+                if not renderer.prepare(bundle, ctx):
+                    self._nothing_to_render(job, source)
 
-        refs = list(renderer.pages(bundle, ctx))
-        job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
+                refs = list(renderer.pages(bundle, ctx))
+                job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
 
-        # Not `not refs`: an unannotated PDF and an EPUB with no annotations
-        # both render zero pages and publish their text layer instead. Only a
-        # document with neither has nothing to say.
-        if not refs and not job.extracted_doc_text:
-            self._nothing_to_render(job, source)
+                # Not `not refs`: an unannotated PDF and an EPUB with no
+                # annotations both render zero pages and publish their text
+                # layer instead. Only a document with neither has nothing to
+                # say.
+                if not refs and not job.extracted_doc_text:
+                    self._nothing_to_render(job, source)
 
-        if refs:
-            log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
-            self._render_pages(job, source, bundle, refs, ctx)
+                if refs:
+                    log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
+                    self._render_pages(job, source, bundle, refs, ctx)
+            finally:
+                # In a finally because a document that stopped early is exactly
+                # the one whose parse warnings explain why.
+                self._report_parser_warnings(job, parser_warnings)
+
+    def _report_parser_warnings(self, job: DocumentJob, messages: List[str]) -> None:
+        """Put what the ``.rm`` parsers complained about into the run report.
+
+        Attributed to the document, because the messages themselves name a
+        block type or a byte count and nothing a user could act on otherwise.
+
+        Args:
+            job: The document that was being rendered.
+            messages: Distinct parser warnings, in the order first seen.
+        """
+        for message in messages:
+            _logger.warning("%s: %s", job.notebook, message)
+            if self.report:
+                self.report.warn(f"{job.notebook}: {message}")
 
     def _nothing_to_render(self, job: DocumentJob, source: "SourceType") -> None:
         """Stop processing a document that produced neither pages nor text.
@@ -2459,9 +2457,9 @@ class SyncPipeline:
         dropped after a run that did not want it. A failed or interrupted run
         prunes nothing, because it does not know what it would have used.
 
-        ``living-ink cache --prune`` is the other caller, and the difference is
-        the point: there the user has said when, so any moment is the right
-        one. Here nobody has, so the placement is what makes it safe.
+        Automatic is the only caller now that ``cache --prune`` is retired,
+        which is what makes the placement load-bearing: nobody has said when,
+        so running last is the only moment that is safe to run at.
         """
         if self.dry_run:
             return
@@ -2524,7 +2522,7 @@ class SyncPipeline:
             lines.append("")
             lines.extend(f"- {warning}" for warning in self.report.warnings)
         lines.append("")
-        lines.append(f"Run `living-ink status` for details, or see the log at {logs.LOG_PATH}.")
+        lines.append(f"Run `living-ink info` for details, or see the log at {logs.LOG_PATH}.")
         return "\n".join(lines)
 
     def _report_interrupt(self, published: int) -> None:

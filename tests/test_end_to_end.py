@@ -233,7 +233,7 @@ class TestOneRealSync:
         e2e.sync(notebook=corpus_ids.DOC_HANDWRITTEN)
         assert not e2e.provider.images, "the second run re-transcribed a cached page"
 
-    def test_dry_run_writes_nothing(self, e2e):
-        """``--dry-run`` transcribes but publishes nothing."""
+    def test_the_rehearsal_writes_nothing(self, e2e):
+        """``--preview --transcribe`` transcribes but publishes nothing."""
         e2e.sync(notebook=corpus_ids.DOC_HANDWRITTEN, dry_run=True)
         assert not list(e2e.vault.rglob("*.md"))
