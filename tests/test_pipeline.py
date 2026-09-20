@@ -45,6 +45,7 @@ from living_ink.report import (
     RunReport,
 )
 from living_ink.settings import Settings
+from tests.builders import make_page
 
 
 def make_candidate(item, *, pending=(), source="notebook", id_map=None, recipes=None):
@@ -814,6 +815,124 @@ class TestOrderedDurability:
         expected = document_recipe(source_for_name("notebook"), dest, pipe.settings)
         assert self._row(dest)["recipe"] == expected
         assert expected != ""
+
+
+class TestOrderedDurabilityUnderAKill:
+    """The same ordering, against a real vault and a crash placed between.
+
+    The class above asserts the order with a mock destination. This one kills
+    the process where it hurts — after the note is on disk and before the row
+    that claims it — and then runs again, because the ordering is only worth
+    anything if the recovery it buys actually happens. Every assertion here
+    would still hold if the two steps were merely *sequenced*; what makes them
+    durable is the ``fsync`` in between, which is the first test.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory, and drop it afterwards."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    @pytest.fixture
+    def vault(self, tmp_path):
+        """A real Obsidian vault, so the note side of the test is not a mock."""
+        path = tmp_path / "vault"
+        path.mkdir()
+        return path
+
+    def _dest(self, vault):
+        return ObsidianDestination(vault_path=str(vault))
+
+    def _job(self, tmp_path, text="Hello"):
+        workspace = DocumentWorkspace(tmp_path / "work", "nb-1").ensure()
+        return make_job(
+            workspace=workspace,
+            pages=[make_page(index=0, number=1, text=text)],
+        )
+
+    def _notes(self, vault):
+        return sorted(p.name for p in vault.rglob("*.md"))
+
+    def test_the_note_is_fsynced_before_the_row_is_written(self, tmp_path, vault):
+        """Sequencing alone is not durability: a crash flushes no page cache."""
+        order = []
+        real_fsync = os.fsync
+
+        def watched_fsync(fd):
+            order.append("fsync")
+            return real_fsync(fd)
+
+        def watched_record(*args, **kwargs):
+            order.append("record")
+
+        pipe = SyncPipeline(destinations=[self._dest(vault)])
+        with (
+            patch("living_ink.safeio.os.fsync", side_effect=watched_fsync),
+            patch("living_ink.pipeline.add_to_processed_log", side_effect=watched_record),
+        ):
+            pipe._publish(self._job(tmp_path), pipe.destinations)
+
+        assert "fsync" in order and "record" in order
+        assert order.index("fsync") < order.index("record")
+
+    def test_a_kill_between_the_two_leaves_the_note_and_no_row(self, tmp_path, vault):
+        dest = self._dest(vault)
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                pipe._publish(self._job(tmp_path), [dest])
+
+        assert self._notes(vault) == ["Test Notebook.md"]
+        assert pipeline.get_state_store().get_publication("nb-1", dest.state_key) is None
+
+    def test_the_next_run_republishes_into_the_same_note(self, tmp_path, vault):
+        """The cost of the ordering is one redundant publish, not a second note."""
+        dest = self._dest(vault)
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                pipe._publish(self._job(tmp_path, text="first"), [dest])
+
+        assert pipe._publish(self._job(tmp_path, text="second"), [dest]) is True
+
+        assert self._notes(vault) == ["Test Notebook.md"]
+        written = (vault / "Test Notebook.md").read_text(encoding="utf-8")
+        assert "second" in written and "first" not in written
+
+    def test_the_row_the_second_run_writes_is_the_one_that_was_lost(self, tmp_path, vault):
+        dest = self._dest(vault)
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch("living_ink.pipeline.add_to_processed_log", side_effect=KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                pipe._publish(self._job(tmp_path), [dest])
+        pipe._publish(self._job(tmp_path), [dest])
+
+        row = pipeline.get_state_store().get_publication("nb-1", dest.state_key)
+        assert row["version"] == "hash-1"
+        assert row["target"] == "Test Notebook.md"
+
+    def test_the_reverse_order_would_have_lost_the_note(self, tmp_path, vault):
+        """Why the order is not arbitrary, stated as a test rather than a comment.
+
+        A row recorded first and a note that never lands matches on version for
+        ever: the document is never pending again and the content is gone. The
+        run has to fail *with the note written*, which is what it does.
+        """
+        dest = self._dest(vault)
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch.object(dest, "commit", side_effect=OSError("disk full")):
+            assert pipe._publish(self._job(tmp_path), [dest]) is False
+
+        assert self._notes(vault) == []
+        assert pipeline.get_state_store().get_publication("nb-1", dest.state_key) is None
 
 
 class TestEveryRunReadsItsPages:
