@@ -511,6 +511,52 @@ def test_cli_default_routing_to_setup(tmp_path):
         mock_setup_run.assert_called_once()
 
 
+class TestAnUnlistedCommandIsStillACommand:
+    """``listed = False`` hides a row, not a command."""
+
+    def _help(self) -> str:
+        """Return the top-level help text.
+
+        Returns:
+            What ``living-ink --help`` prints.
+        """
+        return LivingInkCLI().build_parser().format_help()
+
+    def test_the_summary_skips_it(self):
+        """Neither the listing nor the usage line names it."""
+        help_text = self._help()
+        assert "completions" not in help_text
+        assert "sync" in help_text
+        assert "uninstall" in help_text
+
+    def test_suppress_does_not_leak_into_the_help(self):
+        """argparse prints ``==SUPPRESS==`` verbatim for a suppressed subaction.
+
+        Omitting ``help`` is what hides the row; passing ``SUPPRESS`` renders
+        it. The two look identical at the call site and only one works.
+        """
+        assert "SUPPRESS" not in self._help()
+
+    def test_it_still_parses(self):
+        """Hiding it from the summary does not remove it from the parser."""
+        args = LivingInkCLI().build_parser().parse_args(["completions", "zsh"])
+        assert args.command == "completions"
+
+    def test_its_own_help_is_unchanged(self):
+        """A user sent here by the docs still gets the full description."""
+        parser = LivingInkCLI().build_parser()
+        sub = [a for a in parser._actions if getattr(a, "choices", None)]
+        completions = next(a.choices["completions"] for a in sub if "completions" in a.choices)
+        assert "tab-completion" in completions.format_help()
+
+    def test_the_generated_script_still_completes_it(self):
+        """The walk reads ``choices`` and ``description``, not the summary row."""
+        from living_ink.cli.completions import describe
+
+        spec = describe(LivingInkCLI().build_parser())
+        assert "completions" in {command.name for command in spec.commands}
+
+
 class TestTheTerminalIsAPrecondition:
     """An interactive command is refused before it can half-configure anything."""
 
