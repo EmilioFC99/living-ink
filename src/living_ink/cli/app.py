@@ -229,13 +229,40 @@ class LivingInkCLI:
                 if config_file.exists()
                 else self.commands.get("setup", SetupCommand)
             )
-            return cmd_cls(root=self.root).run(args)
+            return self._start(cmd_cls, args)
 
         cmd_cls = self.commands.get(args.command)
         if cmd_cls:
-            return cmd_cls(root=self.root).run(args)
+            return self._start(cmd_cls, args)
 
         return 1
+
+    def _start(self, cmd_cls: Type[BaseCommand], args: argparse.Namespace) -> int:
+        """Run a command, refusing an interactive one with nowhere to ask.
+
+        The terminal test lives here, at the boundary, and not inside the
+        wizard: a command that discovers halfway through step three that it
+        cannot ask anything has already written a config directory, printed a
+        banner and burned a network call. Refusing before the first step is
+        also the only way the refusal can be a clean exit code rather than an
+        ``EOFError`` traceback out of a prompt reading a closed pipe — which is
+        what ``living-ink setup < /dev/null`` in a Dockerfile used to produce.
+
+        Args:
+            cmd_cls: The command class to instantiate and run.
+            args: Parsed command-line arguments.
+
+        Returns:
+            The command's exit code, or 2 when an interactive command has no
+            terminal — a usage error, because the user asked for the wrong
+            command rather than for something that failed.
+        """
+        from living_ink import ui
+
+        if cmd_cls.interactive and not ui.is_tty():
+            print(f"living-ink {cmd_cls.name}: {ui.NO_TTY_MESSAGE}", file=sys.stderr)
+            return 2
+        return cmd_cls(root=self.root).run(args)
 
     def run(self, argv: Optional[list[str]] = None) -> int:
         """Parse arguments and run the corresponding command.

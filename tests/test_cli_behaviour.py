@@ -369,25 +369,36 @@ RETIRED_COMMANDS = ("status", "state", "cache")
 # Table 5 — the setup conversation
 # ---------------------------------------------------------------------------
 
-#: A full Cloud walkthrough, as (fragment of the prompt, reply), in order.
+#: Answered by the fixture with the vault it created, because the path is only
+#: known per test and the table is module-level.
+THE_DETECTED_VAULT = "\x00vault"
+
+#: A full Cloud walkthrough, as (fragment of the question, answer), in order.
 #:
 #: Keyed on what the wizard *asks* rather than on position, because the
 #: alternative — a bare list of twelve answers — cannot tell "the wizard grew a
 #: step" apart from "the wizard reordered two" apart from "the answers slipped
 #: by one", and all three produce a config that looks plausible. Matching the
-#: prompt makes each reply answer a named question.
-CLOUD_WALKTHROUGH: tuple[tuple[str, str], ...] = (
-    ("Select preferred connection", "2"),
-    ("Use existing reMarkable pairing", "y"),
-    ("Configure USB SSH as an automatic backup", "n"),
-    ("Select provider", "1"),
-    ("Gemini API key", "AIzaTestKey"),
-    ("Enable Obsidian sync", "y"),
-    ("Select vault", "1"),
-    ("Choose folder", "1"),
-    ("Mirror complete nested", "y"),
-    ("Automatically sync notes in background", "n"),
-    ("run your first sync now", "n"),
+#: question makes each answer answer a named one.
+#:
+#: The answers are widget return values, not keystrokes: a ``select`` hands
+#: back the chosen ``Choice.value`` and a ``confirm`` hands back a bool. What a
+#: keystroke does to a widget is :mod:`tests.test_ui`'s subject, through a real
+#: ``prompt_toolkit`` pipe.
+CLOUD_WALKTHROUGH: tuple[tuple[str, object], ...] = (
+    ("How should Living Ink reach your reMarkable?", "cloud"),
+    ("Reuse the reMarkable pairing", True),
+    ("Also set up the USB cable", False),
+    ("Which AI provider?", "gemini"),
+    ("Model", "gemini-2.0-flash"),
+    ("API key", "AIzaTestKey"),
+    ("Publish to Obsidian?", True),
+    ("Which vault?", THE_DETECTED_VAULT),
+    ("Which folder inside the vault?", "Living Ink"),
+    ("Mirror the tablet's folder structure", True),
+    ("Sync automatically every hour?", False),
+    ("Save this configuration?", True),
+    ("Run your first sync now?", False),
 )
 
 #: Steps the wizard only offers on macOS, because there is nothing behind them
@@ -395,10 +406,10 @@ CLOUD_WALKTHROUGH: tuple[tuple[str, str], ...] = (
 #: gets a walkthrough that is genuinely one question shorter — which CI
 #: discovered, because the first version of this table assumed everyone was on
 #: a Mac.
-MACOS_ONLY_STEPS = frozenset({"Automatically sync notes in background"})
+MACOS_ONLY_STEPS = frozenset({"Sync automatically every hour?"})
 
 
-def walkthrough_for_this_platform() -> list[tuple[str, str]]:
+def walkthrough_for_this_platform() -> list[tuple[str, object]]:
     """Return the conversation the wizard actually holds on this machine.
 
     Returns:
@@ -613,10 +624,11 @@ def cli(monkeypatch, capsys, tmp_path):
     """
     from living_ink import cli as cli_module
     from living_ink import pipeline as pipeline_module
-    from living_ink import setup_wizard as wizard_module
+    from living_ink import ui as ui_module
     from living_ink.cli import caches as caches_module
     from living_ink.cli import inventory as inventory_module
     from living_ink.cli import status as status_module
+    from living_ink.cli.commands import setup as setup_module
     from living_ink.cli.commands import watch as watch_module
 
     state_db = tmp_path / "state.db"
@@ -652,22 +664,25 @@ def cli(monkeypatch, capsys, tmp_path):
                 raise recorder.pipeline_error
             return True
 
-    class _WizardResult:
-        """The one field :class:`SetupCommand` reads off a wizard run."""
+    class _RecordingWizard:
+        """Stand in for the interactive wizard, without asking anything."""
 
-        run_sync_requested = False
+        def __init__(self, root=None, bin_dir=None):
+            """Accept the same construction the command performs.
 
-    def _run_wizard(repo_dir=None):
-        """Stand in for the interactive wizard.
+            Args:
+                root: Ignored.
+                bin_dir: Ignored.
+            """
 
-        Args:
-            repo_dir: Ignored.
+        def run(self):
+            """Report a saved configuration and no request to sync.
 
-        Returns:
-            A result declining the offered first sync.
-        """
-        recorder.note("run_wizard")
-        return _WizardResult()
+            Returns:
+                A result the command turns into exit 0.
+            """
+            recorder.note("run_wizard")
+            return setup_module.WizardResult(saved=True, run_sync_requested=False)
 
     def _collect_status(config_path):
         """Stand in for the probing status collector.
@@ -695,7 +710,11 @@ def cli(monkeypatch, capsys, tmp_path):
         return [], [], None
 
     monkeypatch.setattr(pipeline_module, "SyncPipeline", _RecordingPipeline)
-    monkeypatch.setattr(wizard_module, "run_wizard", _run_wizard)
+    monkeypatch.setattr(setup_module, "Wizard", _RecordingWizard)
+    # Every command in the matrix is asked to run as if a person were
+    # watching; the refusal without a terminal is its own test, and leaving
+    # it live here would silently turn every `setup` row into an exit 2.
+    monkeypatch.setattr(ui_module, "is_tty", lambda: True)
     monkeypatch.setattr(status_module, "collect_status", _collect_status)
     monkeypatch.setattr(inventory_module, "compare_with_device", _compare_with_device)
 
@@ -1955,8 +1974,9 @@ class TestSetupWritesOnlyWhatItWasTold:
     the wizard must not write a second file, must not reach the network or a
     subprocess, and must not ask a question that is not one of its steps.
 
-    ``run_wizard`` takes ``input_func`` and ``print_func``, so the whole
-    conversation is drivable from a list — no TTY, no patching of builtins.
+    The conversation is drivable because every question is a widget in
+    :mod:`living_ink.ui` — the fixture replaces the six of them, so there is no
+    TTY, no keystroke and no patching of builtins.
     """
 
     @pytest.fixture
@@ -1971,6 +1991,8 @@ class TestSetupWritesOnlyWhatItWasTold:
             A callable taking answers and returning a record of the run.
         """
         from living_ink import setup_wizard as wizard_module
+        from living_ink import ui as ui_module
+        from living_ink.cli.commands import setup as setup_module
 
         vault = tmp_path / "MyVault"
         (vault / "Living Ink").mkdir(parents=True)
@@ -1986,50 +2008,54 @@ class TestSetupWritesOnlyWhatItWasTold:
         monkeypatch.setattr(
             wizard_module, "get_existing_remarkable_token", lambda: "existing-token"
         )
+        # The closing estimate is a real ``--preview`` against the tablet, which
+        # is the one thing in the flow that legitimately reaches the network.
+        # Its own behaviour is tested in ``tests/test_wizard.py``.
+        monkeypatch.setattr(setup_module.Wizard, "estimate", lambda self: None)
 
-        def _run(script: list[tuple[str, str]] | None = None):
+        def _run(script: list[tuple[str, object]] | None = None):
             """Run the wizard against an expected conversation.
 
             Args:
-                script: Pairs of (expected fragment of the prompt, reply).
+                script: Pairs of (expected fragment of the question, answer).
                     Defaults to the walkthrough for this platform.
 
             Returns:
-                A tuple of the wizard result, the prompts it asked, and the
+                A tuple of the wizard result, the questions it asked, and the
                 paths it left behind under ``tmp_path``.
             """
             steps = iter(script if script is not None else walkthrough_for_this_platform())
             asked: list[str] = []
 
-            def _input(prompt: str = "") -> str:
-                """Answer one prompt, checking it is the one expected next.
+            def _answer(message: str, *_args, **_kwargs):
+                """Answer one question, checking it is the one expected next.
 
                 Args:
-                    prompt: What the wizard asked.
+                    message: What the wizard asked.
 
                 Returns:
-                    The scripted reply.
+                    The scripted answer.
 
                 Raises:
                     AssertionError: If the wizard asked something unscripted.
                 """
-                asked.append(prompt)
+                asked.append(message)
                 try:
                     fragment, reply = next(steps)
                 except StopIteration:
                     raise AssertionError(
-                        f"The wizard asked a question the script does not cover: {prompt!r}. "
+                        f"The wizard asked a question the script does not cover: {message!r}. "
                         "Add it to CLOUD_WALKTHROUGH."
                     ) from None
-                assert fragment in prompt, f"expected a question about {fragment!r}, got {prompt!r}"
-                return reply
+                assert fragment in message, (
+                    f"expected a question about {fragment!r}, got {message!r}"
+                )
+                return str(vault) if reply == THE_DETECTED_VAULT else reply
 
-            result = wizard_module.run_wizard(
-                input_func=_input,
-                print_func=lambda *a: None,
-                repo_dir=tmp_path,
-                bin_dir=tmp_path / "bin",
-            )
+            for widget in ("select", "checkbox", "confirm", "text", "password", "path"):
+                monkeypatch.setattr(ui_module, widget, _answer)
+
+            result = setup_module.Wizard(root=tmp_path, bin_dir=tmp_path / "bin").run()
             written = sorted(
                 p.relative_to(tmp_path).as_posix()
                 for p in tmp_path.rglob("*")
@@ -2153,9 +2179,13 @@ class TestSetupWritesOnlyWhatItWasTold:
         import yaml
 
         #: The vault questions only follow a "yes".
-        skipped = {"Select vault", "Choose folder", "Mirror complete nested"}
+        skipped = {
+            "Which vault?",
+            "Which folder inside the vault?",
+            "Mirror the tablet's folder structure",
+        }
         declined = [
-            (fragment, "n" if fragment == "Enable Obsidian sync" else reply)
+            (fragment, False if fragment == "Publish to Obsidian?" else reply)
             for fragment, reply in walkthrough_for_this_platform()
             if fragment not in skipped
         ]
@@ -2167,7 +2197,7 @@ class TestSetupWritesOnlyWhatItWasTold:
     def test_what_the_wizard_writes_is_what_info_reads_back(self, wizard, tmp_path, monkeypatch):
         """The two halves of the round trip agree on the section names.
 
-        This is the seam that a behaviour matrix is for. ``run_wizard`` writes
+        This is the seam that a behaviour matrix is for. The wizard writes
         the config and ``collect_status`` reads it, and they are different
         functions in different modules that happen to share a layout by
         convention. If one moves a section, every unit test on either side

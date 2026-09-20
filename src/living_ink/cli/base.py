@@ -21,12 +21,18 @@ class BaseCommand(ABC):
         name: Subcommand name used on the command line.
         help: Short one-line summary for CLI help listings.
         description: Extended description for command-specific help.
+        interactive: Whether the command asks the user questions. Declared
+            here, and checked once by :meth:`LivingInkCLI.dispatch` before the
+            command runs, so the terminal test happens in one place instead of
+            inside every step that happens to prompt. A command that says yes
+            may assume a terminal; one that says no must never prompt.
         root: Optional repository root path.
     """
 
     name: str = ""
     help: str = ""
     description: Optional[str] = None
+    interactive: bool = False
 
     def __init__(self, root: Optional[Path] = None) -> None:
         """Initialize command with an optional project root path.

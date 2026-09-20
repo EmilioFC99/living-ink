@@ -1,12 +1,12 @@
-"""Tests for living_ink.setup_wizard module.
+"""Tests for living_ink.setup_wizard — what the wizard knows, not what it asks.
 
-Covers Obsidian vault auto-detection, folder listing, reMarkable pairing,
-AI provider verification, LaunchAgent creation, YAML generation,
-and the interactive wizard workflow.
+Obsidian vault auto-detection, folder listing, reMarkable pairing, AI provider
+verification, LaunchAgent creation and YAML generation. The conversation that
+uses all of this lives in :mod:`tests.test_wizard`, because ``info`` calls the
+same probes and neither half should have to import the other to be tested.
 """
 
 import json
-import stat
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -21,7 +21,6 @@ from living_ink.setup_wizard import (
     install_launch_agent,
     list_vault_folders,
     pair_remarkable_device,
-    run_wizard,
     uninstall_launch_agent,
     verify_ai_provider,
     verify_remarkable_ssh,
@@ -304,12 +303,14 @@ class TestConfigGeneration:
         assert parsed["obsidian"]["vault_path"] == vault_path
         assert parsed["obsidian"]["root_folder"] == folder
 
-    def test_generate_config_yaml_preserves_section_comments(self):
-        """The generated file stays readable and hand-editable."""
+    def test_generate_config_yaml_explains_itself_from_the_schema(self):
+        """Each section is introduced by the same help the validator declares."""
+        from living_ink.config import SECTIONS
+
         yaml_str = generate_config_yaml(ai_provider="gemini", ai_model="gemini-flash-latest")
-        assert "# Living Ink Configuration" in yaml_str
-        assert "# 1. AI Handwriting OCR & Text Cleanup" in yaml_str
-        assert "# 4. Obsidian Destination" in yaml_str
+        assert "# Living Ink configuration" in yaml_str
+        assert f"# {SECTIONS['ai'].help}" in yaml_str
+        assert f"# {SECTIONS['obsidian'].help}" in yaml_str
 
     def test_generate_config_yaml_offers_no_second_ocr_backend(self):
         """There is one way to read a page, so the config stops implying two."""
@@ -379,280 +380,3 @@ class TestInstallCliCommand:
         content = wrapper.read_text(encoding="utf-8")
         assert f'VENV_BIN="{repo_dir.resolve()}/.venv/bin/living-ink"' in content
         assert 'exec "$VENV_BIN" "$@"' in content
-
-
-# =========================================================================
-# Interactive Wizard Execution
-# =========================================================================
-
-
-class TestRunWizard:
-    """Tests for the interactive walkthrough workflow."""
-
-    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="existing-token")
-    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
-    def test_run_wizard_cloud_flow(
-        self,
-        mock_detect_vaults,
-        mock_get_token,
-        mock_verify_ai,
-        mock_verify_rm,
-        tmp_path,
-    ):
-        """Walkthrough with Cloud connection creates config/config.yml."""
-        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
-        (tmp_path / "MyVault").mkdir()
-        (tmp_path / "MyVault" / "Living Ink").mkdir()
-
-        # Simulated user responses:
-        # Step 1: Option 2 (Cloud) -> Use existing token -> "y" -> SSH backup -> "n"
-        # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
-        # Step 3: Enable Obsidian -> "y", Select vault -> "1",
-        #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # macOS background sync -> "n"
-        # First sync -> "n"
-        inputs = iter(
-            [
-                "2",  # Cloud connection
-                "y",  # Use existing token
-                "n",  # USB SSH backup -> no
-                "1",  # Gemini
-                "AIzaTestKey",  # API Key
-                "y",  # Enable Obsidian
-                "1",  # Vault 1
-                "1",  # Existing folder 1
-                "y",  # Mirror folders
-                "n",  # Background sync
-                "n",  # First sync
-            ]
-        )
-
-        outputs = []
-        result = run_wizard(
-            input_func=lambda prompt="": next(inputs),
-            print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
-            repo_dir=tmp_path,
-            bin_dir=tmp_path / "bin",
-        )
-
-        assert result.saved is True
-        assert result.run_sync_requested is False
-        saved_config = tmp_path / "config" / "config.yml"
-        assert saved_config.exists()
-        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
-        assert cfg["ai"]["provider"] == "gemini"
-        assert cfg["remarkable"]["preferred_connection"] == "cloud"
-        assert cfg["remarkable"]["use_ssh"] is False
-        assert cfg["obsidian"]["enabled"] is True
-        assert cfg["obsidian"]["root_folder"] == "Living Ink"
-
-        # The answers the user typed went to the credentials directory, not here.
-        assert (
-            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
-        )
-        assert (
-            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
-            == "existing-token"
-        )
-
-    @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
-    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
-    def test_run_wizard_ssh_flow(
-        self,
-        mock_detect_vaults,
-        mock_verify_ai,
-        mock_verify_ssh,
-        tmp_path,
-    ):
-        """Walkthrough with USB SSH (default) creates config/config.yml."""
-        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
-        (tmp_path / "MyVault").mkdir()
-        (tmp_path / "MyVault" / "Living Ink").mkdir()
-
-        # Simulated user responses:
-        # Step 1: Default (1 - SSH) -> host default "" -> Cloud backup -> "n"
-        # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
-        # Step 3: Enable Obsidian -> "y", Select vault -> "1",
-        #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # macOS background sync -> "n"
-        # First sync -> "n"
-        inputs = iter(
-            [
-                "1",  # SSH connection (option 1)
-                "",  # Host default (10.11.99.1)
-                "n",  # Cloud backup -> no
-                "1",  # Gemini
-                "AIzaTestKey",  # API Key
-                "y",  # Enable Obsidian
-                "1",  # Vault 1
-                "1",  # Existing folder 1
-                "y",  # Mirror folders
-                "n",  # Background sync
-                "n",  # First sync
-            ]
-        )
-
-        outputs = []
-        result = run_wizard(
-            input_func=lambda prompt="": next(inputs),
-            print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
-            repo_dir=tmp_path,
-            bin_dir=tmp_path / "bin",
-        )
-
-        assert result.saved is True
-        assert result.run_sync_requested is False
-        saved_config = tmp_path / "config" / "config.yml"
-        assert saved_config.exists()
-        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
-        assert cfg["ai"]["provider"] == "gemini"
-        assert cfg["remarkable"]["preferred_connection"] == "ssh"
-        assert cfg["remarkable"]["use_ssh"] is True
-        assert cfg["remarkable"]["ssh_host"] == "10.11.99.1"
-        assert cfg["obsidian"]["enabled"] is True
-        assert cfg["obsidian"]["root_folder"] == "Living Ink"
-
-        assert (
-            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
-        )
-        # No Cloud token was offered, so none was stored.
-        assert credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config) is None
-
-    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="existing-token")
-    @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
-    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
-    def test_run_wizard_ssh_with_cloud_backup_flow(
-        self,
-        mock_detect_vaults,
-        mock_verify_ai,
-        mock_verify_ssh,
-        mock_get_token,
-        mock_verify_rm,
-        tmp_path,
-    ):
-        """Walkthrough configuring both USB SSH (preferred) and Cloud backup."""
-        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
-        (tmp_path / "MyVault").mkdir()
-        (tmp_path / "MyVault" / "Living Ink").mkdir()
-
-        # Step 1: Option 1 (SSH) -> host default ""
-        #         -> Cloud backup: "y" -> use existing token: "y"
-        # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
-        # Step 3: Enable Obsidian -> "y", Select vault -> "1",
-        #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # Background sync -> "n", First sync -> "n"
-        inputs = iter(
-            [
-                "1",  # SSH connection
-                "",  # Host default
-                "y",  # Configure Cloud backup
-                "y",  # Use existing token
-                "1",  # Gemini
-                "AIzaTestKey",  # API Key
-                "y",  # Enable Obsidian
-                "1",  # Vault 1
-                "1",  # Existing folder 1
-                "y",  # Mirror folders
-                "n",  # Background sync
-                "n",  # First sync
-            ]
-        )
-
-        outputs = []
-        result = run_wizard(
-            input_func=lambda prompt="": next(inputs),
-            print_func=lambda *args: outputs.append(" ".join(str(a) for a in args)),
-            repo_dir=tmp_path,
-            bin_dir=tmp_path / "bin",
-        )
-
-        assert result.saved is True
-        assert result.run_sync_requested is False
-        saved_config = tmp_path / "config" / "config.yml"
-        assert saved_config.exists()
-        cfg = yaml.safe_load(saved_config.read_text(encoding="utf-8"))
-        assert cfg["remarkable"]["preferred_connection"] == "ssh"
-        assert cfg["remarkable"]["use_ssh"] is True
-        assert (
-            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
-            == "existing-token"
-        )
-
-
-# =========================================================================
-# Saved Config Permissions
-# =========================================================================
-
-
-class TestSavedConfigPermissions:
-    """The config no longer holds secrets, but it and they are still 0600.
-
-    The config describes a vault path and a provider choice, which is enough to
-    keep private; the credentials beside it are the part that must never be
-    group-readable.
-    """
-
-    @patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
-    @patch("living_ink.setup_wizard.get_existing_remarkable_token", return_value="secret-token")
-    @patch("living_ink.setup_wizard.detect_obsidian_vaults")
-    def test_saved_config_and_credentials_are_owner_only(
-        self,
-        mock_detect_vaults,
-        mock_get_token,
-        mock_verify_ai,
-        mock_verify_rm,
-        tmp_path,
-    ):
-        """Nothing the wizard writes may be readable by another account."""
-        mock_detect_vaults.return_value = [{"name": "MyVault", "path": str(tmp_path / "MyVault")}]
-        (tmp_path / "MyVault").mkdir()
-        (tmp_path / "MyVault" / "Living Ink").mkdir()
-
-        inputs = iter(
-            [
-                "2",  # Cloud connection
-                "y",  # Use existing token
-                "n",  # USB SSH backup -> no
-                "1",  # Gemini
-                "AIzaTestKey",  # API Key
-                "y",  # Enable Obsidian
-                "1",  # Vault 1
-                "1",  # Existing folder 1
-                "y",  # Mirror folders
-                "n",  # Background sync
-                "n",  # First sync
-            ]
-        )
-
-        run_wizard(
-            input_func=lambda prompt="": next(inputs),
-            print_func=lambda *args: None,
-            repo_dir=tmp_path,
-            bin_dir=tmp_path / "bin",
-        )
-
-        saved_config = tmp_path / "config" / "config.yml"
-        assert saved_config.exists()
-        assert stat.S_IMODE(saved_config.stat().st_mode) == 0o600
-        assert stat.S_IMODE(saved_config.parent.stat().st_mode) == 0o700
-
-        # The credentials still round-trip; tightening must not truncate.
-        assert (
-            credentials.read_secret("ai.api_key.gemini", config_path=saved_config) == "AIzaTestKey"
-        )
-        assert (
-            credentials.read_secret(credentials.CLOUD_TOKEN, config_path=saved_config)
-            == "secret-token"
-        )
-
-        stored = list((saved_config.parent / "credentials").iterdir())
-        assert len(stored) == 2
-        for path in stored:
-            assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert credentials.insecure_credentials(config_path=saved_config) == []
