@@ -293,6 +293,17 @@ class TestOcrConcurrency:
     def test_defaults_to_a_handful(self):
         assert Settings.resolve(config={}, env={}).ocr_concurrency == DEFAULT_OCR_CONCURRENCY
 
+    def test_the_handful_is_five(self):
+        """The number itself, not just the constant.
+
+        ``test_defaults_to_a_handful`` compares the resolved value against the
+        same constant that produced it, so it agrees by construction and would
+        follow the default anywhere it moved. Five is a choice: it is fast
+        enough to matter on a hundred-page notebook and slow enough that a
+        consumer API key does not spend the run in backoff.
+        """
+        assert DEFAULT_OCR_CONCURRENCY == 5
+
     def test_config_sets_it(self):
         s = Settings.resolve(config={"ocr": {"concurrency": 8}}, env={})
         assert s.ocr_concurrency == 8
