@@ -453,15 +453,27 @@ class TestJobHelpers:
 
 
 class TestRendererDispatch:
-    """Document type selects the renderer; unknown types render as notebooks."""
+    """Document type selects the renderer, and the registry is the only table.
+
+    This used to assert the shape of a ``_RENDERERS`` dict on the pipeline,
+    which meant adding a source format meant editing ``pipeline.py``. The
+    pipeline now resolves the source by name and calls the contract, so the
+    thing worth pinning is that resolution, not a dispatch table.
+    """
 
     def test_pdf_and_epub_have_their_own_renderers(self):
-        assert SyncPipeline._RENDERERS["pdf"] is SyncPipeline._render_pdf
-        assert SyncPipeline._RENDERERS["epub"] is SyncPipeline._render_epub
+        from living_ink.sources import source_for_name
+
+        assert source_for_name("pdf").renderer is not source_for_name("epub").renderer
 
     def test_anything_else_renders_as_a_notebook(self):
-        assert SyncPipeline._RENDERERS.get("notebook") is None
-        assert SyncPipeline._RENDERERS.get("djvu") is None
+        from living_ink.sources import fallback_source, source_for_name
+
+        assert source_for_name("notebook") is fallback_source()
+        assert source_for_name("djvu") is fallback_source()
+
+    def test_the_pipeline_holds_no_dispatch_table_of_its_own(self):
+        assert not hasattr(SyncPipeline, "_RENDERERS")
 
 
 class TestOcrPreflight:
@@ -1579,6 +1591,9 @@ class TestRenderCaching:
             lambda zip_path: ["hash-1", "hash-2"],
             raising=True,
         )
+        monkeypatch.setattr(
+            "living_ink.extract.get_document_page_count", lambda zip_path: 2, raising=True
+        )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
         return calls
 
@@ -1591,9 +1606,25 @@ class TestRenderCaching:
         pipe.settings = Settings(render_background=background)
         pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
         pipe.report = RunReport()
+        pipe.keep_temp = False
         pipe.saved = []
         pipe._save_page = lambda job, page, data, label="Saved": pipe.saved.append((page, data))
         return pipe
+
+    def _render(self, pipe, job, tmp_path):
+        """Render a notebook the way the pipeline does, through its source.
+
+        The page count is no longer passed in: the renderer enumerates its own
+        pages, which is what lets a PDF report the three it was written on out
+        of four hundred.
+        """
+        from living_ink.sources import NOTEBOOK, SourceBundle
+
+        pipe._render_source(
+            job,
+            NOTEBOOK,
+            SourceBundle(doc_id=job.notebook_id, title=job.notebook, zip_path=tmp_path / "doc.zip"),
+        )
 
     def _job(self) -> DocumentJob:
         return DocumentJob(
@@ -1620,7 +1651,7 @@ class TestRenderCaching:
         )
         pipe = self._pipeline(tmp_path)
 
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
 
         assert pipe.saved == []
         assert any("format version 3" in w for w in pipe.report.warnings)
@@ -1638,7 +1669,7 @@ class TestRenderCaching:
         pipe = self._pipeline(tmp_path)
         job = self._job()
 
-        pipe._render_zip_pages(job, tmp_path / "doc.zip", 2)
+        self._render(pipe, job, tmp_path)
 
         assert job.failed_pages == 2
 
@@ -1655,7 +1686,7 @@ class TestRenderCaching:
         )
         pipe = self._pipeline(tmp_path)
 
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
 
         assert [page for page, _ in pipe.saved] == [2]
 
@@ -1674,40 +1705,40 @@ class TestRenderCaching:
         monkeypatch.setattr(
             "living_ink.extract.render_page_from_document_zip", maybe_refuse, raising=True
         )
-        self._pipeline(tmp_path)._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(self._pipeline(tmp_path), self._job(), tmp_path)
         assert rendered == []
 
         broken = False
         again = self._pipeline(tmp_path)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == [1, 2]
 
     def test_the_first_run_renders_every_page(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         assert rendered == [1, 2]
 
     def test_the_second_run_renders_nothing(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         rendered.clear()
 
         again = self._pipeline(tmp_path)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == []
 
     def test_a_cached_page_is_still_saved(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
 
         again = self._pipeline(tmp_path)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert again.saved == [(1, b"png-1"), (2, b"png-2")]
 
     def test_only_the_changed_page_is_re_rendered(self, tmp_path, rendered, monkeypatch):
         """This is the whole point: an edited notebook costs one page, not all."""
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         rendered.clear()
 
         monkeypatch.setattr(
@@ -1716,30 +1747,30 @@ class TestRenderCaching:
             raising=True,
         )
         again = self._pipeline(tmp_path)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == [2]
 
     def test_a_renderer_upgrade_re_renders_everything(self, tmp_path, rendered, monkeypatch):
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         rendered.clear()
 
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp2")
         again = self._pipeline(tmp_path)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == [1, 2]
 
     def test_a_new_background_re_renders_everything(self, tmp_path, rendered):
         """The background is baked into the PNG, so it belongs in the key."""
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         rendered.clear()
 
         again = self._pipeline(tmp_path, background="yellow")
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == [1, 2]
 
-    def test_the_background_reaches_the_renderer(self, tmp_path, monkeypatch):
+    def test_the_background_reaches_the_renderer(self, tmp_path, rendered, monkeypatch):
         """The colour in the key is the colour the page is rendered on.
 
         It used to be in the key and nowhere else, so setting it invalidated
@@ -1759,20 +1790,22 @@ class TestRenderCaching:
         )
 
         pipe = self._pipeline(tmp_path, background="#123456")
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 1)
+        self._render(pipe, self._job(), tmp_path)
 
         assert seen["background_color"] == "#123456"
 
     def test_a_disabled_cache_renders_every_time(self, tmp_path, rendered):
         pipe = self._pipeline(tmp_path, enabled=False)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         rendered.clear()
 
         again = self._pipeline(tmp_path, enabled=False)
-        again._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(again, self._job(), tmp_path)
         assert rendered == [1, 2]
 
-    def test_a_page_that_fails_to_render_is_skipped_not_cached(self, tmp_path, monkeypatch):
+    def test_a_page_that_fails_to_render_is_skipped_not_cached(
+        self, tmp_path, rendered, monkeypatch
+    ):
         monkeypatch.setattr(
             "living_ink.extract.render_page_from_document_zip",
             lambda zip_path, page, **kwargs: None if page == 2 else b"png",
@@ -1786,7 +1819,7 @@ class TestRenderCaching:
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp")
 
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         assert [page for page, _ in pipe.saved] == [1]
         assert pipe.renders.stats()[0] == 1
 
@@ -1796,9 +1829,263 @@ class TestRenderCaching:
             "living_ink.extract.get_page_source_hashes", lambda zip_path: ["", "hash-2"]
         )
         pipe = self._pipeline(tmp_path)
-        pipe._render_zip_pages(self._job(), tmp_path / "doc.zip", 2)
+        self._render(pipe, self._job(), tmp_path)
         assert rendered == [1, 2]
         assert pipe.renders.stats()[0] == 1
+
+
+class TestTheRendererContractDrivesTheRun:
+    """The pipeline calls prepare → pages → text_layer → render, and nothing else.
+
+    It used to hold three ``_render_*`` methods and a dispatch table, so adding
+    a format meant editing ``pipeline.py``. These tests run a source nothing
+    ships against the real ``_render_source``, which is the only way to tell
+    "the pipeline honours the contract" from "the three shipped renderers
+    happen to work".
+    """
+
+    class RecordingRenderer:
+        """A renderer that records the contract calls it received."""
+
+        version = 7
+
+        def __init__(self, pages=(), text=None, prepared=True, png=b"png"):
+            self.calls = []
+            self._pages = list(pages)
+            self._text = text
+            self._prepared = prepared
+            self._png = png
+
+        def prepare(self, bundle, ctx):
+            self.calls.append("prepare")
+            return self._prepared
+
+        def pages(self, bundle, ctx):
+            self.calls.append("pages")
+            return self._pages
+
+        def render(self, bundle, page, ctx):
+            self.calls.append(f"render:{page.number}")
+            return self._png(page) if callable(self._png) else self._png
+
+        def text_layer(self, bundle, ctx):
+            self.calls.append("text_layer")
+            return self._text
+
+        def describe_pages(self, bundle, pages):
+            raise AssertionError("describe_pages belongs to a later stage")
+
+    def _source(self, renderer, **kwargs):
+        from living_ink.sources import SourceType
+
+        return SourceType(
+            name=kwargs.pop("name", "fake"),
+            file_type_values=(),
+            name_suffixes=(),
+            source_suffix="",
+            renderer=renderer,
+            label=kwargs.pop("label", "Fake"),
+            **kwargs,
+        )
+
+    def _pipeline(self, tmp_path, enabled=False):
+        from living_ink.cache import RenderCache
+        from living_ink.devices import default_reading
+
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.device = default_reading()
+        pipe.settings = Settings(render_background="white")
+        pipe.renders = RenderCache(tmp_path / "renders", enabled=enabled)
+        pipe.report = RunReport()
+        pipe.keep_temp = False
+        pipe.saved = []
+        pipe._save_page = lambda job, page, data, label="Saved": pipe.saved.append((page, data))
+        return pipe
+
+    def _job(self) -> DocumentJob:
+        return DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="fake",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+        )
+
+    def _bundle(self):
+        from living_ink.sources import SourceBundle
+
+        return SourceBundle(doc_id="doc-1", title="Notes", zip_path=Path("doc.zip"))
+
+    def _refs(self, *numbers):
+        from living_ink.sources import PageRef
+
+        return [PageRef(ordinal=i, number=n, source_key=f"k{n}") for i, n in enumerate(numbers)]
+
+    def test_the_contract_is_called_in_order(self, tmp_path):
+        renderer = self.RecordingRenderer(pages=self._refs(1, 2))
+        pipe = self._pipeline(tmp_path)
+        pipe._render_source(self._job(), self._source(renderer), self._bundle())
+        assert renderer.calls == ["prepare", "pages", "text_layer", "render:1", "render:2"]
+
+    def test_a_sparse_page_number_survives_to_the_image(self, tmp_path):
+        """A 400-page PDF annotated on page 377 saves page 377, not page 1."""
+        pipe = self._pipeline(tmp_path)
+        renderer = self.RecordingRenderer(pages=self._refs(12, 200, 377))
+        pipe._render_source(self._job(), self._source(renderer), self._bundle())
+        assert [page for page, _ in pipe.saved] == [12, 200, 377]
+
+    def test_the_source_keys_line_up_with_the_saved_images(self, tmp_path):
+        """Appended per saved page: indexing by page number breaks on sparse ones."""
+        job = self._job()
+        renderer = self.RecordingRenderer(pages=self._refs(12, 377))
+        self._pipeline(tmp_path)._render_source(job, self._source(renderer), self._bundle())
+        assert job.source_hashes == ["k12", "k377"]
+
+    def test_a_page_that_renders_to_nothing_is_counted_not_dropped(self, tmp_path):
+        """The PDF path used to drop an uncompositable page and never say so."""
+        job = self._job()
+        renderer = self.RecordingRenderer(
+            pages=self._refs(1, 2), png=lambda page: None if page.number == 1 else b"png"
+        )
+        pipe = self._pipeline(tmp_path)
+        pipe._render_source(job, self._source(renderer), self._bundle())
+        assert job.failed_pages == 1
+        assert [page for page, _ in pipe.saved] == [2]
+
+    def test_the_text_layer_lands_on_the_job(self, tmp_path):
+        job = self._job()
+        renderer = self.RecordingRenderer(pages=(), text="Chapter One")
+        self._pipeline(tmp_path)._render_source(job, self._source(renderer), self._bundle())
+        assert job.extracted_doc_text == "Chapter One"
+
+    def test_text_with_no_pages_is_a_complete_result(self, tmp_path):
+        """An unannotated PDF has no pages at all, and that is not an error."""
+        renderer = self.RecordingRenderer(pages=(), text="Chapter One")
+        self._pipeline(tmp_path)._render_source(self._job(), self._source(renderer), self._bundle())
+
+    def test_neither_pages_nor_text_stops_the_document(self, tmp_path):
+        renderer = self.RecordingRenderer(pages=(), text=None)
+        with pytest.raises(pipeline._StopProcessing) as err:
+            self._pipeline(tmp_path)._render_source(
+                self._job(), self._source(renderer), self._bundle()
+            )
+        assert err.value.success is False
+
+    def test_a_source_that_calls_empty_a_skip_is_believed(self, tmp_path):
+        """An empty notebook is a user who has not written anything yet."""
+        renderer = self.RecordingRenderer(pages=(), text=None)
+        with pytest.raises(pipeline._StopProcessing) as err:
+            self._pipeline(tmp_path)._render_source(
+                self._job(), self._source(renderer, empty_is_skip=True), self._bundle()
+            )
+        assert err.value.success is True
+
+    def test_prepare_refusing_stops_before_anything_else_is_asked(self, tmp_path):
+        renderer = self.RecordingRenderer(prepared=False)
+        with pytest.raises(pipeline._StopProcessing):
+            self._pipeline(tmp_path)._render_source(
+                self._job(), self._source(renderer), self._bundle()
+            )
+        assert renderer.calls == ["prepare"]
+
+    def test_the_renderer_version_is_in_the_cache_key(self, tmp_path):
+        """One global format number could not say which of three changed."""
+        source = self._source(self.RecordingRenderer(pages=self._refs(1)))
+
+        first = self._pipeline(tmp_path, enabled=True)
+        first._render_source(self._job(), source, self._bundle())
+
+        source.renderer.version = 8
+        second = self._pipeline(tmp_path, enabled=True)
+        second._render_source(self._job(), source, self._bundle())
+        assert source.renderer.calls.count("render:1") == 2
+
+    def test_two_sources_do_not_share_a_cached_page(self, tmp_path):
+        """Same digest, same version, different format — different image."""
+        a = self.RecordingRenderer(pages=self._refs(1))
+        b = self.RecordingRenderer(pages=self._refs(1))
+        self._pipeline(tmp_path, enabled=True)._render_source(
+            self._job(), self._source(a, name="alpha"), self._bundle()
+        )
+        self._pipeline(tmp_path, enabled=True)._render_source(
+            self._job(), self._source(b, name="beta"), self._bundle()
+        )
+        assert b.calls.count("render:1") == 1
+
+    def test_a_cached_page_is_not_rendered_twice(self, tmp_path):
+        """Every source is cached now; the PDF path used to render every run."""
+        source = self._source(self.RecordingRenderer(pages=self._refs(1)))
+        for _ in range(2):
+            self._pipeline(tmp_path, enabled=True)._render_source(
+                self._job(), source, self._bundle()
+            )
+        assert source.renderer.calls.count("render:1") == 1
+
+
+class TestTheDownloadedZipHonoursKeepTemp:
+    """``--keep-temp`` is what CLAUDE.md tells people to debug rendering with."""
+
+    def _pipeline(self, tmp_path, keep_temp):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.keep_temp = keep_temp
+        pipe._render_source = lambda job, source, bundle: None
+        return pipe
+
+    def _job(self) -> DocumentJob:
+        return DocumentJob(
+            item={},
+            notebook="Notes",
+            notebook_id="doc-1",
+            doc_type="notebook",
+            version="v1",
+            safe_name="Notes",
+            folder_path="",
+            display_title="Notes",
+            keep_temp=False,
+        )
+
+    def _client(self):
+        client = MagicMock()
+        client.download.return_value = b"PK\x03\x04zip"
+        return client
+
+    def test_the_zip_is_removed_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
+        self._pipeline(tmp_path, keep_temp=False)._render_document(self._job(), self._client())
+        assert not (tmp_path / "Notes.zip").exists()
+
+    def test_keeping_temp_files_keeps_the_zip(self, tmp_path, monkeypatch):
+        """The .rm source is exactly what a render bug needs; it used to vanish."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
+        self._pipeline(tmp_path, keep_temp=True)._render_document(self._job(), self._client())
+        assert (tmp_path / "Notes.zip").read_bytes() == b"PK\x03\x04zip"
+
+    def test_a_failed_render_still_cleans_up(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
+        pipe = self._pipeline(tmp_path, keep_temp=False)
+
+        def boom(job, source, bundle):
+            raise pipeline._StopProcessing(False, "nope")
+
+        pipe._render_source = boom
+        with pytest.raises(pipeline._StopProcessing):
+            pipe._render_document(self._job(), self._client())
+        assert not (tmp_path / "Notes.zip").exists()
+
+    def test_a_download_that_returns_nothing_is_a_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        client = MagicMock()
+        client.download.return_value = None
+        with pytest.raises(pipeline._StopProcessing) as err:
+            self._pipeline(tmp_path, keep_temp=False)._render_document(self._job(), client)
+        assert err.value.success is False
 
 
 class TestPublicationIdentity:
@@ -2635,6 +2922,16 @@ class TestRenderGeometryFollowsTheDevice:
             source=SOURCE_USB,
         )
 
+    def _render(self, pipe, job, tmp_path):
+        """Render a notebook through its source, the way the pipeline does."""
+        from living_ink.sources import NOTEBOOK, SourceBundle
+
+        pipe._render_source(
+            job,
+            NOTEBOOK,
+            SourceBundle(doc_id=job.notebook_id, title=job.notebook, zip_path=tmp_path / "doc.zip"),
+        )
+
     def test_the_panel_is_taken_from_the_profile_table(self):
         from living_ink.devices import DEVICE_PROFILES
 
@@ -2663,6 +2960,9 @@ class TestRenderGeometryFollowsTheDevice:
             "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
         )
         monkeypatch.setattr("living_ink.extract.renderer_fingerprint", lambda: "fp", raising=True)
+        monkeypatch.setattr(
+            "living_ink.extract.get_document_page_count", lambda zip_path: 1, raising=True
+        )
 
         def pipe_for(model):
             pipe = SyncPipeline.__new__(SyncPipeline)
@@ -2670,6 +2970,7 @@ class TestRenderGeometryFollowsTheDevice:
             pipe.settings = Settings(render_background="white")
             pipe.renders = RenderCache(tmp_path / "renders", enabled=True)
             pipe.report = RunReport()
+            pipe.keep_temp = False
             pipe._save_page = lambda job, page, data, label="Saved": None
             return pipe
 
@@ -2685,10 +2986,10 @@ class TestRenderGeometryFollowsTheDevice:
             keep_temp=False,
         )
 
-        pipe_for("reMarkable 2")._render_zip_pages(job, tmp_path / "doc.zip", 1)
-        pipe_for("reMarkable Paper Pro")._render_zip_pages(job, tmp_path / "doc.zip", 1)
+        self._render(pipe_for("reMarkable 2"), job, tmp_path)
+        self._render(pipe_for("reMarkable Paper Pro"), job, tmp_path)
         # Same page, same renderer, same background — only the tablet differs.
-        pipe_for("reMarkable 2")._render_zip_pages(job, tmp_path / "doc.zip", 1)
+        self._render(pipe_for("reMarkable 2"), job, tmp_path)
 
         assert calls == [(1404, 1872), (1620, 2160)]
 
@@ -2708,15 +3009,20 @@ class TestRenderGeometryFollowsTheDevice:
         monkeypatch.setattr(
             "living_ink.extract.get_page_source_hashes", lambda zip_path: ["h1"], raising=True
         )
+        monkeypatch.setattr(
+            "living_ink.extract.get_document_page_count", lambda zip_path: 1, raising=True
+        )
 
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.device = self._reading("reMarkable Paper Pro")
         pipe.settings = Settings(render_background="white")
         pipe.renders = RenderCache(tmp_path / "renders", enabled=False)
         pipe.report = RunReport()
+        pipe.keep_temp = False
         pipe._save_page = lambda job, page, data, label="Saved": None
 
-        pipe._render_zip_pages(
+        self._render(
+            pipe,
             DocumentJob(
                 item={},
                 notebook="Notes",
@@ -2728,8 +3034,7 @@ class TestRenderGeometryFollowsTheDevice:
                 display_title="Notes",
                 keep_temp=False,
             ),
-            tmp_path / "doc.zip",
-            1,
+            tmp_path,
         )
 
         assert seen["screen"] == (1620, 2160)

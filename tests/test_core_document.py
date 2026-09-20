@@ -81,8 +81,8 @@ class TestDocumentHasText:
         assert Document(doc_id="d1", title="N", pages=(page(text="   \n"),)).has_text() is False
 
     def test_an_extracted_text_layer_counts(self):
-        """An unannotated PDF has one cover page and no transcription."""
-        doc = Document(doc_id="d1", title="N", pages=(page(),), body_text="Chapter One")
+        """An unannotated PDF has no pages and no transcription, only text."""
+        doc = Document(doc_id="d1", title="N", body_text="Chapter One")
         assert doc.has_text() is True
 
     def test_a_document_with_no_pages_at_all_has_nothing(self):

@@ -274,8 +274,14 @@ class SSHClient:
             # ordinary case for a notebook with no content descriptor.
             pass
 
-        # Also include raw PDF or EPUB files if they exist
-        for ext in ("pdf", "epub"):
+        # Also include the original document a source renders on top of, if
+        # one exists. The extensions come from the source registry rather than
+        # a literal here, so a new source format is downloaded over USB the day
+        # it is registered. Imported at call time: `sources` reaches into
+        # `extract`, and a transport must not drag the renderers in at import.
+        from living_ink.sources import source_suffixes
+
+        for ext in source_suffixes():
             raw_file = f"{XOCHITL_PATH}/{doc.id}.{ext}"
             try:
                 self._ssh_command(f"test -f '{raw_file}' && echo exists")

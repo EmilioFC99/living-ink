@@ -69,12 +69,6 @@ def quiet_mupdf() -> Iterator[None]:
 #: that parsed but is not the shape the format promises.
 _JSON_ERRORS = (ValueError, TypeError, KeyError)
 
-#: Bumped whenever this module's own rendering behaviour changes — the rmc
-#: monkey-patching, the background compositing, the bounds calculation. It is
-#: part of the render cache key, so a bump correctly invalidates every cached
-#: page image rather than serving output the current code would not produce.
-RENDER_FORMAT_VERSION = 3
-
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
 
@@ -279,21 +273,38 @@ def extract_text_from_epub(epub_path: Path) -> str:
         return ""
 
 
-def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Path]:
-    """Extract the raw PDF or EPUB file stored inside a reMarkable document zip.
+def extract_raw_document_from_zip(
+    zip_path: Path, out_path: Path, suffixes: Optional[Sequence[str]] = None
+) -> Optional[Path]:
+    """Extract the original document stored inside a reMarkable document zip.
 
     Args:
         zip_path: Path to the downloaded document zip archive.
         out_path: Destination path for the extracted raw document.
+        suffixes: Which extensions count as the original document, without the
+            dot ("pdf", "epub"). Defaults to every suffix the source registry
+            declares, so registering a source is enough to have its files
+            pulled out of the zip. Pass an explicit tuple to narrow it — a
+            renderer that would rather not accept a neighbouring format.
 
     Returns:
-        Path to the extracted file, or None if no PDF/EPUB found in archive.
+        Path to the extracted file, or None if the archive holds none.
     """
+    if suffixes is None:
+        # Call-time import: `sources` imports this module, so taking the
+        # dependency at module level would close the cycle.
+        from living_ink.sources import source_suffixes
+
+        suffixes = source_suffixes()
+    wanted = tuple(f".{s.lower().lstrip('.')}" for s in suffixes)
+    if not wanted:
+        return None
+
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             for name in zf.namelist():
                 lower_name = name.lower()
-                if lower_name.endswith((".pdf", ".epub")):
+                if lower_name.endswith(wanted):
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(out_path, "wb") as f:
                         f.write(zf.read(name))
@@ -305,6 +316,9 @@ def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Pa
 
 def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
     """Parse a document zip and find all annotated pages with their PDF page index.
+
+    An annotation the user deleted on the tablet is left out, the same way
+    :func:`_get_ordered_rm_files` leaves out a deleted notebook page.
 
     Args:
         zip_path: Path to the document zip file.
@@ -345,6 +359,11 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
             for idx, p in enumerate(pages_meta):
                 p_id = p.get("id") if isinstance(p, dict) else str(p)
                 rm_key = f"{p_id}.rm"
+                if page_is_deleted(p):
+                    # Claim it so the orphan sweep below does not hand the same
+                    # annotation back under a synthesised page number.
+                    matched_rm_names.add(rm_key)
+                    continue
                 if rm_key in rm_names:
                     matched_rm_names.add(rm_key)
                     redir_val = None
@@ -450,37 +469,6 @@ def render_composite_pdf_page(
         return None
 
 
-def render_pdf_page_preview(
-    pdf_path: Path,
-    page_index: int = 0,
-    dpi: int = 150,
-) -> Optional[bytes]:
-    """Render a single page of a PDF as a preview PNG image.
-
-    Args:
-        pdf_path: Path to the PDF document.
-        page_index: 0-indexed page number to render (default: 0 for cover).
-        dpi: Resolution for rendering.
-
-    Returns:
-        PNG image bytes, or None on failure.
-    """
-    try:
-        with quiet_mupdf(), fitz.open(str(pdf_path)) as doc:
-            if page_index < 0 or page_index >= len(doc):
-                return None
-            page = doc[page_index]
-            pix = page.get_pixmap(dpi=dpi)
-            pdf_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        out_buf = io.BytesIO()
-        pdf_img.save(out_buf, format="PNG")
-        return out_buf.getvalue()
-    except _DOC_ERRORS as e:
-        logger.debug(f"Failed to render PDF page preview: {e}")
-        return None
-
-
 def _parse_hex_color(hex_color: str) -> tuple:
     """Parse a hex color string to RGBA tuple.
 
@@ -544,15 +532,114 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
         return None
 
 
+def _toposort_items(items: Any) -> Iterator[Any]:
+    """Order CRDT sequence items by their left/right links, in linear time.
+
+    A drop-in replacement for ``rmscene.crdt_sequence.toposort_items``. The
+    upstream implementation is a layered topological sort that rebuilds its
+    entire dependency dictionary once per layer. A run of typed text is one
+    long chain — every character depends on the one before it — so it has as
+    many layers as it has characters, and the sort costs O(n²). A 32 KB page
+    of typed text took 295 seconds to render on the machine this was written
+    on, almost all of it inside that loop; the same notebook's 58 KB page of
+    pure handwriting takes 0.02 s, because ink is a shallow tree rather than a
+    chain.
+
+    This walks the same layers in the same order and yields the same ids — the
+    tie-break inside a layer is still ``sorted()`` — but it keeps a count of
+    unmet dependencies per node and a reverse index of who is waiting on whom,
+    so each edge is visited once instead of once per layer.
+
+    Args:
+        items: The ``CrdtSequenceItem`` objects to order.
+
+    Yields:
+        The ``CrdtId`` of each item, in sequence order. Ids the items refer to
+        but do not contain (the start and end sentinels) are not yielded.
+
+    Raises:
+        ValueError: If the links do not form a sequence — a cycle, or a set of
+            items that cannot all be reached. Upstream raises ``ValueError``
+            for the first and trips an ``assert`` for the second; both are the
+            same corrupt page, so both are reported the same way.
+    """
+    from rmscene.crdt_sequence import END_MARKER
+
+    item_dict = {item.item_id: item for item in items}
+    if not item_dict:
+        return
+
+    def side_id(item: Any, side: str) -> Any:
+        value = getattr(item, f"{side}_id")
+        if value == END_MARKER or value not in item_dict:
+            if value != END_MARKER:
+                logger.debug("Ignoring unknown %s_id %s of %s", side, value, item)
+            return "__start" if side == "left" else "__end"
+        return value
+
+    # waiting_on[node] is the set of nodes that must be yielded before it.
+    waiting_on: Dict[Any, set] = {}
+    for item in item_dict.values():
+        waiting_on.setdefault(item.item_id, set()).add(side_id(item, "left"))
+        waiting_on.setdefault(side_id(item, "right"), set()).add(item.item_id)
+    for node in [dep for deps in waiting_on.values() for dep in deps]:
+        waiting_on.setdefault(node, set())
+
+    # The reverse index, built once. Rebuilding it per layer is the upstream
+    # cost this function exists to avoid.
+    unblocks: Dict[Any, List[Any]] = {}
+    remaining = {}
+    for node, deps in waiting_on.items():
+        remaining[node] = len(deps)
+        for dep in deps:
+            unblocks.setdefault(dep, []).append(node)
+
+    layer = [node for node, count in remaining.items() if count == 0]
+    settled = 0
+    while layer:
+        if len(layer) == 1 and layer[0] == "__end":
+            settled += 1
+            break
+        yield from sorted(node for node in layer if node in item_dict)
+        nxt: List[Any] = []
+        for node in layer:
+            settled += 1
+            for dependent in unblocks.get(node, ()):
+                remaining[dependent] -= 1
+                if remaining[dependent] == 0:
+                    nxt.append(dependent)
+        layer = nxt
+
+    if settled != len(remaining):
+        raise ValueError("cyclic dependency")
+
+
+#: ``_patch_rmc`` replaces bound attributes with wrappers around whatever it
+#: found there, so running it twice wraps the wrapper. Rendering calls it once
+#: per page, which used to nest a new ``Pen.create`` a page deep.
+_rmc_patched = False
+
+
 def _patch_rmc() -> None:
-    """Ensure rmc's RM_PALETTE and Pen.create are resilient to new pen/color types.
+    """Make rmc survive unknown pen colours and export typed text in linear time.
 
     Upstream rmc omits PenColor.HIGHLIGHT (value 9) from RM_PALETTE, which causes
     KeyError: 9 when converting notes that use the highlighter. This function
     ensures all colors have a fallback and unknown pen types default to Ballpoint.
+    It also swaps rmscene's layered topological sort for :func:`_toposort_items`,
+    which yields the same order without the quadratic rebuild — see that
+    function for what the difference costs on a page of typed text.
+
+    Calling this more than once is a no-op: every patch here wraps or replaces
+    what it found, so a second pass would wrap its own output.
     """
+    global _rmc_patched
+    if _rmc_patched:
+        return
+
     try:
         import rmc.exporters.writing_tools as wt
+        import rmscene.crdt_sequence as cs
         import rmscene.scene_items as si
 
         class SafePalette(dict):
@@ -578,9 +665,16 @@ def _patch_rmc() -> None:
                 return Ballpoint(width, color_id)
 
         wt.Pen.create = safe_create
+
+        # CrdtSequence.__iter__ reads this by module global, so rebinding the
+        # name is enough; there is no other importer of it in rmscene.
+        cs.toposort_items = _toposort_items
     except (ImportError, AttributeError):
         # rmc or rmscene is absent, or an upgrade moved what this patches.
         logger.debug("Could not patch rmc", exc_info=True)
+        return
+
+    _rmc_patched = True
 
 
 def output_size(
@@ -790,11 +884,71 @@ def render_rm_file_to_png(
             tmp_raw_path.unlink(missing_ok=True)
 
 
+def page_is_deleted(page: Any) -> bool:
+    """Report whether a ``cPages.pages[]`` entry is a page the user removed.
+
+    Deleting a page on the tablet does not remove it from ``.content`` and does
+    not remove its ``.rm`` file from the zip: it adds a CRDT marker, and every
+    other field stays exactly as it was. So a reader that does not look for the
+    marker renders, transcribes, pays for and publishes a page the tablet is no
+    longer showing — which is what Living Ink did until this existed.
+
+    The marker is a CRDT register, ``{"timestamp": ..., "value": true}``, and
+    its value is what decides. A bare ``true`` and a bare ``1`` are accepted
+    too, because the same field is written flat in the older page format.
+
+    Args:
+        page: One entry from ``cPages.pages``. A non-dict entry is the oldest
+            format, a bare page id, which carries no marker at all.
+
+    Returns:
+        True if the page was deleted on the tablet.
+    """
+    if not isinstance(page, dict):
+        return False
+    marker = page.get("deleted")
+    if isinstance(marker, dict):
+        return bool(marker.get("value"))
+    return bool(marker)
+
+
+def _live_page_ids(pages_meta: List[Any]) -> Tuple[List[str], set]:
+    """Split a ``cPages.pages`` list into the pages that still exist and the rest.
+
+    Args:
+        pages_meta: The raw ``cPages.pages`` list, or the older flat ``pages``
+            list of bare ids.
+
+    Returns:
+        A tuple of the live page ids in document order and the set of deleted
+        page ids. The second is not the complement of the first: a caller that
+        sweeps up ``.rm`` files the page list never mentioned needs to know
+        which ids were mentioned *and* removed, or the file comes back in as an
+        orphan.
+    """
+    live: List[str] = []
+    dead: set = set()
+    for page in pages_meta:
+        page_id = page.get("id") if isinstance(page, dict) else str(page)
+        if page_id is None:
+            continue
+        if page_is_deleted(page):
+            dead.add(page_id)
+        else:
+            live.append(page_id)
+    return live, dead
+
+
 def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     """Extract and order .rm files from an extracted document directory.
 
     Reads the .content file to determine page order and returns .rm files
     sorted accordingly. Falls back to filesystem order if no page order found.
+
+    Pages the user deleted on the tablet are left out — both from the ordered
+    list and from the sweep of files the page list does not mention, since a
+    deleted page's ``.rm`` file is still in the zip and would otherwise return
+    as an orphan.
 
     Args:
         tmpdir_path: Path to the extracted document directory
@@ -803,22 +957,23 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
         List of .rm file paths in correct page order
     """
     # Get page order from .content file
-    page_order = []
+    page_order: List[str] = []
+    deleted_ids: set = set()
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
             # New format: cPages.pages array
             if "cPages" in data and "pages" in data["cPages"]:
-                page_order = [p["id"] for p in data["cPages"]["pages"]]
+                page_order, deleted_ids = _live_page_ids(data["cPages"]["pages"])
             # Fallback: pages array directly
             elif "pages" in data and isinstance(data["pages"], list):
-                page_order = data["pages"]
+                page_order, deleted_ids = _live_page_ids(data["pages"])
         except (OSError, *_JSON_ERRORS):
             # Ignore errors reading/parsing .content file; fallback to default page order
             pass
         break
 
-    rm_files = list(tmpdir_path.glob("**/*.rm"))
+    rm_files = [p for p in tmpdir_path.glob("**/*.rm") if p.stem not in deleted_ids]
 
     # Sort rm_files by page order if available
     if page_order:
@@ -939,19 +1094,26 @@ def get_page_source_hashes(zip_path: Path) -> List[str]:
 
 @lru_cache(maxsize=1)
 def renderer_fingerprint() -> str:
-    """Identify everything, other than the page source, that shapes a render.
+    """Identify the libraries that turn a ``.rm`` file into an image.
 
     A cached PNG is only reusable while the code that produced it is
-    unchanged. ``rmc`` and ``rmscene`` are the two libraries that turn a ``.rm``
-    file into an image, and :data:`RENDER_FORMAT_VERSION` covers the parts this
-    module does itself — the monkey-patching in :func:`_patch_rmc`, the
-    background handling, the bounds. Bump it when any of those change.
+    unchanged. ``rmc`` and ``rmscene`` are the two libraries this module drives,
+    and their versions are the part of that no source can know for itself.
 
-    The background colour is deliberately *not* in here: it is per-render
-    rather than per-build, so the caller folds it into the key instead.
+    This used to carry a hand-maintained ``RENDER_FORMAT_VERSION`` covering
+    what *this* module does — the monkey-patching, the background handling, the
+    bounds. One number for three renderers meant a change to the PDF compositor
+    threw away every cached notebook page, and remembering to bump it was a
+    convention rather than a mechanism. Each
+    :class:`~living_ink.sources.Renderer` now declares its own ``version`` and
+    the pipeline puts it in the key beside this digest, so a renderer
+    invalidates its own pages and nobody else's.
+
+    The background colour and the panel size are deliberately *not* in here:
+    they are per-run rather than per-build, so the caller folds them in.
 
     Returns:
-        A short hex digest identifying the current rendering behaviour.
+        A short hex digest identifying the installed rendering libraries.
     """
     versions = []
     for module in ("rmc", "rmscene"):
@@ -962,8 +1124,7 @@ def renderer_fingerprint() -> str:
             # distinguishing from any installed version.
             versions.append(f"{module}=absent")
 
-    parts = [f"format={RENDER_FORMAT_VERSION}", *versions]
-    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256("\0".join(versions).encode("utf-8")).hexdigest()[:16]
 
 
 def get_document_page_count(zip_path: Path) -> int:

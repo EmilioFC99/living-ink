@@ -115,6 +115,41 @@ class TestDestinationsDoNotReachBack:
         assert {k: v for k, v in offenders.items() if v} == {}
 
 
+class TestSourcesDoNotReachBack:
+    """Rule 3: ``sources/`` never imports the pipeline, and imports no renderer.
+
+    A source describes a document format and knows how to turn its pages into
+    images. It is called *by* the pipeline, so importing the pipeline back would
+    be the cycle; and the pipeline resolves sources from the registry, so there
+    is nothing there a renderer needs.
+
+    ``extract`` is the harder case, and the reason it is not in the allowed set
+    below. Every shipped renderer calls it — but only from inside a method, for
+    two reasons. It would be a cycle: :func:`extract.extract_raw_document_from_zip`
+    reads the registry to learn which suffixes count as an original document.
+    And it is the §9.6 trap: about fifteen tests monkeypatch
+    ``living_ink.extract.render_page_from_document_zip``, which only takes
+    effect while the name is looked up on the module at call time. Hoisting
+    these imports binds the function at import, the monkeypatch silently stops
+    applying, **and the tests keep passing** against the real renderer.
+    """
+
+    def test_sources_import_no_command_layer(self):
+        forbidden = {"cli", "ui", "scheduler", "pipeline", "setup_wizard", "destinations"}
+        offenders = {
+            path.name: [name for name in imports if name.split(".")[0] in forbidden]
+            for path, imports in package_files("sources")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+    def test_sources_import_no_renderer_at_module_level(self):
+        offenders = {
+            path.name: [name for name in imports if name.split(".")[0] in {"extract", "api"}]
+            for path, imports in package_files("sources")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+
 class TestTheDomainModelIsALeaf:
     """``core/document.py`` imports nothing from Living Ink at all.
 

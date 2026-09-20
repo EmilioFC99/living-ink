@@ -29,31 +29,6 @@ from tests.fixtures.transport import (
 )
 
 
-def _holds_typed_text(rm_file: Path) -> bool:
-    """Report whether a page carries typed text rather than only ink.
-
-    Reading the block stream is milliseconds; *exporting* a text page is
-    minutes, because of the quadratic described on
-    :meth:`TestAgainstTheRealDevice.test_real_rm_pages_render`. This is how the
-    fast test knows which pages to leave to the slow one.
-
-    Args:
-        rm_file: Path to a ``.rm`` page.
-
-    Returns:
-        True if the page has a root text block, False if it does not or if the
-        page cannot be read at all.
-    """
-    from rmscene import read_blocks
-    from rmscene.scene_stream import RootTextBlock
-
-    try:
-        with open(rm_file, "rb") as handle:
-            return any(isinstance(b, RootTextBlock) for b in read_blocks(handle))
-    except Exception:  # noqa: BLE001 - an unreadable page is the render test's problem
-        return False
-
-
 class TestCorpusIsWellFormed:
     """The committed corpus is present and shaped like a device."""
 
@@ -426,55 +401,32 @@ class TestAgainstTheRealDevice:
         assert seen, "no captured document carried a cPages entry"
 
     def test_real_rm_pages_render(self, device_corpus):
-        """Every captured page of handwriting goes through the shipped renderer.
+        """Every captured page goes through the shipped renderer.
 
-        Pages carrying **typed** text are left to
-        :meth:`test_every_real_page_renders` because exporting one is
-        quadratic, and the cause is not this project's code: ``rmscene``'s
-        ``CrdtSequence.__iter__`` re-runs ``toposort_items`` on every
-        iteration, and ``rmc`` iterates the text sequence once per character.
-        A profile of one 32 KB typed page recorded 46,792 topological sorts,
-        1.09 billion calls to ``hash``, and 210 seconds. A 58 KB page of pure
-        ink in the same capture renders in 0.02 s, so the trigger is the text,
-        not the size.
-
-        Detecting it is cheap and exact — reading the block stream to look for
-        a ``RootTextBlock`` takes 3 ms — so this skips on the real cause rather
-        than on a size threshold that would happen to work today and stop
-        working when someone writes a long note by hand.
+        This used to run on handwriting only, with typed pages deselected
+        behind ``-m slow``: exporting one was quadratic, because ``rmscene``'s
+        ``toposort_items`` rebuilt its dependency table once per character and
+        a run of typed text is one character-long chain. A 32 KB typed page
+        took 295 seconds; a 58 KB page of pure ink in the same capture took
+        0.02 s, so the trigger was the text, not the size.
+        :func:`~living_ink.extract._toposort_items` replaced that sort, the
+        same page now renders in 0.38 s, and the split has no reason to exist.
         """
         pages = sorted(device_corpus.rglob("*.rm"))
         if not pages:
             pytest.skip("capture holds no handwritten pages")
 
         rendered = 0
-        for rm in pages:
-            if extract.read_rm_version(rm) != 6 or _holds_typed_text(rm):
-                continue
-            assert extract.render_rm_file_to_png(rm, background_color="#FFFFFF"), rm.name
-            rendered += 1
-        assert rendered, "no captured page rendered"
-
-    @pytest.mark.slow
-    def test_every_real_page_renders(self, device_corpus):
-        """Every captured page renders, however long that takes.
-
-        Deselected by default — see :meth:`test_real_rm_pages_render` for why
-        one page costs minutes. Run it with ``pytest -m slow``. This is the
-        test that would catch a renderer change breaking a page the fast
-        sample never reaches.
-        """
-        pages = sorted(device_corpus.rglob("*.rm"))
-        if not pages:
-            pytest.skip("capture holds no handwritten pages")
-
         failed = []
         for rm in pages:
             if extract.read_rm_version(rm) != 6:
                 continue
-            if not extract.render_rm_file_to_png(rm, background_color="#FFFFFF"):
+            if extract.render_rm_file_to_png(rm, background_color="#FFFFFF"):
+                rendered += 1
+            else:
                 failed.append(rm.name)
         assert not failed, f"pages rendered to nothing: {failed}"
+        assert rendered, "no captured page rendered"
 
     def test_real_documents_download_through_the_fake(self, device_corpus, tmp_path):
         """A captured document assembles into an archive extract can read."""
@@ -490,31 +442,45 @@ class TestAgainstTheRealDevice:
 
 
 class TestDefectsTheCorpusFound:
-    """Two bugs that only a real ``.content`` file exposes.
+    """Bugs that only a real ``.content`` file exposes.
 
-    Both are recorded here as the behaviour that ships today, with the correct
-    behaviour named. Each is fixed by a later slice, and the assertion flips
-    when it is.
+    Each is recorded with the correct behaviour named. One still ships as a
+    defect and is pinned as such; the assertion flips when it is fixed.
     """
 
-    def test_a_deleted_page_still_reaches_the_pipeline(self, corpus_transport, tmp_path):
-        """``_get_ordered_rm_files`` ignores the per-page deletion marker.
+    def test_a_deleted_page_does_not_reach_the_pipeline(self, corpus_transport, tmp_path):
+        """A page the user removed is not rendered, transcribed or published.
 
-        A page the user removed stays in ``cPages.pages`` carrying
-        ``deleted``. ``extract._get_ordered_rm_files`` (``extract.py:826``)
-        builds its order from every entry in that array without checking the
-        marker, so a removed page is rendered, transcribed and published.
+        Deleting a page on the tablet leaves it in ``cPages.pages`` carrying a
+        ``deleted`` marker and leaves its ``.rm`` file in the zip. Every field
+        that decides anything looks unchanged, so a reader that does not look
+        for the marker publishes a page the tablet stopped showing — which is
+        what happened until ``extract.page_is_deleted`` existed.
 
         The fixture has three pages with the middle one removed: the tablet
-        shows two.
+        shows two, and so does the count.
         """
         doc = corpus_transport.get_doc(corpus_ids.DOC_DELETED_PAGE)
         archive = tmp_path / "doc.zip"
         archive.write_bytes(corpus_transport.download(doc))
 
         assert len(corpus_transport.page_order(corpus_ids.DOC_DELETED_PAGE)) == 2
-        # Correct behaviour is 2. This pins the defect until it is fixed.
-        assert extract.get_document_page_count(archive) == 3
+        assert extract.get_document_page_count(archive) == 2
+
+    def test_the_deleted_page_is_the_middle_one(self, corpus_transport, tmp_path):
+        """Removing it must not renumber or reorder the two that remain.
+
+        Counting right by dropping the wrong page would pass the test above.
+        """
+        doc = corpus_transport.get_doc(corpus_ids.DOC_DELETED_PAGE)
+        archive = tmp_path / "doc.zip"
+        archive.write_bytes(corpus_transport.download(doc))
+
+        expected = corpus_transport.page_order(corpus_ids.DOC_DELETED_PAGE)
+        with extract._open_document_zip(archive) as extracted:
+            rendered = [p.stem for p in extract._get_ordered_rm_files(extracted)]
+
+        assert rendered == expected
 
     def test_trash_is_a_parent_not_a_deleted_flag(self, corpus_root):
         """A trashed document carries ``parent: "trash"`` and no ``deleted`` key.
