@@ -1090,7 +1090,7 @@ class SyncPipeline:
         if failures:
             raise ConfigurationMissing(
                 "A destination is not ready:\n" + "\n".join(f"❌ {f}" for f in failures),
-                hint="Run 'living-ink status' to see every destination's state.",
+                hint="Run 'living-ink info' to see every destination's state.",
             )
 
     def _learn_device(self, client: Any) -> None:
@@ -2450,9 +2450,9 @@ class SyncPipeline:
         dropped after a run that did not want it. A failed or interrupted run
         prunes nothing, because it does not know what it would have used.
 
-        ``living-ink cache --prune`` is the other caller, and the difference is
-        the point: there the user has said when, so any moment is the right
-        one. Here nobody has, so the placement is what makes it safe.
+        Automatic is the only caller now that ``cache --prune`` is retired,
+        which is what makes the placement load-bearing: nobody has said when,
+        so running last is the only moment that is safe to run at.
         """
         if self.dry_run:
             return
@@ -2515,7 +2515,7 @@ class SyncPipeline:
             lines.append("")
             lines.extend(f"- {warning}" for warning in self.report.warnings)
         lines.append("")
-        lines.append(f"Run `living-ink status` for details, or see the log at {logs.LOG_PATH}.")
+        lines.append(f"Run `living-ink info` for details, or see the log at {logs.LOG_PATH}.")
         return "\n".join(lines)
 
     def _report_interrupt(self, published: int) -> None:

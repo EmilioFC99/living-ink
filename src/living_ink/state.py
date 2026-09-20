@@ -995,6 +995,19 @@ class StateStore:
             for table in tables
         }
 
+    def schema_version(self) -> int:
+        """Return the schema version the open file actually carries.
+
+        Read from the file rather than reported as :data:`SCHEMA_VERSION`:
+        the constant says what this build writes, and the two differ for
+        exactly as long as it takes :meth:`_migrate` to run — which is the
+        window a health check exists to describe.
+
+        Returns:
+            The ``user_version`` pragma, 0 on a database that predates it.
+        """
+        return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+
     def integrity_check(self) -> str:
         """Ask SQLite whether the file is intact.
 

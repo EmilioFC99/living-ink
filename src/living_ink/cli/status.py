@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class StatusReport:
     """A snapshot of the system's health, independent of how it is displayed.
 
-    ``living-ink status`` has two renderers — a styled console view and
+    ``living-ink info`` has two renderers — a styled console view and
     ``--json`` — and they used to probe the tablet, the AI provider and the
     LaunchAgent separately, which meant the two could disagree and a new check
     had to be written twice. This dataclass is the single collected result;
@@ -67,6 +67,17 @@ class StatusReport:
     cache_entries: int = 0
     cache_bytes: int = 0
 
+    #: Where the sync state lives, whether or not it is there yet. Always set
+    #: once the config parsed, because "no database" is itself the answer on a
+    #: fresh install and a path the user can look at beats the word "none".
+    state_path: Optional[Path] = None
+    state_exists: bool = False
+    state_bytes: int = 0
+    state_schema: int = 0
+    state_counts: dict[str, int] = field(default_factory=dict)
+    #: The most recent run's row, or None before the first sync.
+    last_run: Optional[dict[str, Any]] = None
+
     #: Stored credentials any other account on this machine can read. Almost
     #: always empty — this module writes 0600 — but a file restored from a
     #: backup or copied with ``cp`` arrives with whatever mode it had, and the
@@ -84,7 +95,7 @@ class StatusReport:
         """Render the report in the documented ``--json`` shape.
 
         The key names and nesting are a stable contract for anyone scripting
-        against ``living-ink status --json``; change them only deliberately.
+        against ``living-ink info --json``; change them only deliberately.
         1.0 drops the ``apple_notes`` object, which is such a change: the
         destination it described no longer exists, and reporting it as
         permanently disabled would be a fiction a script could still branch on.
@@ -143,6 +154,17 @@ class StatusReport:
             "cache": {
                 "entries": self.cache_entries,
                 "size_bytes": self.cache_bytes,
+            },
+            # What ``state`` used to print as its summary. It is here rather
+            # than under its own command because one health surface that
+            # disagrees with nothing beats three that can.
+            "state": {
+                "path": str(self.state_path) if self.state_path else None,
+                "exists": self.state_exists,
+                "size_bytes": self.state_bytes,
+                "schema_version": self.state_schema,
+                "counts": dict(self.state_counts),
+                "last_run": self.last_run,
             },
             "credentials": {"insecure": list(self.loose_credentials)},
             "settings": [
@@ -345,7 +367,66 @@ def collect_status(config_path: Path) -> StatusReport:
     except OSError:
         logger.debug("Could not measure the caches", exc_info=True)
 
+    _collect_state(report)
+
     return report
+
+
+def _collect_state(report: StatusReport) -> None:
+    """Fill in what the sync state database holds, if it is there.
+
+    Counts and a last-run row, never the rows themselves: this runs on the
+    console path too, and a health check that reads every page of every
+    document to print four numbers is one nobody runs twice. The full dump is
+    :func:`state_rows`, asked for only by ``info --json``.
+
+    Args:
+        report: The report to fill in. Left at its defaults when there is no
+            database yet, which is the honest answer before the first sync.
+    """
+    path = caches_api.state_db_path()
+    report.state_path = path
+    if not path.exists():
+        return
+
+    try:
+        from living_ink.pipeline import get_state_store
+
+        store = get_state_store()
+        report.state_exists = True
+        report.state_bytes = path.stat().st_size
+        report.state_schema = store.schema_version()
+        report.state_counts = store.counts()
+        report.last_run = store.last_run()
+    except Exception:
+        # Broad on purpose: an unreadable, locked or corrupt database is
+        # precisely the condition a health check is run to discover, and
+        # raising here would take the AI, vault and connection lines down
+        # with it — the ones that would have said what to do next.
+        logger.debug("Could not read the sync state at %s", path, exc_info=True)
+
+
+def state_rows() -> dict[str, Any]:
+    """Return every row in the sync state database.
+
+    The machine surface that replaced ``state --dump``. Kept out of
+    :func:`collect_status` because it is unbounded — one row per page of every
+    document ever synced — and only a caller that asked for JSON wants it.
+
+    Returns:
+        Mapping of table name to its rows, or an empty mapping when there is
+        no database yet or it cannot be read.
+    """
+    path = caches_api.state_db_path()
+    if not path.exists():
+        return {}
+    try:
+        from living_ink.pipeline import get_state_store
+
+        return get_state_store().dump()
+    except Exception:
+        logger.debug("Could not dump the sync state at %s", path, exc_info=True)
+        return {}
 
 
 def short_destination(class_name: str) -> str:

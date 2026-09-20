@@ -104,7 +104,7 @@ class TestDamagedEntries:
 
 
 class TestStats:
-    """The size report is what 'living-ink cache' prints."""
+    """The size report is what 'living-ink info' prints as its Cache line."""
 
     def test_an_empty_cache_reports_nothing(self, cache):
         assert cache.stats() == (0, 0)

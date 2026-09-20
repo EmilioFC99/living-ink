@@ -347,7 +347,7 @@ class TestWhereTheCloudTokenComesFrom:
         assert resolve_stored_token() is None
 
     def test_a_caller_with_a_config_in_hand_reads_that_profile(self, tmp_path):
-        """``living-ink status --root`` must report on the config it resolved.
+        """``living-ink info --root`` must report on the config it resolved.
 
         Reading the default profile instead reported the connection state of an
         account the run was never going to use.

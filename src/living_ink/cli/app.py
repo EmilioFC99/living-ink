@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Optional, Type
 
 from living_ink.cli.base import BaseCommand
-from living_ink.cli.commands.cache import CacheCommand
+from living_ink.cli.commands.info import InfoCommand
 from living_ink.cli.commands.setup import SetupCommand
-from living_ink.cli.commands.state import StateCommand
-from living_ink.cli.commands.status import StatusCommand
 from living_ink.cli.commands.sync import SyncCommand
 from living_ink.cli.commands.watch import WatchCommand
 from living_ink.cli.flags import register_global_flags
@@ -79,9 +77,9 @@ def configure_logging(args: argparse.Namespace, root: Optional[Path] = None) -> 
         logs.LOG_PATH,
         verbose=settings.verbosity == "verbose",
         quiet=settings.verbosity == "quiet",
-        # ``status``, ``state`` and ``cache`` register a ``--json`` of their
-        # own, with no setting behind it, because they print a document rather
-        # than a run report. It keeps stdout clean the same way.
+        # ``info`` registers a ``--json`` of its own, with no setting behind
+        # it, because it prints a document rather than a run report. It keeps
+        # stdout clean the same way.
         json_output=settings.output_json or getattr(args, "json", False),
     )
 
@@ -111,13 +109,15 @@ class LivingInkCLI:
         commands: Dictionary mapping command names to BaseCommand classes.
     """
 
+    #: The commands 1.0 ships, in the order ``--help`` lists them. Four of the
+    #: six so far: ``config`` and ``uninstall`` are still unbuilt, and
+    #: ``tests/test_cli_behaviour.py`` pins their absence so it stays a stated
+    #: fact rather than an oversight.
     DEFAULT_COMMANDS: list[Type[BaseCommand]] = [
         SyncCommand,
         WatchCommand,
         SetupCommand,
-        StatusCommand,
-        StateCommand,
-        CacheCommand,
+        InfoCommand,
     ]
 
     def __init__(

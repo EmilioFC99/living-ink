@@ -45,7 +45,7 @@ Once installed, you can use the global `living-ink` command from anywhere:
 living-ink           # Sync notes (or runs setup if unconfigured)
 living-ink sync      # Run the sync pipeline
 living-ink setup     # Re-run interactive setup wizard
-living-ink status    # Check tablet, AI, and vault status
+living-ink info      # Check tablet, AI, vault, caches, and sync state
 ```
 
 ---
@@ -93,7 +93,7 @@ Living Ink includes a production-grade container image (non-root user, multi-sta
 ### Quick CLI via Docker Compose
 ```bash
 # Check status
-docker compose run --rm living-ink status
+docker compose run --rm living-ink info
 
 # Run notebook sync
 docker compose run --rm living-ink sync

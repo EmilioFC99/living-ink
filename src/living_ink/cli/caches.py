@@ -22,7 +22,7 @@ def state_db_path() -> Path:
 def transcript_cache():
     """Return the transcription cache the configured settings describe.
 
-    Built from the resolved settings rather than defaults so that ``cache``
+    Built from the resolved settings rather than defaults so that ``info``
     reports on the same cache a sync would use, including a disabled one.
 
     Returns:
@@ -61,7 +61,7 @@ def render_cache():
 
 
 def all_caches():
-    """Return every cache ``living-ink cache`` reports on, in printing order.
+    """Return every cache ``living-ink info`` reports on, in printing order.
 
     Returns:
         A list of :class:`living_ink.cache.FileCache` instances.

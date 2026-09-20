@@ -343,26 +343,24 @@ COMMAND_SURFACE: dict[str, set[str]] = {
     # differ by watch's own flag — which is the point of spelling it this way.
     "watch": SYNC_SURFACE | {"--interval"},
     "setup": {"-h", "--help", "--verbose", "-q", "--quiet"},
-    "status": {"-h", "--help", "--verbose", "-q", "--quiet", "--json"},
-    "state": {
-        "-h",
-        "--help",
-        "--verbose",
-        "-q",
-        "--quiet",
-        "--dump",
-        "--forget",
-        "--repair",
-        "--destination",
-        "--json",
-    },
-    "cache": {"-h", "--help", "--verbose", "-q", "--quiet", "--clear", "--prune", "--json"},
+    # One read-only surface with one ``--json``, where ``status``, ``state``
+    # and ``cache`` used to be three commands with three of them. Everything
+    # those three could *do* rather than show — clear, prune, repair, forget —
+    # is either automatic, destructive and therefore ``config → Advanced``, or
+    # ``sync --force``.
+    "info": {"-h", "--help", "--verbose", "-q", "--quiet", "--json"},
 }
 
 #: Commands §7.1 of the 1.0 design specifies but that have not been built. They
 #: must still be rejected as usage errors rather than half-working, and this
 #: list is what makes their absence a stated fact instead of an oversight.
-UNBUILT_COMMANDS = ("info", "config", "uninstall")
+UNBUILT_COMMANDS = ("config", "uninstall")
+
+#: Commands that shipped in 0.x and are gone. Listed rather than deleted,
+#: because a retired command has to fail the same clean way an unbuilt one
+#: does: a script still calling ``living-ink state --forget`` must be told the
+#: word is not a command, not left to a traceback or, worse, a partial run.
+RETIRED_COMMANDS = ("status", "state", "cache")
 
 
 # ---------------------------------------------------------------------------
@@ -472,31 +470,23 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     Combination(("watch", "--notebook", "Foo", "--preview"), True, "watch takes every sync option"),
     Combination(("watch", "--ssh", "--cloud"), False, "including sync's exclusions"),
     Combination(("watch", "--interval", "fast"), False, "--interval is typed int"),
-    # state — the three actions genuinely exclude one another.
-    Combination(("state",), True, "a bare state prints a summary"),
-    Combination(("state", "--dump"), True, "one action"),
-    Combination(("state", "--forget", "Foo", "--destination", "obsidian"), True, "scoped forget"),
-    Combination(("state", "--dump", "--json"), True, "--json is not an action"),
-    Combination(("state", "--dump", "--repair"), False, "two actions at once"),
-    Combination(("state", "--dump", "--forget", "Foo"), False, "two actions at once"),
-    Combination(("state", "--forget", "Foo", "--repair"), False, "two actions at once"),
-    # cache — same shape, two actions.
-    Combination(("cache",), True, "a bare cache prints a summary"),
-    Combination(("cache", "--prune"), True, "--prune's day count is optional"),
-    Combination(("cache", "--prune", "7"), True, "an explicit age"),
-    Combination(("cache", "--clear", "--json"), True, "--json is not an action"),
-    Combination(("cache", "--clear", "--prune"), False, "two actions at once"),
-    Combination(("cache", "--clear", "--prune", "7"), False, "two actions at once"),
-    # status and setup take almost nothing, and that is the point.
-    Combination(("status", "--json"), True, "the only flag status has"),
-    Combination(("status", "--preview"), False, "a sync flag on a read-only command"),
+    # info and setup take almost nothing, and that is the point.
+    Combination(("info",), True, "a bare info prints the report"),
+    Combination(("info", "--json"), True, "the only flag info has"),
+    Combination(("info", "--preview"), False, "a sync flag on a read-only command"),
+    # The retired commands' own flags, refused now as unknown words rather
+    # than as flags: the subcommand goes first, so the message names the
+    # command, which is the part a caller has to change.
+    Combination(("state", "--dump"), False, "state is retired"),
+    Combination(("cache", "--clear"), False, "cache is retired"),
+    Combination(("status", "--json"), False, "status is now info"),
     Combination(("setup",), True, "the wizard takes no behaviour flags"),
     Combination(("setup", "--json"), False, "the wizard has no machine-readable mode"),
     # Verbosity is accepted on both sides of the subcommand, everywhere.
     Combination(("--verbose", "sync"), True, "before the subcommand"),
     Combination(("sync", "--verbose"), True, "after the subcommand"),
-    Combination(("-q", "status"), True, "the short form, before"),
-    Combination(("status", "--quiet"), True, "the long form, after"),
+    Combination(("-q", "info"), True, "the short form, before"),
+    Combination(("info", "--quiet"), True, "the long form, after"),
     Combination(("--verbose", "sync", "--quiet"), True, "contradictory, but not a usage error"),
 )
 
@@ -509,10 +499,9 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
 #:
 #: This is the "nothing else" half of the matrix, and it is the half that
 #: cannot be written as a normal assertion: the interesting fact is which of
-#: these did *not* happen. ``status`` must not sync. ``cache`` must not open
-#: the state database. ``sync --preview`` must not download anything. Each of
-#: those is one missing label here, and the test fails on any label that fires
-#: and is not listed.
+#: these did *not* happen. ``info`` must not sync. ``sync --preview`` must not
+#: download anything. Each of those is one missing label here, and the test
+#: fails on any label that fires and is not listed.
 #:
 #: Labels are the recorded names in :class:`_Recorder`.
 COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
@@ -522,13 +511,9 @@ COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
     ("sync", "--preview"): {"compare_with_device"},
     ("sync", "--preview", "--json"): {"compare_with_device"},
     ("watch", "--interval", "60"): {"pipeline.construct", "pipeline.run"},
-    ("status",): {"collect_status"},
-    ("status", "--json"): {"collect_status"},
+    ("info",): {"collect_status"},
+    ("info", "--json"): {"collect_status"},
     ("setup",): {"run_wizard"},
-    ("state",): {"state_db_path", "get_state_store"},
-    ("state", "--json"): {"state_db_path", "get_state_store"},
-    ("cache",): {"all_caches"},
-    ("cache", "--json"): {"all_caches"},
 }
 
 
@@ -536,8 +521,9 @@ class _Recorder:
     """Notes which subsystems a command reached, and stands in for four of them.
 
     Args:
-        state_db: A file to report as the state database, so ``state`` gets
-            past its existence check without a real sync having run.
+        state_db: A file to report as the state database, so a command that
+            reads it finds one without a real sync having run — and, more to
+            the point, never finds the developer's own.
     """
 
     def __init__(self, state_db: Path) -> None:
@@ -731,7 +717,7 @@ def cli(monkeypatch, capsys, tmp_path):
     _spy(pipeline_module, "get_state_store", "get_state_store")
 
     def _state_db_path() -> Path:
-        """Point ``state`` at a database that exists but holds nothing.
+        """Point every state reader at a database that exists but holds nothing.
 
         Returns:
             The throwaway database path.
@@ -1474,7 +1460,7 @@ class TestFlagCompatibility:
         ``sys.exit``, and a command that returned 1 for a usage error would be
         indistinguishable from a failed sync in a script.
         """
-        run = cli("state", "--dump", "--repair")
+        run = cli("sync", "--ssh", "--cloud")
         assert run.exit_code == 2
         assert "not allowed with" in run.stderr
 
@@ -1574,10 +1560,10 @@ class TestVerbosityIsAcceptedOnBothSides:
 class TestCommandsDoOnlyTheirOwnWork:
     """Each command sets in motion exactly the subsystems it needs.
 
-    The interesting half of every row is what is *missing* from it. ``status``
-    has no pipeline, ``cache`` has no state store, ``sync --preview`` has no
-    pipeline either. A command that grows an extra step fails here even if the
-    step works perfectly, which is the point.
+    The interesting half of every row is what is *missing* from it. ``info``
+    has no pipeline, ``sync --preview`` has no pipeline either, and ``setup``
+    stops at the wizard. A command that grows an extra step fails here even if
+    the step works perfectly, which is the point.
     """
 
     @pytest.mark.parametrize(
@@ -1600,14 +1586,15 @@ class TestCommandsDoOnlyTheirOwnWork:
         assert run.calls == ["pipeline.construct", "pipeline.run"]
         assert run.options[0]["dry_run"] is True
 
-    def test_reading_the_cache_never_opens_the_state_database(self, cli):
-        """Two independent stores, and the commands stay independent."""
-        assert "get_state_store" not in cli("cache").calls
-        assert "state_db_path" not in cli("cache", "--json").calls
+    def test_the_read_only_command_never_opens_a_transport(self, cli):
+        """``info`` reports the setup; it does not go and use it.
 
-    def test_inspecting_state_never_touches_the_caches(self, cli):
-        """The reverse direction, which is just as easy to break."""
-        assert "all_caches" not in cli("state").calls
+        The stores it does read are inside ``collect_status``, which the
+        fixture replaces — what this pins is the outer boundary: no pipeline,
+        no comparison, no wizard, under either form of the command.
+        """
+        for argv in (("info",), ("info", "--json")):
+            assert cli(*argv).calls == ["collect_status"]
 
     def test_setup_runs_the_wizard_and_stops_there(self, cli):
         """A wizard that declines the offered sync does not sync.
@@ -1629,9 +1616,7 @@ class TestCommandRouting:
             (["sync"], "pipeline.construct"),
             (["watch", "--interval", "60"], "pipeline.construct"),
             (["setup"], "run_wizard"),
-            (["status"], "collect_status"),
-            (["cache"], "all_caches"),
-            (["state"], "state_db_path"),
+            (["info"], "collect_status"),
         ],
     )
     def test_the_word_picks_the_command(self, cli, argv, expected):
@@ -1666,7 +1651,7 @@ class TestCommandRouting:
         config = tmp_path / "elsewhere.yml"
         config.write_text("destinations: {}\n", encoding="utf-8")
 
-        cli("-c", str(config), "status")
+        cli("-c", str(config), "info")
         assert os.environ["LIVING_INK_CONFIG"] == str(config.resolve())
 
 
@@ -1675,8 +1660,8 @@ class TestCommandRouting:
 # ---------------------------------------------------------------------------
 
 
-class TestStatusReportsWhatItWasGiven:
-    """``status --json`` echoes the configuration it read, not a default.
+class TestInfoReportsWhatItWasGiven:
+    """``info --json`` echoes the configuration it read, not a default.
 
     The probes are real here — this is the one place the network stubs are
     replaced by verification stubs instead of removed — because the question is
@@ -1745,7 +1730,7 @@ class TestStatusReportsWhatItWasGiven:
         return config, values
 
     def _report(self, configured, capsys) -> dict:
-        """Run ``status --json`` against the written config.
+        """Run ``info --json`` against the written config.
 
         Args:
             configured: The fixture's config path and values.
@@ -1759,7 +1744,7 @@ class TestStatusReportsWhatItWasGiven:
         config, _ = configured
         capsys.readouterr()
         try:
-            main(["-c", str(config), "status", "--json"])
+            main(["-c", str(config), "info", "--json"])
         except SystemExit:
             pass
         return json.loads(capsys.readouterr().out)
@@ -1785,7 +1770,7 @@ class TestStatusReportsWhatItWasGiven:
         _, values = configured
         body = json.dumps(self._report(configured, capsys))
         missing = [name for name, value in values.items() if value not in body]
-        assert not missing, f"status did not report: {missing}"
+        assert not missing, f"info did not report: {missing}"
 
     def test_the_configured_transport_preference_is_what_is_reported(self, configured, capsys):
         """``preferred_connection: ssh`` reads back as ssh.
@@ -2128,7 +2113,7 @@ class TestSetupWritesOnlyWhatItWasTold:
         cfg = yaml.safe_load((tmp_path / "config" / "config.yml").read_text(encoding="utf-8"))
         assert cfg["obsidian"]["enabled"] is False
 
-    def test_what_the_wizard_writes_is_what_status_reads_back(self, wizard, tmp_path, monkeypatch):
+    def test_what_the_wizard_writes_is_what_info_reads_back(self, wizard, tmp_path, monkeypatch):
         """The two halves of the round trip agree on the section names.
 
         This is the seam that a behaviour matrix is for. ``run_wizard`` writes
@@ -2158,7 +2143,7 @@ class TestSetupWritesOnlyWhatItWasTold:
 
 
 class TestCommandsThatDoNotExistYet:
-    """The three commands 1.0 specifies but that have not been built.
+    """The two commands 1.0 specifies but that have not been built.
 
     Recorded rather than skipped: an unimplemented command must be a clean
     usage error, not a traceback and not a command that half-works. When one
@@ -2182,3 +2167,41 @@ class TestCommandsThatDoNotExistYet:
         run = cli("uninstall")
         assert run.calls == []
         assert run.exit_code == 2
+
+
+class TestCommandsThatUsedToExist:
+    """``status``, ``state`` and ``cache`` are words the CLI no longer knows.
+
+    A retired command is only retired if invoking it *fails*. The danger is
+    not the error — it is the near miss: ``state`` still parsing because
+    something forgot to unregister it, or ``cache --clear`` reaching a store
+    through a command that was supposed to be gone.
+    """
+
+    @pytest.mark.parametrize("command", RETIRED_COMMANDS)
+    def test_it_is_rejected_the_same_way_an_unknown_word_is(self, cli, command):
+        """Exit 2, naming the choices, with nothing set in motion."""
+        run = cli(command)
+        assert run.exit_code == 2
+        assert "invalid choice" in run.stderr
+        assert run.calls == []
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["state", "--forget", "Notes"],
+            ["state", "--repair"],
+            ["cache", "--clear"],
+            ["cache", "--prune", "7"],
+        ],
+    )
+    def test_the_operations_they_carried_reach_nothing(self, cli, argv):
+        """The four destructive ones in particular.
+
+        Each has a 1.0 home — ``sync --force`` for the first and
+        ``config → Advanced`` for the rest — and none of them may still be
+        reachable by the old spelling in the meantime.
+        """
+        run = cli(*argv)
+        assert run.exit_code == 2
+        assert run.calls == []

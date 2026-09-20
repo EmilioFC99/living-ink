@@ -179,7 +179,7 @@ def resolve_stored_token(
         settings: Resolved settings for this run. Defaults to resolving them
             from the environment alone.
         config_path: The config file whose credentials directory holds route 2.
-            A caller that already resolved a config — ``living-ink status`` with
+            A caller that already resolved a config — ``living-ink info`` with
             a ``--root``, or a second profile under ``LIVING_INK_CONFIG`` — must
             pass it, or the token is read from and migrated into the *default*
             profile's store instead of the one in use.
