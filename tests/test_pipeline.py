@@ -345,6 +345,74 @@ class TestImportPurity:
         assert (tmp_path / "logs").is_dir()
 
 
+class TestTheProcessCachesAreDroppable:
+    """`watch` ticks in one process, so the accessors need an off switch."""
+
+    def test_reset_caches_clears_all_three(self, monkeypatch):
+        """Config, destinations and the state store all go together."""
+        closed = []
+        monkeypatch.setattr(pipeline, "_default_config", {"ai": {"provider": "none"}})
+        monkeypatch.setattr(pipeline, "_default_destinations", [MockDestination()])
+        monkeypatch.setattr(
+            pipeline, "_state_store", SimpleNamespace(close=lambda: closed.append(True))
+        )
+
+        pipeline.reset_caches()
+
+        assert pipeline._default_config is None
+        assert pipeline._default_destinations is None
+        assert pipeline._state_store is None
+        assert closed == [True]
+
+    def test_the_next_tick_gets_freshly_built_destinations(self, monkeypatch):
+        """Not the same mutable objects the last tick may have written to."""
+        monkeypatch.setattr(pipeline, "_default_config", {"ai": {"provider": "none"}})
+        monkeypatch.setattr(pipeline, "_default_destinations", None)
+        monkeypatch.setattr(
+            pipeline, "get_destinations_from_config", lambda config: [MockDestination()]
+        )
+
+        first = pipeline.get_default_destinations()
+        assert pipeline.get_default_destinations() is first
+
+        monkeypatch.setattr(pipeline, "_state_store", None)
+        pipeline.reset_caches()
+        monkeypatch.setattr(pipeline, "_default_config", {"ai": {"provider": "none"}})
+
+        assert pipeline.get_default_destinations() is not first
+
+
+class TestTheExitHandlerIsRegisteredOnce:
+    """One handler per process, not one per run — `watch` runs for weeks."""
+
+    def test_repeated_runs_register_a_single_handler(self, monkeypatch):
+        registered = []
+        monkeypatch.setattr(pipeline, "_temp_cleanup_registered", False)
+        monkeypatch.setattr(pipeline.atexit, "register", lambda fn: registered.append(fn))
+
+        pipeline.register_temp_cleanup(keep_temp=False)
+        pipeline.register_temp_cleanup(keep_temp=False)
+        pipeline.register_temp_cleanup(keep_temp=False)
+
+        assert len(registered) == 1
+
+    def test_the_handler_obeys_the_last_run_to_ask(self, monkeypatch):
+        """The flag is read at exit, not bound at registration."""
+        registered = []
+        kept = []
+        monkeypatch.setattr(pipeline, "_temp_cleanup_registered", False)
+        monkeypatch.setattr(pipeline.atexit, "register", lambda fn: registered.append(fn))
+        monkeypatch.setattr(
+            pipeline, "cleanup_temp_artifacts", lambda keep_temp=False: kept.append(keep_temp)
+        )
+
+        pipeline.register_temp_cleanup(keep_temp=False)
+        pipeline.register_temp_cleanup(keep_temp=True)
+        registered[0]()
+
+        assert kept == [True]
+
+
 def make_job(**overrides) -> DocumentJob:
     """Build a DocumentJob with harmless defaults for the field under test."""
     fields = {
@@ -2436,6 +2504,81 @@ class TestJobModifiedDate:
         assert self._job({}).modified_at() is None
 
 
+class FakeCache:
+    """A cache that records whether the run asked it to evict anything."""
+
+    def __init__(self, noun, removed=0):
+        self.noun = noun
+        self.enabled = True
+        self.removed = removed
+        self.prunes = 0
+
+    def prune(self):
+        self.prunes += 1
+        return self.removed
+
+
+class TestPruningRunsLast:
+    """An entry is only ever evicted after a run that did not want it."""
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, execute, dry_run=False):
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = dry_run
+        pipe.cache = FakeCache("transcribed page", removed=2)
+        pipe.renders = FakeCache("rendered page")
+        pipe._counts = (0, 0, 0)
+        pipe._execute = execute
+        pipe.destinations = []
+        pipe.report = None
+        return pipe
+
+    def test_a_successful_run_prunes_both_caches(self):
+        """One call site at the end covers renders and transcriptions alike."""
+        pipe = self._pipeline(lambda: True)
+
+        pipe._run_recorded()
+
+        assert (pipe.cache.prunes, pipe.renders.prunes) == (1, 1)
+
+    def test_a_failed_run_prunes_nothing(self):
+        """It does not know which entries it would have used."""
+        pipe = self._pipeline(lambda: False)
+
+        pipe._run_recorded()
+
+        assert (pipe.cache.prunes, pipe.renders.prunes) == (0, 0)
+
+    def test_an_interrupted_run_prunes_nothing(self):
+        pipe = self._pipeline(lambda: (_ for _ in ()).throw(KeyboardInterrupt))
+
+        with pytest.raises(KeyboardInterrupt):
+            pipe._run_recorded()
+
+        assert pipe.cache.prunes == 0
+
+    def test_a_dry_run_prunes_nothing_because_it_changes_nothing(self):
+        pipe = self._pipeline(lambda: True, dry_run=True)
+
+        pipe._run_recorded()
+
+        assert pipe.cache.prunes == 0
+
+    def test_the_run_says_what_it_evicted(self, capsys):
+        pipe = self._pipeline(lambda: True)
+
+        pipe._run_recorded()
+
+        assert "Pruned 2 unused transcribed page cache entries." in capsys.readouterr().out
+
+
 class TestInterruptedRuns:
     """Ctrl+C is not a failure, and the run did not do nothing."""
 
@@ -2450,7 +2593,8 @@ class TestInterruptedRuns:
     def _pipeline(self, execute, dry_run=False):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.dry_run = dry_run
-        pipe.cache = SimpleNamespace(enabled=True)
+        pipe.cache = FakeCache("transcribed page")
+        pipe.renders = FakeCache("rendered page")
         pipe._counts = (0, 0, 0)
         pipe._execute = execute
         pipe.destinations = []
@@ -2487,6 +2631,24 @@ class TestInterruptedRuns:
             3,
             1,
         )
+
+    def test_a_run_that_dies_on_entry_still_records_itself(self, monkeypatch):
+        """The counts are a constructor field, so there is always an answer.
+
+        They used to be created at the top of ``_execute``, so anything that
+        raised before that line — a Ctrl+C landing on entry, a refused
+        connection — turned run-recording into an ``AttributeError`` that hid
+        whatever had actually gone wrong.
+        """
+        pipe = SyncPipeline(SyncOptions(), destinations=[])
+        monkeypatch.setattr(
+            pipe, "_execute", lambda: (_ for _ in ()).throw(RuntimeError("no tablet"))
+        )
+
+        with pytest.raises(RuntimeError, match="no tablet"):
+            pipe._run_recorded()
+
+        assert self._last_run()["outcome"] == "error"
 
     def test_the_interrupt_still_reaches_the_caller(self):
         def execute():

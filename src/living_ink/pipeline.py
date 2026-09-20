@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
+import atexit
 import datetime
 import hashlib
 import json
@@ -445,6 +446,26 @@ def reset_state_store() -> None:
         _state_store = None
 
 
+def reset_caches() -> None:
+    """Drop everything this module holds for the lifetime of the process.
+
+    The three accessors above cache so that one run reads ``config.yml`` once.
+    Across runs that is wrong: ``watch`` ticks in a single process for weeks,
+    so a config read at start would be the config for ever, and
+    ``get_default_destinations()`` would hand every tick the *same mutable
+    objects* — one tick's per-run override leaking into the next.
+
+    The scheduler calls this between ticks. A single ``sync`` never needs it,
+    which is why the accessors do not invalidate themselves on a timer: the
+    boundary is a run ending, and only the caller knows where that is.
+    """
+    global _default_config, _default_destinations
+
+    _default_config = None
+    _default_destinations = None
+    reset_state_store()
+
+
 def load_processed_log(dest_name: str):
     """Return the published version of every document for one destination.
 
@@ -584,6 +605,31 @@ def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
                 zip_file.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+_temp_cleanup_registered = False
+_temp_cleanup_keep = False
+
+
+def register_temp_cleanup(keep_temp: bool) -> None:
+    """Arrange for the temp folders to be purged when the process exits.
+
+    Once per process, not once per run. ``watch`` loops in a single process for
+    weeks, and registering inside each run leaves one handler per tick — a list
+    that only grows, each entry pinning the ``keep_temp`` of a run that ended
+    long ago. The flag lives beside the registration instead, so the last run
+    to ask is the one the exit handler obeys.
+
+    Args:
+        keep_temp: Whether the run now starting wants its artifacts preserved.
+    """
+    global _temp_cleanup_registered, _temp_cleanup_keep
+
+    _temp_cleanup_keep = keep_temp
+    if _temp_cleanup_registered:
+        return
+    atexit.register(lambda: cleanup_temp_artifacts(keep_temp=_temp_cleanup_keep))
+    _temp_cleanup_registered = True
 
 
 def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -> None:
@@ -1143,6 +1189,12 @@ class SyncPipeline:
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
         self.report: Optional[RunReport] = None
+
+        # Set here and not at the top of _execute(): anything that raises
+        # before the run proper starts — a Ctrl+C landing on entry, a failed
+        # connection — is read back by _run_recorded(), and an unset attribute
+        # there turns the real error into an AttributeError about counting.
+        self._counts: Tuple[int, int, int] = (0, 0, 0)
 
         # 3. Transcription cache. Pages are transcribed concurrently, so the
         # hit and miss tallies need a lock even though the entries themselves
@@ -2615,6 +2667,8 @@ class SyncPipeline:
             result = self._execute()
             seen, published, failed = self._counts
             outcome = "success" if result else "partial"
+            if outcome == "success":
+                self._prune_caches()
             return result
         except KeyboardInterrupt:
             # Ctrl+C is not a failure, and the run did not do nothing. Record
@@ -2633,6 +2687,31 @@ class SyncPipeline:
                     published=published,
                     failed=failed,
                 )
+
+    def _prune_caches(self) -> None:
+        """Evict cache entries no run has wanted for ``cache.max_age_days``.
+
+        Last, and only after a run that succeeded. A prune that ran first would
+        be deleting exactly the entries the run about to happen is about to
+        ask for: a notebook synced quarterly would find its own transcripts
+        evicted moments before it needed them, and every cached page would
+        turn back into an API call. Running last means an entry is only ever
+        dropped after a run that did not want it. A failed or interrupted run
+        prunes nothing, because it does not know what it would have used.
+
+        There is no manual prune command, so this is the only caller — the
+        placement is the feature, not a convenience on top of one.
+        """
+        if self.dry_run:
+            return
+        for cache in (self.cache, self.renders):
+            try:
+                removed = cache.prune()
+            except OSError as e:
+                log(f"Could not prune the {cache.noun} cache: {e}")
+                continue
+            if removed:
+                log(f"Pruned {removed} unused {cache.noun} cache entries.")
 
     def _signal_outcome(self, outcome: str) -> None:
         """Tell the destinations themselves how the run ended.
@@ -2719,11 +2798,8 @@ class SyncPipeline:
         if self.dry_run:
             log("🔍 Dry run: nothing will be published and no sync state will be recorded.")
 
-        # Clean temporary working artifacts at start of run and register exit cleanup
-        import atexit
-
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
-        atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
+        register_temp_cleanup(keep_temp=self.keep_temp)
 
         client = self.connect()
         self.preflight_destinations()
