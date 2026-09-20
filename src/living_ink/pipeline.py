@@ -397,8 +397,8 @@ def reset_caches(*, keep_state_store: bool = False) -> None:
         keep_state_store: Leave the open database alone. The scheduler passes
             True: a config change can move a destination or a model, but never
             the database, and reopening it per tick would pay the
-            ``_ADDED_COLUMNS`` probe and the legacy-import sweep every night
-            for nothing. Everything else that resets caches — a test, a wizard
+            ``_ADDED_COLUMNS`` probe and the dead-destination sweep every
+            night for nothing. Everything else that resets caches — a test, a wizard
             that moved the data directory — does want the handle dropped, so
             the default is the thorough one.
     """
@@ -408,18 +408,6 @@ def reset_caches(*, keep_state_store: bool = False) -> None:
     _default_destinations = None
     if not keep_state_store:
         reset_state_store()
-
-
-def load_processed_log(dest_name: str):
-    """Return the published version of every document for one destination.
-
-    Args:
-        dest_name: Destination class name, e.g. ``ObsidianDestination``.
-
-    Returns:
-        Mapping of document id to the version last published there.
-    """
-    return get_state_store().published_versions(dest_name)
 
 
 def add_to_processed_log(

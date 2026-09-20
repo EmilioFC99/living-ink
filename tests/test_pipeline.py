@@ -1191,25 +1191,32 @@ class TestProcessedLog:
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.add_to_processed_log("ObsidianDestination", "doc-2", "v9", recipe="")
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v9"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1",
+            "doc-2": "v9",
+        }
 
     def test_republishing_updates_rather_than_duplicating(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v2", recipe="")
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v2"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v2"
+        }
 
     def test_destinations_do_not_share_state(self, tmp_path, monkeypatch):
         """A notebook can be published to one destination and pending for another."""
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
-        assert pipeline.load_processed_log("NotionDestination") == {}
+        assert pipeline.get_state_store().published_versions("NotionDestination") == {}
 
     def test_state_survives_a_restart(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.reset_state_store()
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1"
+        }
 
     def test_a_second_process_sees_the_write(self, tmp_path, monkeypatch):
         """`watch` and a manual sync used to overwrite each other's progress."""
@@ -1221,7 +1228,10 @@ class TestProcessedLog:
         with state.StateStore(pipeline.get_state_db_path()) as other:
             other.record_publication("doc-2", "ObsidianDestination", "v2", recipe="")
 
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v2"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1",
+            "doc-2": "v2",
+        }
 
 
 class TestOpeningTheStoreSweepsDeadDestinations:
