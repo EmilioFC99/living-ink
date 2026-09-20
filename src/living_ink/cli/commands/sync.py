@@ -19,6 +19,8 @@ from living_ink.cli import inventory as inventory_api
 from living_ink.cli.base import BaseCommand
 from living_ink.cli.flags import flag_values, register_settings_flags
 from living_ink.config import ConfigurationMissing, get_config_path
+from living_ink.scheduler import RUN_LOCK_NAME, LockBusy, RunLock
+from living_ink.state import TRIGGER_MANUAL
 from living_ink.transport import TransportUnavailable
 
 logger = logging.getLogger(__name__)
@@ -203,6 +205,13 @@ class SyncCommand(BaseCommand):
             return self._handle_missing_config(e, args)
         except TransportUnavailable as e:
             return self._report_unreachable(e)
+        except LockBusy as e:
+            # Two syncs writing one vault is the failure the lock exists to
+            # prevent, and the second one arriving is ordinary — a watcher is
+            # mid-tick. Say so in a line, not a traceback.
+            print(str(e), file=sys.stderr)
+            print("Fix: wait for it to finish, or stop it and try again.", file=sys.stderr)
+            return 1
         return 0 if success else 1
 
     def _report_unreachable(self, error: TransportUnavailable) -> int:
@@ -258,7 +267,13 @@ class SyncCommand(BaseCommand):
         )
         return 0
 
-    def execute_sync(self, args: argparse.Namespace) -> bool:
+    def execute_sync(
+        self,
+        args: argparse.Namespace,
+        *,
+        trigger: str = TRIGGER_MANUAL,
+        scheduled_fire_time: str | None = None,
+    ) -> bool:
         """Run one sync and report whether it worked.
 
         Separate from :meth:`run` because turning a failure into a process exit
@@ -266,14 +281,24 @@ class SyncCommand(BaseCommand):
         syncs repeatedly — :class:`WatchCommand` — needs the verdict, not a
         dead process.
 
+        The whole-machine run lock is taken here rather than in the pipeline,
+        because it guards *the vault*, not the object: a manual sync and a
+        scheduled fire in two processes would otherwise write the same note at
+        once. It is reentrant within a process, so a watch tick that already
+        holds it passes straight through.
+
         Args:
             args: Parsed arguments for sync.
+            trigger: What asked for this run — ``manual`` or ``scheduled``.
+            scheduled_fire_time: The UTC ISO instant this run was due, when a
+                schedule asked for it. None for a manual run.
 
         Returns:
             True if the pipeline reported success.
 
         Raises:
             ConfigurationMissing: If configuration is absent or unusable.
+            LockBusy: If another process is already syncing.
         """
         if self.root and str(self.root) not in sys.path:
             sys.path.insert(0, str(self.root))
@@ -282,13 +307,16 @@ class SyncCommand(BaseCommand):
         if cfg_path.exists():
             os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
 
-        from living_ink.pipeline import SyncPipeline
+        from living_ink.pipeline import DATA_DIR, SyncPipeline
 
         pipeline = SyncPipeline(
             **sync_arguments(args),
             config_path=cfg_path if cfg_path.exists() else None,
+            trigger=trigger,
+            scheduled_fire_time=scheduled_fire_time,
         )
-        return pipeline.run()
+        with RunLock(DATA_DIR / RUN_LOCK_NAME):
+            return pipeline.run()
 
     def _handle_missing_config(self, error: "ConfigurationMissing", args) -> int:
         """Report a configuration problem and, if interactive, offer the wizard.

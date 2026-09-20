@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from living_ink import logs, pipeline
+from living_ink import logs, pipeline, state
 from living_ink.config import ConfigurationMissing, credentials
 from living_ink.core import selection
 from living_ink.core.document import Document, PublishContext, PublishResult
@@ -2408,6 +2408,10 @@ class TestPruningRunsLast:
         pipe._execute = execute
         pipe.destinations = []
         pipe.report = None
+        pipe.trigger = state.TRIGGER_MANUAL
+        pipe.scheduled_fire_time = None
+        pipe.nothing_pending = False
+        pipe._failure_detail = None
         return pipe
 
     def test_a_successful_run_prunes_both_caches(self):
@@ -2606,6 +2610,10 @@ class TestInterruptedRuns:
         pipe._execute = execute
         pipe.destinations = []
         pipe.report = None
+        pipe.trigger = state.TRIGGER_MANUAL
+        pipe.scheduled_fire_time = None
+        pipe.nothing_pending = False
+        pipe._failure_detail = None
         return pipe
 
     def _last_run(self):
@@ -2758,6 +2766,200 @@ class TestInterruptedRuns:
             pipe._run_recorded()
 
         assert "twice" not in capsys.readouterr().out
+
+
+class TestWhatTheRunRowRemembers:
+    """A run row is what ``info`` reads back days later, so it has to say why.
+
+    The counts alone cannot: "0 of 0 published" is the same row whether the
+    tablet was unreachable, the token was revoked or there was genuinely
+    nothing to sync — and those are three different things to do about it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, execute, **fields):
+        """Build a pipeline whose only real behaviour is ``_execute``."""
+        pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.dry_run = False
+        pipe.cache = FakeCache("transcribed page")
+        pipe.renders = FakeCache("rendered page")
+        pipe._counts = (0, 0, 0)
+        pipe._execute = execute
+        pipe.destinations = []
+        pipe.report = None
+        pipe.trigger = state.TRIGGER_MANUAL
+        pipe.scheduled_fire_time = None
+        pipe.nothing_pending = False
+        pipe._failure_detail = None
+        for name, value in fields.items():
+            setattr(pipe, name, value)
+        return pipe
+
+    def _last_run(self):
+        return pipeline.get_state_store().last_run()
+
+    def test_a_run_is_manual_unless_the_scheduler_asked(self):
+        self._pipeline(lambda: True)._run_recorded()
+
+        assert self._last_run()["trigger"] == state.TRIGGER_MANUAL
+
+    def test_a_scheduled_run_carries_the_time_it_was_due(self):
+        self._pipeline(
+            lambda: True,
+            trigger=state.TRIGGER_SCHEDULED,
+            scheduled_fire_time="2026-09-19T07:00:00+00:00",
+        )._run_recorded()
+
+        row = self._last_run()
+        assert (row["trigger"], row["scheduled_fire_time"]) == (
+            state.TRIGGER_SCHEDULED,
+            "2026-09-19T07:00:00+00:00",
+        )
+
+    def test_a_run_with_nothing_to_do_says_so_rather_than_success(self):
+        """A healthy idle daemon and a dead one used to look identical."""
+
+        def execute():
+            pipe.nothing_pending = True
+            return True
+
+        pipe = self._pipeline(lambda: True)
+        pipe._execute = execute
+        pipe._run_recorded()
+
+        assert self._last_run()["outcome"] == state.OUTCOME_NOTHING_TO_DO
+
+    def test_finding_work_is_still_a_plain_success(self):
+        self._pipeline(lambda: True)._run_recorded()
+
+        assert self._last_run()["outcome"] == state.OUTCOME_SUCCESS
+
+    def test_an_exception_keeps_what_it_said(self):
+        def execute():
+            raise RuntimeError("reMarkable Cloud pairing was revoked")
+
+        with pytest.raises(RuntimeError):
+            self._pipeline(execute)._run_recorded()
+
+        assert self._last_run()["error"] == "reMarkable Cloud pairing was revoked"
+
+    def test_an_exception_with_no_message_falls_back_to_its_type(self):
+        def execute():
+            raise TimeoutError
+
+        with pytest.raises(TimeoutError):
+            self._pipeline(execute)._run_recorded()
+
+        assert self._last_run()["error"] == "TimeoutError"
+
+    def test_a_secret_in_the_message_is_redacted_before_it_is_stored(self):
+        """The row is printed back by ``info``, which is not a log file."""
+        register_secret("sk-super-secret-token")
+
+        def execute():
+            raise RuntimeError("401 from provider using key sk-super-secret-token")
+
+        with pytest.raises(RuntimeError):
+            self._pipeline(execute)._run_recorded()
+
+        assert "sk-super-secret-token" not in self._last_run()["error"]
+
+    def test_a_partial_run_names_the_document_that_failed(self):
+        report = RunReport()
+        report.add(
+            DocumentOutcome(name="Journal", status=FAILED, reason="every page was rate limited")
+        )
+        pipe = self._pipeline(lambda: False, report=report)
+        pipe._counts = (2, 1, 1)
+        pipe._run_recorded()
+
+        assert self._last_run()["error"] == "Journal: every page was rate limited"
+
+    def test_a_run_level_warning_is_used_when_no_document_failed(self):
+        report = RunReport()
+        report.warn("The vault is on a disconnected volume.")
+        pipe = self._pipeline(lambda: False, report=report)
+        pipe._run_recorded()
+
+        assert self._last_run()["error"] == "The vault is on a disconnected volume."
+
+    def test_the_counts_are_the_last_resort_and_not_the_first(self):
+        pipe = self._pipeline(lambda: False)
+        pipe._counts = (4, 1, 3)
+        pipe._run_recorded()
+
+        assert self._last_run()["error"] == "1 of 4 document(s) published; 3 failed."
+
+    def test_an_interrupt_leaves_no_error_because_the_user_did_it(self):
+        def execute():
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            self._pipeline(execute)._run_recorded()
+
+        row = self._last_run()
+        assert (row["outcome"], row["error"]) == (state.OUTCOME_INTERRUPTED, None)
+
+    def test_a_success_leaves_no_error_either(self):
+        self._pipeline(lambda: True)._run_recorded()
+
+        assert self._last_run()["error"] is None
+
+
+class TestResettingTheCachesBetweenTicks:
+    """A daemon must pick up a config change; it must not reopen the database.
+
+    Reopening per tick pays the ``_ADDED_COLUMNS`` probe and the legacy-import
+    sweep every night for nothing, and nothing in ``config.yml`` can move the
+    database anyway. Everything else that resets — a test, a wizard that moved
+    the data directory — does want the handle dropped, so that is the default.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def test_the_open_database_survives_a_tick(self):
+        before = pipeline.get_state_store()
+        pipeline.reset_caches(keep_state_store=True)
+
+        assert pipeline.get_state_store() is before
+
+    def test_the_default_drops_it(self):
+        before = pipeline.get_state_store()
+        pipeline.reset_caches()
+
+        assert pipeline.get_state_store() is not before
+
+    def test_the_config_is_re_read_either_way(self, monkeypatch):
+        reads = []
+        monkeypatch.setattr(pipeline, "_default_config", {"already": "read"})
+        monkeypatch.setattr(
+            pipeline, "load_yaml_config", lambda *a, **kw: reads.append(1) or {"sync": {}}
+        )
+
+        pipeline.reset_caches(keep_state_store=True)
+        pipeline.get_default_config()
+
+        assert reads == [1]
+
+    def test_the_destinations_are_rebuilt_so_no_tick_inherits_them(self, monkeypatch):
+        """They are mutable objects; one tick must not hand them to the next."""
+        monkeypatch.setattr(pipeline, "_default_destinations", [MockDestination()])
+        pipeline.reset_caches(keep_state_store=True)
+
+        assert pipeline._default_destinations is None
 
 
 class TestPreflightRefusesABadDestination:
