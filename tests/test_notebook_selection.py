@@ -3,12 +3,8 @@
 import datetime
 from unittest.mock import MagicMock
 
-from living_ink.pipeline import (
-    format_notebook_item,
-    matches_notebook_target,
-    normalize_path_str,
-    select_notebook_interactive,
-)
+from living_ink.core.listing import matches_notebook_target, normalize_path_str
+from living_ink.pipeline import format_notebook_item, select_notebook_interactive
 
 
 class DummyItem:
