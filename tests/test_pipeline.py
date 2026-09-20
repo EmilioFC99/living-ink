@@ -19,7 +19,10 @@ import pytest
 
 from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
+from living_ink.core import selection
 from living_ink.core.document import Document, PublishContext, PublishResult
+from living_ink.core.listing import document_name, document_version, get_notebook_path, get_val
+from living_ink.core.selection import Candidate, Selection, SelectionCriteria, select
 from living_ink.destinations import (
     Destination,
     DestinationError,
@@ -36,6 +39,7 @@ from living_ink.pipeline import (
 )
 from living_ink.redact import clear_secrets, register_secret
 from living_ink.report import (
+    DEFERRED,
     FAILED,
     PUBLISHED,
     SKIPPED,
@@ -44,6 +48,35 @@ from living_ink.report import (
     RunReport,
 )
 from living_ink.settings import Settings
+
+
+def make_candidate(item, *, pending=(), source="notebook", id_map=None, recipes=None):
+    """Build the selection's verdict about one document.
+
+    The stages take a :class:`Candidate` now, so a test that exercises one
+    starts where the selection pass left off rather than re-deriving the facts.
+
+    Args:
+        item: The raw listing entry.
+        pending: The destinations that owe it a publish.
+        source: Its registered source name.
+        id_map: Every listed item by id, for the folder path.
+        recipes: Recipe digests by destination state key.
+
+    Returns:
+        The candidate.
+    """
+    id_map = id_map if id_map is not None else {get_val(item, "ID"): item}
+    return Candidate(
+        item=item,
+        doc_id=get_val(item, "ID"),
+        name=document_name(item),
+        folder=get_notebook_path(item, id_map),
+        source=source,
+        version=document_version(item),
+        pending=tuple(pending),
+        recipes=dict(recipes or {}),
+    )
 
 
 class MockDestination(Destination):
@@ -162,49 +195,33 @@ def test_sync_pipeline_properties_ssh_and_cloud():
     assert pipeline_cloud.use_ssh is False
 
 
-def test_sync_pipeline_discover_documents_filtering():
-    """discover_documents respects sync_pdfs and sync_epubs properties."""
-    doc_nb = {"ID": "1", "Type": "DocumentType", "VissibleName": "Notebook 1"}
-    doc_pdf = {"ID": "2", "Type": "DocumentType", "VissibleName": "Paper"}
-    doc_epub = {"ID": "3", "Type": "DocumentType", "VissibleName": "Book"}
+def test_the_type_flags_become_selection_criteria():
+    """The flags narrow the run by naming source types, nothing more."""
+    from living_ink.sources import SOURCE_REGISTRY
 
-    mock_client = MagicMock()
-    mock_client.get_meta_items.return_value = [doc_nb, doc_pdf, doc_epub]
+    default = SyncPipeline(SyncOptions(sync_pdfs=False, sync_epubs=False), destinations=[])
+    assert default._criteria().types == frozenset({"notebook"})
 
-    def mock_doc_type(item, client):
-        if item["ID"] == "1":
-            return "notebook"
-        if item["ID"] == "2":
-            return "pdf"
-        return "epub"
+    with_pdfs = SyncPipeline(SyncOptions(sync_pdfs=True, sync_epubs=False), destinations=[])
+    assert with_pdfs._criteria().types == frozenset({"notebook", "pdf"})
 
-    with patch("living_ink.pipeline.get_document_type", side_effect=mock_doc_type):
-        # Default: only notebooks
-        pipeline_default = SyncPipeline(
-            SyncOptions(sync_pdfs=False, sync_epubs=False), destinations=[]
-        )
-        items, _ = pipeline_default.discover_documents(mock_client)
-        assert len(items) == 1
-        assert items[0]["ID"] == "1"
-
-        # All types: notebooks, pdfs, epubs
-        pipeline_all = SyncPipeline(SyncOptions(all_types=True), destinations=[])
-        items_all, _ = pipeline_all.discover_documents(mock_client)
-        assert len(items_all) == 3
+    everything = SyncPipeline(SyncOptions(all_types=True), destinations=[])
+    assert everything._criteria().types == frozenset(SOURCE_REGISTRY)
 
 
-def test_sync_pipeline_filter_pending_documents_limit():
-    """filter_pending_documents respects self.limit property."""
-    items = [
-        {"ID": f"doc-{i}", "Type": "DocumentType", "VissibleName": f"Note {i}", "hash": f"h{i}"}
-        for i in range(5)
-    ]
-    id_map = {it["ID"]: it for it in items}
+def test_the_per_run_cap_becomes_the_selection_limit():
+    """`--limit` narrows a sweep, and says so in the criteria rather than later."""
+    pipe = SyncPipeline(SyncOptions(limit=2), destinations=[MockDestination()])
+    assert pipe._criteria().limit == 2
 
-    pipeline = SyncPipeline(SyncOptions(limit=2), destinations=[MockDestination()])
-    to_process, needs_update, cont = pipeline.filter_pending_documents(items, id_map)
-    assert cont is True
-    assert len(to_process) == 2
+
+def test_a_named_notebook_is_neither_capped_nor_second_guessed():
+    """Naming one document is not a sweep, so the sweep's cap does not apply."""
+    criteria = SyncPipeline(SyncOptions(notebook="Notes", limit=1), destinations=[])._criteria()
+
+    assert criteria.target == "Notes"
+    assert criteria.limit is None
+    assert criteria.force is True
 
 
 def test_sync_pipeline_run_no_notebooks():
@@ -213,10 +230,10 @@ def test_sync_pipeline_run_no_notebooks():
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
+            mock_client.get_meta_items.return_value = []
             mock_connect.return_value = mock_client
-            with patch.object(pipeline, "discover_documents", return_value=([], {})):
-                result = pipeline.run()
-                assert result is True
+            result = pipeline.run()
+            assert result is True
 
 
 def test_sync_pipeline_run_targeted_not_found():
@@ -227,10 +244,10 @@ def test_sync_pipeline_run_targeted_not_found():
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
+            mock_client.get_meta_items.return_value = []
             mock_connect.return_value = mock_client
-            with patch.object(pipeline, "discover_documents", return_value=([], {})):
-                result = pipeline.run()
-                assert result is False
+            result = pipeline.run()
+            assert result is False
 
 
 def test_sync_pipeline_run_targeted_user_cancelled():
@@ -241,15 +258,16 @@ def test_sync_pipeline_run_targeted_user_cancelled():
         "VissibleName": "Meeting Notes",
         "hash": "h1",
     }
-    id_map = {"doc-123": doc_item}
     pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
-        with patch.object(pipeline, "connect"):
-            with patch.object(pipeline, "discover_documents", return_value=([doc_item], id_map)):
-                with patch("living_ink.pipeline.select_notebook_interactive", return_value=[]):
-                    result = pipeline.run()
-                    assert result is True
+        with patch.object(pipeline, "connect") as mock_connect:
+            mock_client = MagicMock()
+            mock_client.get_meta_items.return_value = [doc_item]
+            mock_connect.return_value = mock_client
+            with patch("living_ink.pipeline.select_notebook_interactive", return_value=[]):
+                result = pipeline.run()
+                assert result is True
 
 
 def test_sync_pipeline_process_notebook_item():
@@ -265,18 +283,13 @@ def test_sync_pipeline_process_notebook_item():
     }
     mock_client = MagicMock()
     mock_client.download.return_value = b""
-    id_map = {"nb-001": nb_item}
-    needs_update = {"nb-001": [mock_dest]}
 
-    with patch("living_ink.pipeline.get_document_type", return_value="notebook"):
-        success = pipeline.process_notebook_item(
-            nb_item=nb_item,
-            client=mock_client,
-            id_map=id_map,
-            needs_update=needs_update,
-            keep_temp=True,
-        )
-        assert success is False
+    success = pipeline.process_notebook_item(
+        candidate=make_candidate(nb_item, pending=(mock_dest,)),
+        client=mock_client,
+        keep_temp=True,
+    )
+    assert success is False
 
 
 class TestImportPurity:
@@ -711,7 +724,7 @@ class TestDryRun:
         pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
-            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+            assert pipeline_obj._publish(self._job(tmp_path), [dest]) is True
 
         assert dest.published == []
         recorded.assert_not_called()
@@ -721,7 +734,7 @@ class TestDryRun:
         pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
         job = self._job(tmp_path)
 
-        pipeline_obj._publish(job, {"nb-1": [dest]})
+        pipeline_obj._publish(job, [dest])
         out = capsys.readouterr().out
 
         assert "Dry run" in out
@@ -732,7 +745,7 @@ class TestDryRun:
         dest = MockDestination("MockDest")
         pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
 
-        pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+        pipeline_obj._publish(self._job(tmp_path), [dest])
 
         assert "Replaces the whole note" in capsys.readouterr().out
 
@@ -741,7 +754,7 @@ class TestDryRun:
         pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
 
         with patch.object(type(dest), "merge_unit", MergeUnit.PAGE):
-            pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]})
+            pipeline_obj._publish(self._job(tmp_path), [dest])
 
         out = capsys.readouterr().out
         assert "only the pages that changed" in out
@@ -752,7 +765,7 @@ class TestDryRun:
         pipeline_obj = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
-            assert pipeline_obj._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+            assert pipeline_obj._publish(self._job(tmp_path), [dest]) is True
 
         assert len(dest.published) == 1
         recorded.assert_called_once()
@@ -799,7 +812,7 @@ class TestOrderedDurability:
         dest = MockDestination("MockDest")
         pipe = SyncPipeline(destinations=[dest])
 
-        assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+        assert pipe._publish(self._job(tmp_path), [dest]) is True
         assert self._row(dest)["version"] == "hash-1"
 
     def test_a_state_write_that_fails_leaves_the_note_and_keeps_it_pending(self, tmp_path):
@@ -811,7 +824,7 @@ class TestOrderedDurability:
             raise sqlite3.OperationalError("database is locked")
 
         with patch("living_ink.pipeline.add_to_processed_log", side_effect=explode):
-            assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+            assert pipe._publish(self._job(tmp_path), [dest]) is False
 
         assert len(dest.published) == 1
         assert self._row(dest) is None
@@ -822,7 +835,7 @@ class TestOrderedDurability:
         dest.publish_ok = False
         pipe = SyncPipeline(destinations=[dest])
 
-        assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+        assert pipe._publish(self._job(tmp_path), [dest]) is False
         assert self._row(dest) is None
 
     def test_a_publish_that_raises_records_nothing(self, tmp_path):
@@ -830,7 +843,7 @@ class TestOrderedDurability:
         pipe = SyncPipeline(destinations=[dest])
 
         with patch.object(dest, "publish", side_effect=OSError("disk full")):
-            assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+            assert pipe._publish(self._job(tmp_path), [dest]) is False
 
         assert self._row(dest) is None
 
@@ -842,7 +855,7 @@ class TestOrderedDurability:
         dest = MockDestination("MockDest")
         pipe = SyncPipeline(destinations=[dest])
 
-        pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(self._job(tmp_path), [dest])
 
         expected = document_recipe(source_for_name("notebook"), dest, pipe.settings)
         assert self._row(dest)["recipe"] == expected
@@ -886,7 +899,9 @@ class TestEveryRunReadsItsPages:
             patch.object(pipeline_obj, "_preprocess_images") as preprocess,
         ):
             assert (
-                pipeline_obj.process_notebook_item(nb_item, MagicMock(), {}, {}, keep_temp=True)
+                pipeline_obj.process_notebook_item(
+                    make_candidate(nb_item), MagicMock(), keep_temp=True
+                )
                 is True
             )
 
@@ -2201,7 +2216,7 @@ class TestPublicationIdentity:
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log"):
-            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+            pipe._publish(self._job(tmp_path), [dest])
 
         assert dest.published[0]["doc"].doc_id == "nb-1"
 
@@ -2213,7 +2228,7 @@ class TestPublicationIdentity:
         pipe.report = RunReport()
 
         with patch("living_ink.pipeline.add_to_processed_log"):
-            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+            pipe._publish(self._job(tmp_path), [dest])
 
         assert pipe.report.warnings == [
             "MockDestination: Notes (2).md belongs to another document."
@@ -2228,7 +2243,7 @@ class TestPublicationIdentity:
         pipe.report = RunReport()
 
         with patch("living_ink.pipeline.add_to_processed_log"):
-            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+            pipe._publish(self._job(tmp_path), [dest])
 
         assert pipe.report.warnings == ["MockDestination: The vault is read-only."]
 
@@ -2238,7 +2253,7 @@ class TestPublicationIdentity:
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
-            pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+            pipe._publish(self._job(tmp_path), [dest])
 
         assert recorded.call_args.kwargs["target"] == "Work/Notes.md"
 
@@ -2250,7 +2265,7 @@ class TestPublicationIdentity:
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log"):
-            pipe._publish(job, {"nb-1": [dest]})
+            pipe._publish(job, [dest])
 
         assert dest.published[0]["doc"].modified == datetime.datetime(2026, 3, 4, 9, 30)
 
@@ -2282,7 +2297,7 @@ class TestOrphanedNotebooks:
 
     def test_a_missing_notebook_is_reported(self, capsys):
         self._published()
-        self._pipeline(MockDestination())._handle_orphans({"nb-2": object()})
+        self._pipeline(MockDestination())._handle_orphans(["nb-1"], {"nb-2": object()})
         out = capsys.readouterr().out
         assert "no longer on the tablet" in out
         assert "Old Notes" in out
@@ -2290,26 +2305,26 @@ class TestOrphanedNotebooks:
     def test_reporting_deletes_nothing(self, capsys):
         self._published()
         dest = MockDestination()
-        self._pipeline(dest)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert dest.unpublished == []
         assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is not None
 
     def test_a_notebook_still_on_the_tablet_is_not_an_orphan(self, capsys):
         self._published()
-        self._pipeline(MockDestination())._handle_orphans({"nb-1": object()})
+        self._pipeline(MockDestination())._handle_orphans([], {"nb-1": object()})
         assert "no longer on the tablet" not in capsys.readouterr().out
 
     def test_an_empty_listing_is_never_treated_as_a_deletion(self, capsys):
         """A transport that returned nothing has not told us the tablet is empty."""
         self._published()
-        self._pipeline(MockDestination())._handle_orphans({})
+        self._pipeline(MockDestination())._handle_orphans(["nb-1"], {})
         assert capsys.readouterr().out == ""
 
     def test_a_dry_run_says_nothing_and_does_nothing(self, capsys):
         self._published()
         dest = MockDestination()
-        self._pipeline(dest, prune=True, dry_run=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest, prune=True, dry_run=True)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert capsys.readouterr().out == ""
         assert dest.unpublished == []
@@ -2317,13 +2332,13 @@ class TestOrphanedNotebooks:
     def test_pruning_deletes_the_note(self, capsys):
         self._published()
         dest = MockDestination()
-        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest, prune=True)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert dest.unpublished == [("Old Notes.md", None, "nb-1")]
 
     def test_pruning_forgets_the_document(self, capsys):
         self._published()
-        self._pipeline(MockDestination(), prune=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(MockDestination(), prune=True)._handle_orphans(["nb-1"], {"nb-2": object()})
         assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is None
 
     def test_a_destination_that_refuses_is_still_forgotten(self, capsys):
@@ -2331,7 +2346,7 @@ class TestOrphanedNotebooks:
         self._published()
         dest = MockDestination()
         dest.unpublish_result = False
-        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest, prune=True)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert pipeline.get_state_store().get_publication("nb-1", "MockDestination") is None
         assert "left alone" in capsys.readouterr().out
@@ -2340,14 +2355,14 @@ class TestOrphanedNotebooks:
         self._published()
         dest = MockDestination()
         dest.unpublish_error = DestinationError("vault is gone")
-        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest, prune=True)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert "vault is gone" in capsys.readouterr().out
 
     def test_a_destination_no_longer_configured_is_left_alone(self, capsys):
         self._published(dest="SomethingElse")
         dest = MockDestination()
-        self._pipeline(dest, prune=True)._handle_orphans({"nb-2": object()})
+        self._pipeline(dest, prune=True)._handle_orphans(["nb-1"], {"nb-2": object()})
 
         assert dest.unpublished == []
         assert "not configured" in capsys.readouterr().out
@@ -2637,17 +2652,23 @@ class TestProgressIsRecordedPerNotebook:
         pipe.target_notebook = None
         seen_counts = []
 
-        def process(nb_item, **kwargs):
+        def process(candidate, **kwargs):
             seen_counts.append(pipe._counts)
-            return nb_item != "bad"
+            return candidate.name != "bad"
+
+        chosen = Selection(
+            to_process=tuple(
+                make_candidate({"ID": name, "VissibleName": name}) for name in ("a", "bad", "c")
+            )
+        )
 
         monkeypatch.setattr(pipe, "process_notebook_item", process)
-        monkeypatch.setattr(pipe, "connect", lambda: object())
+        monkeypatch.setattr(pipe, "connect", lambda: SimpleNamespace(get_meta_items=lambda: []))
         monkeypatch.setattr(pipe, "preflight_destinations", lambda: None)
         monkeypatch.setattr(pipe, "_learn_device", lambda client: None)
-        monkeypatch.setattr(pipe, "discover_documents", lambda c: (["a", "bad", "c"], {}))
-        monkeypatch.setattr(pipe, "_handle_orphans", lambda id_map: None)
-        monkeypatch.setattr(pipe, "filter_pending_documents", lambda nbs, id_map: (nbs, {}, True))
+        monkeypatch.setattr(pipe, "select_documents", lambda listing, client: chosen)
+        monkeypatch.setattr(pipe, "_handle_orphans", lambda orphans, id_map: None)
+        monkeypatch.setattr(pipe, "_report_selection", lambda selection: None)
         monkeypatch.setattr(pipeline, "validate_environment", lambda: None)
         monkeypatch.setattr(pipeline, "cleanup_temp_artifacts", lambda **kw: None)
 
@@ -2799,14 +2820,38 @@ class TestRunSummary:
 
     def test_documents_never_processed_are_listed_as_unchanged(self):
         pipe = self._pipeline()
-        stale = {"ID": "nb-2", "VissibleName": "Journal"}
-        fresh = {"ID": "nb-1", "VissibleName": "Notes"}
+        stale = make_candidate({"ID": "nb-2", "VissibleName": "Journal"})
+        fresh = make_candidate({"ID": "nb-1", "VissibleName": "Notes"})
 
-        pipe._report_unchanged([stale, fresh], [fresh])
+        pipe._report_selection(
+            Selection(to_process=(fresh,), skipped=((stale, selection.UNCHANGED),))
+        )
 
         assert len(pipe.report.documents) == 1
         assert pipe.report.documents[0].name == "Journal"
         assert pipe.report.documents[0].status == SKIPPED
+
+    def test_a_skip_carries_the_real_reason(self):
+        """Every one of these used to read "unchanged", whatever had happened."""
+        pipe = self._pipeline()
+        trashed = {"ID": "nb-3", "VissibleName": "Deleted"}
+
+        pipe._report_selection(Selection(skipped=((trashed, selection.TRASHED),)))
+
+        assert pipe.report.documents[0].reason == "in the trash"
+
+    def test_a_pending_document_past_the_limit_is_deferred_not_unchanged(self):
+        """With the default limit of one, this used to call nine notebooks fine."""
+        pipe = self._pipeline()
+        waiting = make_candidate(
+            {"ID": "nb-9", "VissibleName": "Later"}, pending=(MockDestination(),)
+        )
+
+        pipe._report_selection(Selection(deferred=(waiting,)))
+
+        entry = pipe.report.documents[0]
+        assert entry.status == DEFERRED
+        assert entry.destinations == ["MockDestination"]
 
     def test_the_summary_is_printed_at_the_end(self, capsys):
         pipe = self._pipeline()
@@ -2871,12 +2916,18 @@ class TestDryRunReporting:
     def test_a_targeted_run_does_not_call_the_rest_unchanged(self):
         """It never looked at them, so it cannot vouch for them."""
         pipe = self._pipeline(target="Test")
-        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        other = {"ID": "nb-2", "VissibleName": "Other"}
+
+        pipe._report_selection(Selection(skipped=((other, selection.NOT_TARGETED),)))
+
         assert pipe.report.documents == []
 
     def test_an_untargeted_run_still_lists_them(self):
         pipe = self._pipeline()
-        pipe._report_unchanged([{"ID": "nb-2", "VissibleName": "Other"}], [])
+        other = make_candidate({"ID": "nb-2", "VissibleName": "Other"})
+
+        pipe._report_selection(Selection(skipped=((other, selection.UNCHANGED),)))
+
         assert pipe.report.documents[0].name == "Other"
 
 
@@ -2918,7 +2969,13 @@ class TestJsonSummaryReachesStdout:
 
 
 class TestThePreviewAndTheRunAgree:
-    """`sync --status` predicts the run; a second opinion would be a bug."""
+    """`sync --status` predicts the run — because it makes the same call.
+
+    The two used to be separate expressions of the same rule, free to drift.
+    They are now one function, and these tests are what says so: the preview
+    reaches it through ``cli.rows_from_selection``, the run through
+    ``SyncPipeline.select_documents``, and the answers have to match.
+    """
 
     @pytest.fixture
     def store(self, tmp_path, monkeypatch):
@@ -2936,63 +2993,104 @@ class TestThePreviewAndTheRunAgree:
         {"ID": "doc-settled", "Type": "DocumentType", "VissibleName": "Settled", "hash": "h3"},
     ]
 
-    def _sync(self, store):
-        """Run the filter over ITEMS against one destination."""
-        dest = MockDestination()
-        # Above the document count: the per-run cap is applied after the
-        # filter, and capping it here would look like a disagreement.
-        pipe = SyncPipeline(SyncOptions(limit=10), destinations=[dest])
-        id_map = {item["ID"]: item for item in self.ITEMS}
-        to_process, needs_update, _ = pipe.filter_pending_documents(list(self.ITEMS), id_map)
-        return [item["ID"] for item in to_process], needs_update, dest
+    def _client(self):
+        """A transport that answers the listing and knows no file types."""
+        return SimpleNamespace(
+            get_meta_items=lambda: list(self.ITEMS),
+            get_file_type=lambda item: None,
+        )
 
-    def _preview(self, store):
-        """Classify the same items the way `sync --status` does."""
-        listing = [
-            {
-                "id": item["ID"],
-                "name": item["VissibleName"],
-                "folder": None,
-                "doc_type": "notebook",
-                "version": item["hash"],
-            }
-            for item in self.ITEMS
-        ]
-        rows, _ = store.compare_with_listing(listing, ["MockDestination"])
+    def _pipeline(self, dest, limit=10):
+        """A pipeline whose per-run cap is above the document count.
+
+        The cap defers rather than settles, so a low one here would look like a
+        disagreement with a preview that is not capped at all.
+        """
+        return SyncPipeline(SyncOptions(limit=limit), destinations=[dest])
+
+    def _settle(self, store, pipe, dest, doc_id, version):
+        """Record the publication a successful run would have left behind."""
+        from living_ink.core.recipe import document_recipe
+        from living_ink.sources import source_for_name
+
+        store.record_publication(
+            doc_id,
+            dest.state_key,
+            version,
+            recipe=document_recipe(source_for_name("notebook"), dest, pipe.settings),
+        )
+
+    def _preview(self, store, dest, settings):
+        """Classify the same items the way ``sync --status`` does."""
+        from living_ink.cli import rows_from_selection
+
+        chosen = select(list(self.ITEMS), SelectionCriteria(), store, [dest], settings=settings)
+        rows = rows_from_selection(list(self.ITEMS), chosen, store, [dest])
         return {row["id"]: row["status"] for row in rows}
 
     def test_the_run_processes_exactly_what_the_preview_flagged(self, store):
-        store.record_publication("doc-changed", "MockDestination", "old", recipe="")
-        store.record_publication("doc-settled", "MockDestination", "h3", recipe="")
+        dest = MockDestination()
+        pipe = self._pipeline(dest)
+        self._settle(store, pipe, dest, "doc-changed", "old")
+        self._settle(store, pipe, dest, "doc-settled", "h3")
 
-        processed, _, _ = self._sync(store)
-        flagged = [doc_id for doc_id, status in self._preview(store).items() if status.needs_sync]
+        chosen = pipe.select_documents(list(self.ITEMS), self._client())
+        processed = [candidate.doc_id for candidate in chosen.to_process]
+        flagged = [
+            doc_id
+            for doc_id, status in self._preview(store, dest, pipe.settings).items()
+            if status.needs_sync
+        ]
+
         assert sorted(processed) == sorted(flagged) == ["doc-changed", "doc-new"]
 
     def test_a_settled_document_is_left_alone_by_both(self, store):
+        dest = MockDestination()
+        pipe = self._pipeline(dest)
         for item in self.ITEMS:
-            store.record_publication(item["ID"], "MockDestination", item["hash"], recipe="")
+            self._settle(store, pipe, dest, item["ID"], item["hash"])
 
-        processed, needs_update, _ = self._sync(store)
-        assert processed == []
-        assert needs_update == {}
-        assert not any(status.needs_sync for status in self._preview(store).values())
+        chosen = pipe.select_documents(list(self.ITEMS), self._client())
+
+        assert chosen.to_process == ()
+        assert chosen.deferred == ()
+        assert not any(
+            status.needs_sync for status in self._preview(store, dest, pipe.settings).values()
+        )
 
     def test_the_run_names_the_destination_that_is_owed(self, store):
-        store.record_publication("doc-settled", "MockDestination", "h3", recipe="")
+        """On the candidate itself, as a tuple — never a falsy stand-in."""
+        dest = MockDestination()
+        pipe = self._pipeline(dest)
+        self._settle(store, pipe, dest, "doc-settled", "h3")
 
-        _, needs_update, dest = self._sync(store)
-        assert needs_update["doc-new"] == [dest]
-        assert "doc-settled" not in needs_update
+        chosen = pipe.select_documents(list(self.ITEMS), self._client())
+        owed = {candidate.doc_id: candidate.pending for candidate in chosen.to_process}
+
+        assert owed["doc-new"] == (dest,)
+        assert "doc-settled" not in owed
 
     def test_the_per_run_cap_shortens_the_run_not_the_preview(self, store):
         """A capped run is not a disagreement: the rest is still owed."""
-        pipe = SyncPipeline(SyncOptions(limit=1), destinations=[MockDestination()])
-        id_map = {item["ID"]: item for item in self.ITEMS}
-        to_process, needs_update, _ = pipe.filter_pending_documents(list(self.ITEMS), id_map)
+        dest = MockDestination()
+        pipe = self._pipeline(dest, limit=1)
 
-        assert len(to_process) == 1
-        assert set(needs_update) == {"doc-new", "doc-changed", "doc-settled"}
+        chosen = pipe.select_documents(list(self.ITEMS), self._client())
+
+        assert len(chosen.to_process) == 1
+        assert len(chosen.deferred) == 2
+        assert chosen.pending_total == 3
+
+    def test_the_capped_remainder_is_deferred_rather_than_called_unchanged(self, store):
+        """The bug this replaced: nine pending notebooks reported as fine."""
+        dest = MockDestination()
+        pipe = self._pipeline(dest, limit=1)
+        pipe.report = RunReport()
+
+        chosen = pipe.select_documents(list(self.ITEMS), self._client())
+        pipe._report_selection(chosen)
+
+        assert [entry.status for entry in pipe.report.documents] == [DEFERRED, DEFERRED]
 
 
 class TestRenderGeometryFollowsTheDevice:

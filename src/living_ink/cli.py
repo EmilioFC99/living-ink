@@ -28,8 +28,9 @@ from living_ink.config import ConfigurationMissing, credentials, get_config_path
 from living_ink.settings import SOURCE_ENV, SettingOrigin, Settings
 from living_ink.transport import TransportUnavailable
 
-if TYPE_CHECKING:  # pragma: no cover - annotation only; state is imported lazily
-    from living_ink.state import SyncStatus
+if TYPE_CHECKING:  # pragma: no cover - annotations only; both are imported lazily
+    from living_ink.core.selection import Selection
+    from living_ink.state import StateStore, SyncStatus
 
 logger = logging.getLogger(__name__)
 
@@ -792,7 +793,7 @@ def count_by_status(inventory: list[dict[str, Any]]) -> dict["SyncStatus", int]:
 
     Args:
         inventory: Rows carrying a ``status``, as
-            :meth:`~living_ink.state.StateStore.compare_with_listing` returns.
+            :func:`rows_from_selection` returns.
 
     Returns:
         Mapping of every :data:`~living_ink.state.SYNC_STATUSES` entry to its
@@ -812,10 +813,16 @@ def count_by_status(inventory: list[dict[str, Any]]) -> dict["SyncStatus", int]:
 def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
     """List the tablet and judge it against what has been published.
 
-    Metadata only. ``get_meta_items()`` is one listing call; the document type
-    is taken from the state database or from the listing's own file index
-    rather than probed per document, because a probe is a round trip each and
-    a preview that costs as much as a sync defeats its own purpose.
+    The judgement is not made here. The listing goes to
+    :func:`living_ink.core.selection.select` — the same call, with the same
+    arguments, that the sync itself makes — because a preview that predicts
+    something other than what the run does is worse than no preview, in a
+    feature whose entire purpose is to say what will happen. Everything below
+    is presentation: order the answer by the listing and name the status.
+
+    Metadata only. ``get_meta_items()`` is one listing call, and no client is
+    passed to the classifier, so the document type comes from the listing's own
+    file index rather than a round trip per document.
 
     Args:
         args: Parsed sync arguments; ``--ssh`` / ``--cloud`` select the
@@ -831,13 +838,8 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
         ConfigurationMissing: If configuration is absent or unusable.
     """
     from living_ink.api import get_rmapi
-    from living_ink.pipeline import (
-        get_default_config,
-        get_default_destinations,
-        get_notebook_path,
-        get_state_store,
-        get_val,
-    )
+    from living_ink.core.selection import SelectionCriteria, select
+    from living_ink.pipeline import get_default_config, get_default_destinations, get_state_store
 
     cfg_path = get_config_path(root)
     if cfg_path.exists():
@@ -860,68 +862,117 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
         logger.debug("Transport could not identify the device", exc_info=True)
         device = None
 
-    collection = client.get_meta_items()
-    id_map = {get_val(item, "ID"): item for item in collection}
+    collection = list(client.get_meta_items())
+    store = get_state_store()
+    destinations = get_default_destinations()
 
-    listing = []
+    chosen = select(
+        collection,
+        # No limit and no type filter: a preview answers "where does everything
+        # stand", and a document this run's flags would skip still has a state
+        # worth reporting. The limit belongs to the run, not to the question.
+        SelectionCriteria(),
+        store,
+        destinations,
+        settings=settings,
+    )
+
+    return (
+        rows_from_selection(collection, chosen, store, destinations),
+        _orphan_records(chosen, store),
+        device,
+    )
+
+
+def rows_from_selection(
+    collection: list[Any],
+    chosen: "Selection",
+    store: "StateStore",
+    destinations: list[Any],
+) -> list[dict[str, Any]]:
+    """Render a selection as the comparison rows the status view prints.
+
+    Ordered by the tablet's own listing rather than by the selection, which
+    groups documents by what happened to them: a list the user can find their
+    notebook in beats a list sorted by a verdict they have not read yet.
+
+    Args:
+        collection: The transport's listing, documents and folders.
+        chosen: What a sync would do with it.
+        store: Where publications are recorded, for the versions already held.
+        destinations: The enabled destinations.
+
+    Returns:
+        One row per judged document — its fields plus ``status``, ``pending``
+        and ``published``. Documents the classifier never reached, because they
+        are in the trash, are absent.
+    """
+    from living_ink.core.listing import get_val
+    from living_ink.core.selection import Candidate
+    from living_ink.state import DocumentView, classify
+
+    judged: dict[str, Candidate] = {}
+    for candidate in (*chosen.to_process, *chosen.deferred):
+        judged[candidate.doc_id] = candidate
+    for item, _reason in chosen.skipped:
+        if isinstance(item, Candidate):
+            judged[item.doc_id] = item
+
+    publications = store.all_publications()
+    known = {record["id"]: record for record in store.all_documents()}
+    names = [dest.state_key for dest in destinations]
+
+    rows: list[dict[str, Any]] = []
     for item in collection:
-        if get_val(item, "Type") != "DocumentType":
+        candidate = judged.get(get_val(item, "ID"))
+        if candidate is None:
             continue
-        name = get_val(item, "VissibleName") or get_val(item, "VisibleName")
-        if not name:
-            continue
-        folder = get_notebook_path(item, id_map)
-        if folder.startswith("[TRASH]"):
-            continue
-        listing.append(
+
+        record = known.get(candidate.doc_id, {})
+        published = {
+            name: row["version"] for name, row in publications.get(candidate.doc_id, {}).items()
+        }
+        pending = [dest.state_key for dest in candidate.pending]
+
+        rows.append(
             {
-                "id": get_val(item, "ID"),
-                "name": name,
-                "folder": folder or None,
-                "doc_type": document_type_from_metadata(item),
-                "version": version_of(item),
+                "id": candidate.doc_id,
+                "name": candidate.name,
+                # The database fills the gaps the listing leaves: a document's
+                # type costs a round trip to determine for certain, and a
+                # previous run already paid for it.
+                "folder": candidate.folder or record.get("folder"),
+                "doc_type": candidate.source or record.get("doc_type"),
+                "version": candidate.version,
+                "last_error": record.get("last_error"),
+                "status": classify(
+                    DocumentView(
+                        doc_id=candidate.doc_id,
+                        last_error=record.get("last_error"),
+                        published=published,
+                        pending=pending,
+                        destinations=names,
+                    )
+                ),
+                "pending": pending,
+                "published": published,
             }
         )
-
-    names = [dest.state_key for dest in get_default_destinations()]
-    rows, orphans = get_state_store().compare_with_listing(listing, names)
-    return rows, orphans, device
+    return rows
 
 
-def version_of(item: Any) -> str:
-    """Return the version string a sync would compare against.
-
-    Thin wrapper over :func:`living_ink.pipeline.document_version`, which is
-    also what the run itself uses: a preview and the run it predicts must not
-    disagree about whether a document changed.
+def _orphan_records(chosen: "Selection", store: "StateStore") -> list[dict[str, Any]]:
+    """Describe the documents that have notes but are no longer on the tablet.
 
     Args:
-        item: A document from the transport's listing.
+        chosen: What a sync would do, including the ids it found orphaned.
+        store: Where documents are recorded, for the names to print.
 
     Returns:
-        The content hash, or the version number as a string, or ``"1"``.
+        One record per orphan, carrying at least its ``id``.
     """
-    from living_ink.pipeline import document_version
-
-    return document_version(item)
-
-
-def document_type_from_metadata(item: Any) -> Optional[str]:
-    """Guess a document's type without asking the transport.
-
-    Args:
-        item: A document from the transport's listing.
-
-    Returns:
-        ``"pdf"``, ``"epub"``, ``"notebook"``, or None when the metadata does
-        not say — in which case the state database's remembered type is used
-        instead.
-    """
-    from living_ink.pipeline import get_document_type
-
-    # No client: get_document_type falls back to the file index and the
-    # filename, both of which are already in hand.
-    return get_document_type(item) or None
+    known = {record["id"]: record for record in store.all_documents()}
+    return [known.get(doc_id) or {"id": doc_id} for doc_id in chosen.orphans]
 
 
 def inventory_as_json(inventory: list[dict[str, Any]]) -> dict[str, Any]:
@@ -954,7 +1005,7 @@ def format_comparison_row(row: dict[str, Any]) -> str:
     """Render one document as `<id> <name>.<type> <status>`.
 
     Args:
-        row: One entry from :meth:`~living_ink.state.StateStore.compare_with_listing`.
+        row: One entry from :func:`rows_from_selection`.
 
     Returns:
         The line to print, without a leading indent and without colour — the

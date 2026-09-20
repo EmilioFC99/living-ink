@@ -764,7 +764,7 @@ class StateStore:
         """Drop publication rows filed under a destination that no longer exists.
 
         A deleted destination leaves its rows behind, and every later run reads
-        them as real: ``compare_with_listing`` reports the document as still
+        them as real: the selection pass reports the document as still
         published somewhere, ``_prune_orphan`` declines to prune because the
         destination "is not configured", and ``sync --status`` prints a dead
         key in each row's published map. None of that is recoverable by the
@@ -868,77 +868,6 @@ class StateStore:
             )
 
         return overview
-
-    def compare_with_listing(
-        self, listing: List[Dict[str, Any]], destinations: List[str]
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Judge what the device is holding right now against what was published.
-
-        :meth:`sync_overview` answers from the database alone, so it reports
-        what the last run happened to see. This takes a live listing instead,
-        which is the difference between "what was pending last time" and "what
-        would a sync do if I ran it now".
-
-        The listing is plain dicts rather than transport models on purpose:
-        this module must not learn what a :class:`~living_ink.models.Document`
-        is.
-
-        Args:
-            listing: One dict per document currently on the device, with at
-                least ``id`` and ``version``; ``name``, ``folder`` and
-                ``doc_type`` are carried through to the caller when present,
-                and filled in from the database when not.
-            destinations: Destination class names that are currently enabled.
-
-        Returns:
-            ``(rows, orphans)``. ``rows`` is one dict per listed document —
-            the listing's fields plus ``status``, ``pending`` and
-            ``published`` — in listing order. ``orphans`` are documents the
-            database has published but that the listing does not mention,
-            which is what a deleted-on-the-tablet notebook looks like.
-        """
-        publications = self.all_publications()
-        known = {row["id"]: row for row in self.all_documents()}
-
-        rows: List[Dict[str, Any]] = []
-        for entry in listing:
-            doc_id = entry["id"]
-            record = known.get(doc_id, {})
-            published = {name: row["version"] for name, row in publications.get(doc_id, {}).items()}
-            pending = [name for name in destinations if published.get(name) != entry.get("version")]
-
-            status = classify(
-                DocumentView(
-                    doc_id=doc_id,
-                    last_error=record.get("last_error"),
-                    published=published,
-                    pending=pending,
-                    destinations=destinations,
-                )
-            )
-
-            rows.append(
-                {
-                    # The database fills the gaps the listing leaves: a
-                    # document's type costs a round trip to determine for
-                    # certain, and a previous run already paid for it.
-                    "doc_type": record.get("doc_type"),
-                    "folder": record.get("folder"),
-                    **{k: v for k, v in entry.items() if v is not None},
-                    "last_error": record.get("last_error"),
-                    "status": status,
-                    "pending": pending,
-                    "published": published,
-                }
-            )
-
-        listed = {entry["id"] for entry in listing}
-        orphans = [
-            record
-            for doc_id, record in known.items()
-            if doc_id not in listed and publications.get(doc_id)
-        ]
-        return rows, orphans
 
     # --- device -----------------------------------------------------------
 

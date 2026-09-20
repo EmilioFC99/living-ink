@@ -165,6 +165,19 @@ class Selection:
         """Documents that need work, whether or not the limit lets them run."""
         return len(self.to_process) + len(self.deferred)
 
+    @property
+    def considered(self) -> int:
+        """Documents this run actually judged.
+
+        Everything the classifier reached, so a document ruled out before it —
+        trashed, the wrong type, in another folder — does not inflate the count
+        of what the run looked at. A skipped entry is a
+        :class:`Candidate` exactly when it got that far.
+        """
+        return self.pending_total + sum(
+            1 for item, _ in self.skipped if isinstance(item, Candidate)
+        )
+
 
 def select(
     listing: Sequence[Any],

@@ -57,7 +57,7 @@ class TestExternalIdRoundTrip:
     def _publish(self, dest, tmp_path, version="v1"):
         pipe = SyncPipeline(destinations=[dest])
         job = make_job(tmp_path, version=version)
-        assert pipe._publish(job, {"nb-1": [dest]}) is True
+        assert pipe._publish(job, [dest]) is True
         return job
 
     def test_the_first_publish_has_no_id_to_work_from(self, tmp_path):
@@ -109,7 +109,7 @@ class TestExternalIdRoundTrip:
     def test_a_dry_run_records_nothing_so_the_next_run_is_still_the_first(self, tmp_path):
         dest = FakeApiDestination()
         pipe = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
-        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(make_job(tmp_path), [dest])
 
         assert dest.seen_existing_id == []
         assert pipeline.get_state_store().get_publication("nb-1", "FakeApiDestination") is None
@@ -130,7 +130,7 @@ class TestUnpublishThroughThePipeline:
     def test_pruning_deletes_exactly_the_object_that_was_published(self, tmp_path):
         dest = FakeApiDestination()
         pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
-        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan(
             "nb-1", {"FakeApiDestination": {"external_id": "obj-1", "target": "inbox/Notes"}}
@@ -142,7 +142,7 @@ class TestUnpublishThroughThePipeline:
     def test_an_orphan_with_no_id_is_left_alone(self, tmp_path):
         dest = FakeApiDestination()
         pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
-        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan("nb-1", {"FakeApiDestination": {"external_id": None, "target": None}})
 
@@ -153,7 +153,7 @@ class TestUnpublishThroughThePipeline:
         """Keeping the row would only report the same orphan on every run."""
         dest = FakeApiDestination()
         pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
-        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan("nb-1", {"FakeApiDestination": {"external_id": None, "target": None}})
 
@@ -180,7 +180,7 @@ class TestTheDocumentThatArrives:
     def _published(self, tmp_path):
         dest = FakeApiDestination()
         pipe = SyncPipeline(destinations=[dest])
-        pipe._publish(make_job(tmp_path), {"nb-1": [dest]})
+        pipe._publish(make_job(tmp_path), [dest])
         return dest.seen_documents[0]
 
     def test_the_pages_arrive_as_pages(self, tmp_path):

@@ -1303,25 +1303,6 @@ class TestSyncStatusFlag:
         assert "living-ink setup" in capsys.readouterr().err
 
 
-class TestVersionOf:
-    """The preview and the run must agree on what "changed" means."""
-
-    def test_the_content_hash_wins(self):
-        from living_ink.cli import version_of
-
-        assert version_of({"hash": "abc123", "Version": 4}) == "abc123"
-
-    def test_the_version_number_is_the_fallback(self):
-        from living_ink.cli import version_of
-
-        assert version_of({"Version": 4}) == "4"
-
-    def test_metadata_with_neither_still_yields_a_version(self):
-        from living_ink.cli import version_of
-
-        assert version_of({}) == "1"
-
-
 class TestComparisonPaging:
     """`--all` on a terminal stops every ten rows instead of scrolling away."""
 
