@@ -207,6 +207,12 @@ class Setting:
             supervised process is restarted without its arguments, so a flag
             would stop applying without saying so.
         secret: Mask this value everywhere it is displayed.
+        group: Section the ``config`` menu files this setting under, for a
+            setting with no :attr:`key` to derive one from. Every credential is
+            in that position — it is deliberately absent from ``config.yml`` —
+            and "the API key belongs with the provider it is for" is a fact
+            about the setting, so it is declared beside it rather than kept in
+            a second table inside the menu.
     """
 
     field: str
@@ -226,6 +232,7 @@ class Setting:
     replacement: Optional[str] = None
     commands: Tuple[str, ...] = ("sync",)
     secret: bool = False
+    group: Optional[str] = None
 
     @property
     def section(self) -> Optional[str]:
@@ -252,6 +259,17 @@ class Setting:
             return None
         _, dot, tail = self.key.partition(".")
         return tail if dot else self.key
+
+    @property
+    def menu_section(self) -> Optional[str]:
+        """Return the section the ``config`` menu lists this setting under.
+
+        Returns:
+            :attr:`section` when the setting has a config key, otherwise
+            :attr:`group`. None only for a setting that is neither stored in
+            the file nor claimed by a section, which nothing declares today.
+        """
+        return self.section if self.key is not None else self.group
 
 
 @dataclass(frozen=True)
@@ -392,6 +410,7 @@ SETTINGS: Tuple[Setting, ...] = (
         store=STORE_CREDENTIALS,
         credential=SSH_PASSWORD,
         secret=True,
+        group="remarkable",
     ),
     Setting(
         field="remarkable_token",
@@ -404,6 +423,7 @@ SETTINGS: Tuple[Setting, ...] = (
         credential=CLOUD_TOKEN,
         legacy_keys=("remarkable.device_token",),
         secret=True,
+        group="remarkable",
     ),
     # ── AI and OCR ─────────────────────────────────────────────────────────
     Setting(
@@ -439,6 +459,7 @@ SETTINGS: Tuple[Setting, ...] = (
         credential=None,
         legacy_keys=("ai.api_key", "openai.api_key"),
         secret=True,
+        group="ai",
     ),
     Setting(
         field="ai_base_url",
