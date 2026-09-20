@@ -12,7 +12,6 @@ from living_ink.config.schema import (
     SETTINGS,
     STORE_CONFIG,
     STORE_CREDENTIALS,
-    STORE_ENV_ONLY,
 )
 from living_ink.settings import (
     DEFAULT_CACHE_MAX_AGE_DAYS,
@@ -556,11 +555,6 @@ class TestSchemaParity:
                 assert setting.key, setting.field
             else:
                 assert setting.key is None, setting.field
-
-    def test_an_env_only_setting_has_a_variable(self):
-        for setting in SETTINGS:
-            if setting.store == STORE_ENV_ONLY:
-                assert setting.env, setting.field
 
     def test_a_setting_that_enumerates_its_values_defaults_to_one_of_them(self):
         """A default outside the list is a config nothing typed can reproduce."""

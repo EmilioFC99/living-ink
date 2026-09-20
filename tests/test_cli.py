@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,11 +22,30 @@ from living_ink.cli import (
     WatchCommand,
     main,
 )
+from living_ink.cli.commands.setup import WizardResult
 from living_ink.cli.status import _describe_connected_device
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
 from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
-from living_ink.setup_wizard import WizardResult
 from living_ink.state import STATUS_NEW, STATUS_UP_TO_DATE
+
+
+@contextmanager
+def patched_wizard(result):
+    """Stand in for the conversation, so a test can check what follows it.
+
+    The class is patched rather than :meth:`Wizard.run`, because how the
+    command *builds* the wizard — which root, which bin directory — is as much
+    of the contract as what it does with the answer.
+
+    Args:
+        result: The :class:`WizardResult` the stand-in returns.
+
+    Yields:
+        The patched ``Wizard`` class.
+    """
+    with patch("living_ink.cli.commands.setup.Wizard") as wizard_cls:
+        wizard_cls.return_value.run.return_value = result
+        yield wizard_cls
 
 
 def test_find_repo_root_prefers_cwd(tmp_path):
@@ -70,7 +90,10 @@ def test_main_info_command(mock_info):
 @patch.object(SetupCommand, "run", return_value=0)
 def test_main_setup_command(mock_setup):
     """'living-ink setup' invokes SetupCommand.run."""
-    with patch("sys.argv", ["living-ink", "setup"]):
+    with (
+        patch("sys.argv", ["living-ink", "setup"]),
+        patch("living_ink.ui.is_tty", return_value=True),
+    ):
         main()
         mock_setup.assert_called_once()
 
@@ -353,15 +376,19 @@ def test_sync_command_execution(tmp_path):
 
 
 def test_setup_command_execution(tmp_path):
-    """SetupCommand invokes run_wizard with root directory."""
+    """SetupCommand runs the wizard, built with the command's own root."""
     cmd = SetupCommand(root=tmp_path)
     args = argparse.Namespace()
-    with patch(
-        "living_ink.setup_wizard.run_wizard", return_value=WizardResult(saved=True)
-    ) as mock_wizard:
+    with patched_wizard(WizardResult(saved=True)) as wizard_cls:
         code = cmd.run(args)
-        assert code == 0
-        mock_wizard.assert_called_once_with(repo_dir=tmp_path)
+    assert code == 0
+    wizard_cls.assert_called_once_with(root=tmp_path, bin_dir=None)
+
+
+def test_setup_command_reports_a_declined_save(tmp_path):
+    """Saying no at the summary is a failure: setup produced no config."""
+    with patched_wizard(WizardResult(saved=False)):
+        assert SetupCommand(root=tmp_path).run(argparse.Namespace()) == 1
 
 
 class TestWizardSyncHandoff:
@@ -370,7 +397,7 @@ class TestWizardSyncHandoff:
     def test_setup_runs_sync_when_the_user_asks(self, tmp_path):
         """A wizard that reports run_sync_requested hands off to SyncCommand."""
         result = WizardResult(saved=True, run_sync_requested=True)
-        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+        with patched_wizard(result):
             with patch.object(SyncCommand, "run", return_value=0) as mock_sync:
                 assert SetupCommand(root=tmp_path).run(argparse.Namespace()) == 0
                 mock_sync.assert_called_once()
@@ -378,7 +405,7 @@ class TestWizardSyncHandoff:
     def test_setup_skips_sync_when_the_user_declines(self, tmp_path):
         """Declining the first sync leaves SyncCommand untouched."""
         result = WizardResult(saved=True, run_sync_requested=False)
-        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+        with patched_wizard(result):
             with patch.object(SyncCommand, "run", return_value=0) as mock_sync:
                 assert SetupCommand(root=tmp_path).run(argparse.Namespace()) == 0
                 mock_sync.assert_not_called()
@@ -416,7 +443,7 @@ class TestWizardSyncHandoff:
     def test_sync_launched_by_the_wizard_does_not_reoffer_it(self, tmp_path, capsys):
         """A still-broken config after setup reports the problem, it does not loop."""
         result = WizardResult(saved=True, run_sync_requested=True)
-        with patch("living_ink.setup_wizard.run_wizard", return_value=result):
+        with patched_wizard(result):
             with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None):
                 with patch(
                     "living_ink.pipeline.SyncPipeline.run",
@@ -475,9 +502,29 @@ def test_cli_default_routing_to_setup(tmp_path):
     """When no command is given and config is missing, CLI routes to setup."""
     cli = LivingInkCLI(root=tmp_path)
     with patch.object(SetupCommand, "run", return_value=0) as mock_setup_run:
-        code = cli.run([])
+        with patch("living_ink.ui.is_tty", return_value=True):
+            code = cli.run([])
         assert code == 0
         mock_setup_run.assert_called_once()
+
+
+class TestTheTerminalIsAPrecondition:
+    """An interactive command is refused before it can half-configure anything."""
+
+    def test_setup_without_a_terminal_is_a_usage_error(self, tmp_path, capsys):
+        """No TTY exits 2 and never reaches the command."""
+        with patch.object(SetupCommand, "run", return_value=0) as mock_setup_run:
+            with patch("living_ink.ui.is_tty", return_value=False):
+                assert LivingInkCLI(root=tmp_path).run(["setup"]) == 2
+        mock_setup_run.assert_not_called()
+        assert "interactive" in capsys.readouterr().err
+
+    def test_a_non_interactive_command_is_never_refused(self, tmp_path):
+        """``sync`` runs with stdin closed, which is how a cron job runs it."""
+        with patch.object(SyncCommand, "run", return_value=0) as mock_sync_run:
+            with patch("living_ink.ui.is_tty", return_value=False):
+                assert LivingInkCLI(root=tmp_path).run(["sync"]) == 0
+        mock_sync_run.assert_called_once()
 
 
 def test_cmd_sync_the_rehearsal_reaches_the_pipeline(tmp_path):

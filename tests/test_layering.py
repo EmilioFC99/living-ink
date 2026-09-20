@@ -201,6 +201,31 @@ class TestTheWorkspaceIsALeaf:
         assert module_imports(PACKAGE_ROOT / "core" / "temp.py") == []
 
 
+class TestTheInteractiveLayerIsALeaf:
+    """``ui.py`` imports nothing from Living Ink, and is the only home of the widgets.
+
+    Both halves matter. A widget module that imported ``config`` or ``pipeline``
+    could not be used by them — and ``cli/app.py`` asks it for the terminal test
+    before dispatching anything, which is as close to the bottom of the stack as
+    a module gets.
+
+    The second half is the seam itself: ``questionary`` appears in exactly one
+    module, so "how does this tool ask a question" has one answer, and a test
+    can replace six functions instead of intercepting a library.
+    """
+
+    def test_ui_imports_nothing_from_the_package(self):
+        assert module_imports(PACKAGE_ROOT / "ui.py") == []
+
+    def test_questionary_is_imported_in_one_place(self):
+        importers = sorted(
+            path.relative_to(PACKAGE_ROOT).as_posix()
+            for path in PACKAGE_ROOT.rglob("*.py")
+            if "questionary" in path.read_text(encoding="utf-8")
+        )
+        assert importers == ["ui.py"]
+
+
 def cli_self_imports(path: Path) -> List[Tuple[str, str]]:
     """Return the ``living_ink.cli`` names a file imports at module level.
 

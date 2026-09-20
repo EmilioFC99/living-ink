@@ -1,11 +1,12 @@
 """Configuration: where it lives, what it may contain, and what it may not.
 
-Four concerns, one import path. :mod:`~living_ink.config.paths` resolves the
+Five concerns, one import path. :mod:`~living_ink.config.paths` resolves the
 config file, the data directory and the credentials directory;
 :mod:`~living_ink.config.schema` declares every setting there is;
 :mod:`~living_ink.config.validate` checks a parsed ``config.yml`` against that
 declaration; :mod:`~living_ink.config.credentials` stores the secrets that must
-never be in the file.
+never be in the file; :mod:`~living_ink.config.writer` turns a mapping back
+into the file, for the two commands that save one.
 
 Everything the rest of the package used to import from ``living_ink.config``
 is re-exported here, so a caller that only wants ``get_config_path`` does not
@@ -50,7 +51,6 @@ from living_ink.config.schema import (
     SETTINGS,
     STORE_CONFIG,
     STORE_CREDENTIALS,
-    STORE_ENV_ONLY,
     TEXT,
     WHOLE,
     Choice,
@@ -69,6 +69,7 @@ from living_ink.config.validate import (
     split_problems,
     validate_config,
 )
+from living_ink.config.writer import render_config
 
 __all__ = [
     "ACTIVE",
@@ -93,7 +94,6 @@ __all__ = [
     "SSH_PASSWORD",
     "STORE_CONFIG",
     "STORE_CREDENTIALS",
-    "STORE_ENV_ONLY",
     "TEXT",
     "WARNING",
     "WHOLE",
@@ -116,6 +116,7 @@ __all__ = [
     "read_config_file",
     "read_secret",
     "reads_as",
+    "render_config",
     "settings_for_section",
     "split_problems",
     "validate_config",
