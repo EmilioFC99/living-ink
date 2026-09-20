@@ -217,7 +217,7 @@ class TestAiVerification:
         """Provider returning valid response passes verification."""
         mock_p = MagicMock()
         mock_p.name = "gemini (gemini-flash-latest)"
-        mock_p.repair_text.return_value = "READY"
+        mock_p.probe_vision.return_value = "READY"
         mock_get_provider.return_value = mock_p
 
         ok, msg = verify_ai_provider("gemini", api_key="secret")
@@ -229,12 +229,44 @@ class TestAiVerification:
         """Provider returning empty string fails verification."""
         mock_p = MagicMock()
         mock_p.name = "gemini"
-        mock_p.repair_text.return_value = ""
+        mock_p.probe_vision.return_value = ""
         mock_get_provider.return_value = mock_p
 
         ok, msg = verify_ai_provider("gemini", api_key="bad-key")
         assert ok is False
-        assert "empty response" in msg.lower()
+        assert "read images" in msg.lower()
+
+    @patch("living_ink.providers.get_provider")
+    def test_the_probe_is_the_call_a_sync_makes(self, mock_get_provider):
+        """A text prompt verifies the wrong thing.
+
+        Every page is read by ``ocr_image``; a model that answers text and
+        refuses images passes a text probe and then fails on page one, at one
+        wasted call per page, with the run already underway.
+        """
+        mock_p = MagicMock()
+        mock_p.name = "gemini"
+        mock_p.probe_vision.return_value = "READY"
+        mock_get_provider.return_value = mock_p
+
+        verify_ai_provider("gemini", api_key="secret")
+
+        mock_p.probe_vision.assert_called_once_with()
+        mock_p.repair_text.assert_not_called()
+
+    @patch("living_ink.providers.get_provider")
+    def test_a_provider_without_vision_is_refused_before_it_is_called(self, mock_get_provider):
+        """There is no second OCR backend, so this cannot be a warning."""
+        mock_p = MagicMock()
+        mock_p.name = "plugin"
+        mock_p.supports_vision = False
+        mock_get_provider.return_value = mock_p
+
+        ok, msg = verify_ai_provider("plugin", api_key="secret")
+
+        assert ok is False
+        assert "cannot read images" in msg
+        mock_p.probe_vision.assert_not_called()
 
 
 # =========================================================================

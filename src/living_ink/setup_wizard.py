@@ -276,7 +276,14 @@ def verify_ai_provider(
     api_key: str = "",
     model: str = "",
 ) -> Tuple[bool, str]:
-    """Test connection and authentication for an AI provider.
+    """Test connection, authentication and vision for an AI provider.
+
+    The probe is a real multimodal request, because that is the only kind of
+    request a sync makes: ``clean.ocr_and_repair()`` reads every page by
+    sending it as an image, and there is no second OCR backend to degrade to.
+    A text-only model answers a text prompt perfectly and then fails on every
+    page of every notebook, so verifying with one would be verifying the wrong
+    thing.
 
     Args:
         provider_name: Provider preset ('gemini', 'openai', 'ollama', etc.).
@@ -308,12 +315,19 @@ def verify_ai_provider(
 
     try:
         provider = get_provider(candidate)
-        test_prompt = "Reply with exactly: READY"
-        response = provider.repair_text("Test", test_prompt)
+        if not provider.supports_vision:
+            return False, (
+                f"Provider {provider.name} cannot read images, and every page is read "
+                "as one. Choose a provider with vision support."
+            )
+        response = provider.probe_vision()
 
         if response and response.strip():
             return True, f"Verified {provider.name} — connection successful!"
-        return False, f"Provider {provider.name} returned an empty response. Check your API key."
+        return False, (
+            f"Provider {provider.name} returned nothing for a page image. Check the "
+            "API key, and that the model can read images."
+        )
     except Exception as e:
         # Broad: nine providers, each with its own idea of an error, and the
         # caller wants one line of prose either way.
