@@ -30,7 +30,12 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from living_ink.providers import NoneProvider, TextRepairProvider, get_provider
+from living_ink.providers import (
+    VISION_SYSTEM_MESSAGE,
+    NoneProvider,
+    TextRepairProvider,
+    get_provider,
+)
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -260,20 +265,35 @@ def _read_ocr_instructions() -> str:
     return "Transcribe the handwritten text from this notebook page image."
 
 
-def transcription_fingerprint() -> str:
+def transcription_fingerprint(settings: Settings) -> str:
     """Identify everything, other than the page itself, that shapes a transcription.
 
     A cached transcription is only reusable while the thing that produced it is
-    unchanged. That is the provider and model (``provider.name`` carries both)
-    and the two prompt files, which ship inside the package and are meant to be
-    edited. Folding them into one digest means an edited prompt or a switched
-    model misses the cache instead of quietly serving the old answer.
+    unchanged: the provider and the model, the sampling temperature, the
+    language asked for, the system prompt the vision call opens with, and the
+    two prompt files, which ship inside the package and are meant to be edited.
+    Folding them into one digest means an edited prompt or a switched model
+    misses the cache instead of quietly serving the old answer.
+
+    **This builds nothing.** It used to read ``_get_provider().name``, which
+    was only ever a way of spelling "provider and model" through an object that
+    happened to be lying around — and which made the digest unavailable before
+    a provider existed. Change detection needs it *before* any page reaches
+    OCR, to decide whether there is work at all, so every input is now a value
+    on a frozen dataclass and no network client is constructed.
+
+    Args:
+        settings: The run's resolved settings.
 
     Returns:
         A short hex digest identifying the current transcription behaviour.
     """
     parts = (
-        _get_provider().name,
+        settings.ai_provider or "",
+        settings.ai_model or "",
+        repr(settings.ai_temperature),
+        settings.ai_language or "",
+        VISION_SYSTEM_MESSAGE,
         _read_ocr_instructions(),
         _read_prompt_instructions(),
     )

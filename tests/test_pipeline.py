@@ -1,5 +1,6 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
+import dataclasses
 import datetime
 import json
 import os
@@ -1378,6 +1379,7 @@ class TestTranscriptionCaching:
         from living_ink.cache import TranscriptCache
 
         pipe = SyncPipeline.__new__(SyncPipeline)
+        pipe.settings = Settings(ai_provider="openai", ai_model="gpt-4o-mini")
         pipe.cache = TranscriptCache(tmp_path / "transcripts", enabled=enabled)
         pipe._cache_lock = threading.Lock()
         pipe._cache_hits = 0
@@ -1410,7 +1412,7 @@ class TestTranscriptionCaching:
             pages.append(path)
 
         pipe = self._pipeline(tmp_path)
-        pipe.settings = SimpleNamespace(ocr_concurrency=1)
+        pipe.settings = dataclasses.replace(pipe.settings, ocr_concurrency=1)
 
         def transcribe_then_quit(path):
             if path == pages[2]:
@@ -1422,7 +1424,7 @@ class TestTranscriptionCaching:
                 pipe._transcribe_pages(pages)
 
         resumed = self._pipeline(tmp_path)
-        resumed.settings = SimpleNamespace(ocr_concurrency=1)
+        resumed.settings = dataclasses.replace(resumed.settings, ocr_concurrency=1)
         with patch.object(resumed, "_vision_ocr_page", side_effect=lambda p: p.name) as ocr:
             resumed._transcribe_pages(pages)
 

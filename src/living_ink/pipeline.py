@@ -2252,7 +2252,7 @@ class SyncPipeline:
         except OSError:
             # No page to hash means nothing to key on; transcribe uncached.
             return None
-        return self.cache.key(image_bytes, transcription_fingerprint())
+        return self.cache.key(image_bytes, transcription_fingerprint(self.settings))
 
     def _cached(self, key: Optional[str], text: str) -> str:
         """Store a freshly transcribed page and return it unchanged.

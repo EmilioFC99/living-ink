@@ -5,6 +5,7 @@ prompt file loading, lazy provider initialization, and backward
 compatibility with legacy environment variables.
 """
 
+import dataclasses
 import os
 from unittest.mock import MagicMock, patch
 
@@ -339,29 +340,49 @@ class TestReadOcrInstructions:
 class TestTranscriptionFingerprint:
     """The fingerprint is what makes a cached transcription safe to reuse."""
 
+    settings = Settings(ai_provider="openai", ai_model="gpt-4o-mini")
+
     def test_it_is_stable_for_unchanged_behaviour(self, mock_prompt_file, mock_ocr_prompt_file):
-        clean._provider = NoneProvider()
-        assert clean.transcription_fingerprint() == clean.transcription_fingerprint()
+        assert clean.transcription_fingerprint(self.settings) == clean.transcription_fingerprint(
+            self.settings
+        )
 
     def test_editing_the_ocr_prompt_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
         """An edited prompt is supposed to change the answer, so it must miss."""
-        clean._provider = NoneProvider()
-        before = clean.transcription_fingerprint()
+        before = clean.transcription_fingerprint(self.settings)
         mock_ocr_prompt_file.write_text("Transcribe, but in French.")
-        assert clean.transcription_fingerprint() != before
+        assert clean.transcription_fingerprint(self.settings) != before
 
     def test_editing_the_cleanup_prompt_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
-        clean._provider = NoneProvider()
-        before = clean.transcription_fingerprint()
+        before = clean.transcription_fingerprint(self.settings)
         mock_prompt_file.write_text("Clean this text, and shout.")
-        assert clean.transcription_fingerprint() != before
+        assert clean.transcription_fingerprint(self.settings) != before
 
-    def test_switching_the_model_changes_it(self, mock_prompt_file, mock_ocr_prompt_file):
-        clean._provider = UniversalChatProvider("https://x/v1", api_key="k", model="gpt-4o-mini")
-        before = clean.transcription_fingerprint()
-        clean._provider = UniversalChatProvider("https://x/v1", api_key="k", model="gpt-4o")
-        assert clean.transcription_fingerprint() != before
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("ai_provider", "gemini"),
+            ("ai_model", "gpt-4o"),
+            ("ai_temperature", 0.9),
+            ("ai_language", "fr"),
+        ],
+    )
+    def test_changing_an_input_changes_it(
+        self, field, value, mock_prompt_file, mock_ocr_prompt_file
+    ):
+        before = clean.transcription_fingerprint(self.settings)
+        after = dataclasses.replace(self.settings, **{field: value})
+        assert clean.transcription_fingerprint(after) != before
+
+    def test_it_builds_no_provider(self, mock_prompt_file, mock_ocr_prompt_file, monkeypatch):
+        """Change detection runs it before any page reaches OCR."""
+
+        def explode(*args, **kwargs):
+            raise AssertionError("transcription_fingerprint must not construct a provider")
+
+        monkeypatch.setattr(clean, "get_provider", explode)
+        monkeypatch.setattr(clean, "_provider", None)
+        assert clean.transcription_fingerprint(self.settings)
 
     def test_it_is_short_enough_to_print(self, mock_prompt_file, mock_ocr_prompt_file):
-        clean._provider = NoneProvider()
-        assert len(clean.transcription_fingerprint()) == 16
+        assert len(clean.transcription_fingerprint(self.settings)) == 16
