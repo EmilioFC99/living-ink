@@ -169,7 +169,11 @@ class SyncCommand(BaseCommand):
             args: Parsed arguments for sync.
 
         Returns:
-            0 on success, or exits with 1 on failure.
+            0 on success, 1 on a failure the user has to fix, 2 on a usage
+            error. Never exits: the code travels back to ``main``, which is
+            the only place that calls :func:`sys.exit`, so a library caller —
+            and ``watch``, which runs this in a loop — can decide what a
+            failure means.
         """
         if getattr(args, "transcribe", False) and not getattr(args, "preview", False):
             # A rehearsal nobody asked to watch is just a sync that throws the
@@ -199,9 +203,7 @@ class SyncCommand(BaseCommand):
             return self._handle_missing_config(e, args)
         except TransportUnavailable as e:
             return self._report_unreachable(e)
-        if not success:
-            sys.exit(1)
-        return 0
+        return 0 if success else 1
 
     def _report_unreachable(self, error: TransportUnavailable) -> int:
         """Report that there was no route to the tablet, without a traceback.
@@ -324,8 +326,14 @@ class SyncCommand(BaseCommand):
 
         try:
             choice = input("Would you like to run the interactive setup wizard now? [Y/n]: ")
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
+            # No answer available: the config problem stands, unfixed.
             return 1
+        except KeyboardInterrupt:
+            # Declining the wizard is "n". Ctrl+C is the user leaving, and it
+            # exits 130 like every other interrupt rather than looking like a
+            # configuration failure they chose not to fix.
+            raise
 
         if choice.strip().lower() not in ("", "y", "yes"):
             return 1

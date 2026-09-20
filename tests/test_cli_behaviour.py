@@ -49,6 +49,8 @@ if anything opens a socket or a subprocess anyway.
 from __future__ import annotations
 
 import argparse
+import ast
+import inspect
 import itertools
 import json
 import os
@@ -1320,8 +1322,57 @@ class TestAnUnreachableTabletIsReportedNotRaised:
         from living_ink.transport import TransportUnavailable
 
         run = cli("watch", "--interval", "1", fails_with=TransportUnavailable("no route"))
-        assert run.exit_code == 0
+        # 130, not 0: the loop ended because the harness pressed Ctrl+C during
+        # the wait, and a watch has no other way out. The missed cycle is
+        # visible as a completed ``pipeline.run``, not as the exit code.
+        assert run.exit_code == 130
         assert "pipeline.run" in run.calls
+
+
+class TestTheFourExitCodes:
+    """0, 1, 2 and 130 are the interface a script branches on.
+
+    They were not four before: a command called ``sys.exit`` directly, ``watch``
+    answered a Ctrl+C with 0, and an interrupt at a prompt was reported as an
+    ordinary failure. Anything that ends a run has to land on one of these four,
+    and each one has to mean only what it says.
+    """
+
+    def test_a_completed_sync_is_zero(self, cli):
+        assert cli("sync").exit_code == 0
+
+    def test_a_sync_that_could_not_finish_is_one(self, cli):
+        from living_ink.transport import TransportUnavailable
+
+        assert cli("sync", fails_with=TransportUnavailable("no route")).exit_code == 1
+
+    def test_a_usage_error_is_two(self, cli):
+        assert cli("sync", "--limit", "half").exit_code == 2
+
+    def test_an_interrupt_anywhere_is_a_hundred_and_thirty(self, cli):
+        """Not 1, and above all not 0 — the user stopped it, nothing failed."""
+        assert cli("sync", fails_with=KeyboardInterrupt()).exit_code == 130
+
+    @pytest.mark.parametrize("command", ["sync", "watch", "setup", "info"])
+    def test_a_command_never_exits_the_process_itself(self, command):
+        """``watch`` runs ``sync`` in a loop, and a process exit cannot be caught.
+
+        ``SyncCommand.run`` used to call ``sys.exit(1)`` on a failed sync,
+        which would have ended the daemon on the first bad cycle the moment
+        the loop called anything but ``execute_sync``. ``main`` is the one
+        place that exits.
+        """
+        tree = ast.parse(inspect.getsource(LivingInkCLI().commands[command]))
+        called = {ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+
+        assert not called & {"sys.exit", "exit", "quit", "os._exit"}
+
+    def test_help_says_what_they_mean(self, cli):
+        """A code nobody documented is one a script cannot safely branch on."""
+        run = cli("--help")
+
+        for code in ("0", "1", "2", "130"):
+            assert f"  {code}" in run.stdout, code
 
 
 class TestPreviewIsADifferentCommandInDisguise:

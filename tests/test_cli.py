@@ -741,20 +741,25 @@ class TestWatchCommand:
             interval: Value for --interval.
 
         Returns:
-            (exit code, execute_sync mock, sleep mock).
+            (exit code, execute_sync mock, sleep mock). The interrupt is
+            turned into 130 here exactly the way ``main`` turns it into 130,
+            so each test can state what the shell would see.
         """
         args = argparse.Namespace(interval=interval)
         with (
             patch.object(SyncCommand, "execute_sync", side_effect=side_effects) as sync,
             patch("living_ink.cli.commands.watch.time.sleep") as sleep,
         ):
-            code = WatchCommand().run(args)
+            try:
+                code = WatchCommand().run(args)
+            except KeyboardInterrupt:
+                code = 130
         return code, sync, sleep
 
     def test_syncs_repeatedly_until_interrupted(self):
         code, sync, sleep = self._watch([True, True, KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 3
         assert sleep.call_count == 2
 
@@ -762,14 +767,29 @@ class TestWatchCommand:
         """An unplugged tablet is the condition watch exists to ride out."""
         code, sync, _ = self._watch([False, KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 2
 
     def test_an_unexpected_error_does_not_end_the_watch(self):
         code, sync, _ = self._watch([RuntimeError("tablet vanished"), KeyboardInterrupt()])
 
-        assert code == 0
+        assert code == 130
         assert sync.call_count == 2
+
+    def test_a_stopped_watch_is_never_reported_as_a_clean_finish(self):
+        """Converting Ctrl+C to 0 is what makes a supervised watch unstoppable.
+
+        `launchd` with `KeepAlive` and systemd with `Restart=always` both read
+        exit 0 as "the job is done" and start it straight back up, so the
+        interrupt has to leave the loop intact for `main` to answer 130.
+        """
+        args = argparse.Namespace(interval=30)
+        with (
+            patch.object(SyncCommand, "execute_sync", side_effect=KeyboardInterrupt),
+            patch("living_ink.cli.commands.watch.time.sleep"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            WatchCommand().run(args)
 
     def test_a_missing_config_stops_the_watch(self):
         """That failure will still be there next tick, so looping is pointless."""
@@ -794,13 +814,15 @@ class TestWatchCommand:
 
         sleep.assert_called_once_with(WatchCommand.MIN_INTERVAL)
 
-    def test_interrupting_the_wait_stops_cleanly(self):
+    def test_interrupting_the_wait_stops_it_the_same_way(self):
+        """Ctrl+C lands in the sleep far more often than in a sync."""
         args = argparse.Namespace(interval=30)
         with (
             patch.object(SyncCommand, "execute_sync", return_value=True),
             patch("living_ink.cli.commands.watch.time.sleep", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
         ):
-            assert WatchCommand().run(args) == 0
+            WatchCommand().run(args)
 
     def test_watch_is_registered_and_takes_every_sync_option(self):
         parser = LivingInkCLI().build_parser()

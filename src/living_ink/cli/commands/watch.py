@@ -55,7 +55,12 @@ class WatchCommand(BaseCommand):
             args: Parsed arguments — every sync option, plus ``--interval``.
 
         Returns:
-            0 when interrupted, 1 if configuration is missing or unusable.
+            1 if configuration is missing or unusable. There is no successful
+            return: the only other way out is Ctrl+C, which propagates.
+
+        Raises:
+            KeyboardInterrupt: When the user stops the watch, so ``main``
+                exits 130.
         """
         interval = max(self.MIN_INTERVAL, getattr(args, "interval", self.DEFAULT_INTERVAL))
         syncer = SyncCommand(root=self.root)
@@ -74,7 +79,8 @@ class WatchCommand(BaseCommand):
                 print(e.hint)
                 return 1
             except KeyboardInterrupt:
-                return self._stopped()
+                self._stopped()
+                raise
             except Exception as e:
                 # Deliberately broad. A daemon that exits on the first
                 # unexpected error is a daemon that is not running when the
@@ -86,15 +92,18 @@ class WatchCommand(BaseCommand):
                 print(f"Next sync in {interval}s.")
                 time.sleep(interval)
             except KeyboardInterrupt:
-                return self._stopped()
+                self._stopped()
+                raise
 
     @staticmethod
-    def _stopped() -> int:
-        """Report a clean shutdown after Ctrl+C.
+    def _stopped() -> None:
+        """Say that the watch is over; the caller re-raises the interrupt.
 
-        Returns:
-            0 — an interrupted watch is the intended way to end one, not a
-            failure, so systemd and launchd should not treat it as a crash.
+        Ctrl+C is never converted to an exit code here, and the caller's
+        ``raise`` is the whole point. A supervisor — launchd ``KeepAlive``,
+        systemd ``Restart=always`` — reads 0 as "the job finished" and starts
+        the daemon straight back up, so returning 0 on an interrupt is what
+        would make stopping a watch impossible. ``main`` turns it into 130,
+        which a supervisor can be told to leave alone.
         """
         print("\nStopped watching.")
-        return 0

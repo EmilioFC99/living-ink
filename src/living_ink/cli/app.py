@@ -163,6 +163,18 @@ class LivingInkCLI:
         parser = argparse.ArgumentParser(
             prog="living-ink",
             description="Sync handwritten reMarkable notebooks to an Obsidian vault.",
+            # Documented rather than merely implemented: these are what a
+            # scheduler, a supervisor and a shell script branch on, so they
+            # are part of the interface. 2 is both a usage error and
+            # argparse's own code for one; the overlap is deliberate.
+            epilog=(
+                "exit codes:\n"
+                "  0   success\n"
+                "  1   failure — something the user has to fix\n"
+                "  2   usage error\n"
+                "  130 interrupted with Ctrl+C\n"
+            ),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         parser.add_argument(
             "-v",
@@ -240,7 +252,12 @@ class LivingInkCLI:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    """Main CLI entry point.
+    """Main CLI entry point, and the only place the process exits.
+
+    The four codes — 0 success, 1 failure, 2 usage error, 130 interrupt — are
+    decided here and nowhere else. A command returns one; it never calls
+    :func:`sys.exit`, because ``watch`` runs ``sync`` in a loop and a library
+    caller runs both, and neither can catch a process exit.
 
     Args:
         argv: Optional list of CLI arguments (defaults to sys.argv[1:]).
@@ -252,8 +269,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         code = cli.run(argv)
     except KeyboardInterrupt:
-        # Ctrl+C is how a user ends a long sync. A traceback would suggest
-        # something broke; 130 is what a shell expects from SIGINT.
+        # Ctrl+C is how a user ends a long sync or a watch, and every loop
+        # below re-raises rather than converting it. A traceback would suggest
+        # something broke; 130 is what a shell expects from SIGINT, and what a
+        # supervisor can be told not to restart.
         sys.exit(130)
     if isinstance(code, int) and code != 0:
         sys.exit(code)

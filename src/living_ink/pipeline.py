@@ -697,9 +697,16 @@ def select_notebook_interactive(
                 .strip()
                 .lower()
             )
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
+            # Stdin closed under a prompt we already decided was interactive:
+            # nothing left to ask, so select nothing rather than everything.
             print_func("\nCancelled by user.")
             return []
+        except KeyboardInterrupt:
+            # Ctrl+C is not "process no notebooks", it is "end this run", and
+            # only the entry point may decide what that exits with (130).
+            print_func("\nCancelled by user.")
+            raise
 
         if raw in ("", "a", "all"):
             return matches
