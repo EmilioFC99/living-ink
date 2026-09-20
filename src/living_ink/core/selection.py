@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 #: where they are read: "why was my notebook not picked up" is the question.
 TRASHED = "in the trash"
 WRONG_TYPE = "type not enabled"
+EXCLUDED = "in an excluded folder"
 OUTSIDE_FOLDER = "outside the selected folder"
 NO_MATCHING_TAG = "no matching tag"
 NOT_TARGETED = "not the requested notebook"
@@ -73,6 +74,10 @@ class SelectionCriteria:
         source_regex: Case-sensitive regex on the folder path. Mutually
             exclusive with :attr:`source_path` — two filters over one field
             silently intersect, and a user who passes both means one of them.
+        exclude: Folder names never synced — ``Templates`` and ``Quick
+            sheets`` by default. Matched against each segment of the folder
+            path, so excluding ``Templates`` excludes what is under it too.
+            Trash is not in here: it is excluded unconditionally.
         target: A notebook named on the command line, by id, title or path.
             Narrows to that document and nothing else.
         tags: Match any of these. Empty means no tag filter. Reading tags costs
@@ -85,6 +90,7 @@ class SelectionCriteria:
 
     source_path: Optional[str] = None
     source_regex: Optional[str] = None
+    exclude: FrozenSet[str] = frozenset()
     target: Optional[str] = None
     tags: FrozenSet[str] = frozenset()
     types: FrozenSet[str] = frozenset()
@@ -282,6 +288,8 @@ def _out_of_scope(
         return None
 
     folder = get_notebook_path(item, id_map)
+    if _is_excluded(folder, criteria.exclude):
+        return EXCLUDED
     if criteria.source_path and criteria.source_path.lower() not in folder.lower():
         return OUTSIDE_FOLDER
     if criteria.source_regex and not re.search(criteria.source_regex, folder):
@@ -291,6 +299,26 @@ def _out_of_scope(
         return WRONG_TYPE
 
     return None
+
+
+def _is_excluded(folder: str, exclude: FrozenSet[str]) -> bool:
+    """Whether a folder path sits under any of the excluded names.
+
+    Matched per segment rather than as a substring: ``Templates`` must not
+    also exclude a folder called ``My Templates Archive``, and excluding a
+    folder has to exclude everything beneath it.
+
+    Args:
+        folder: The document's folder path, ``" / "``-joined.
+        exclude: The excluded folder names, however the user cased them.
+
+    Returns:
+        True if the document is in or under an excluded folder.
+    """
+    if not exclude or not folder:
+        return False
+    wanted = {name.strip().lower() for name in exclude if name.strip()}
+    return any(segment.strip().lower() in wanted for segment in folder.split(" / "))
 
 
 def _classify(

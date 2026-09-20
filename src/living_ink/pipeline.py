@@ -1272,6 +1272,11 @@ class SyncPipeline:
         return SelectionCriteria(
             target=self.target_notebook,
             types=types,
+            # Both come from the config file and had no reader at all, so
+            # ``config`` and ``info`` reported Templates and Quick Sheets as
+            # excluded while every run rendered and transcribed them at cost.
+            exclude=frozenset(self.settings.sync_exclude or ()),
+            tags=frozenset(self.settings.sync_tags or ()),
             # A named notebook is not part of a sweep, so the sweep's cap does
             # not apply to it — and applying it would deal the second of two
             # same-named matches into ``deferred``, where the prompt that asks

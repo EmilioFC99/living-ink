@@ -871,7 +871,13 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
         # No limit and no type filter: a preview answers "where does everything
         # stand", and a document this run's flags would skip still has a state
         # worth reporting. The limit belongs to the run, not to the question.
-        SelectionCriteria(),
+        #
+        # The exclusions are the exception, and they are here because they are
+        # not a flag: a folder the config says is never synced is not pending,
+        # and reporting it as pending is the preview and the run disagreeing.
+        # ``sync.tags`` stays out — applying it means one round trip per
+        # document, which is not what a status question should cost.
+        SelectionCriteria(exclude=frozenset(settings.sync_exclude or ())),
         store,
         destinations,
         settings=settings,

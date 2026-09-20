@@ -13,6 +13,7 @@ import pytest
 from living_ink.config import Setting, settings_for_section
 from living_ink.core.recipe import document_recipe
 from living_ink.core.selection import (
+    EXCLUDED,
     NO_MATCHING_TAG,
     NOT_TARGETED,
     OUTSIDE_FOLDER,
@@ -452,6 +453,70 @@ class TestNarrowingByFolderTypeAndTag:
     def test_a_broken_regex_is_refused_before_the_tablet_is_contacted(self):
         with pytest.raises(ValueError, match="invalid folder regex"):
             SelectionCriteria(source_regex="Work(")
+
+    def test_an_excluded_folder_is_never_synced(self, store, settings):
+        """``sync.exclude`` was declared, defaulted and read by nothing.
+
+        Templates and Quick Sheets were rendered and transcribed on every run,
+        at real API cost, while ``config`` reported them as excluded.
+        """
+        listing = [
+            folder("f-1", "Templates"),
+            doc("doc-1", "Grid", parent="f-1"),
+            doc("doc-2", "Standup"),
+        ]
+        criteria = SelectionCriteria(exclude=frozenset({"Templates"}))
+
+        chosen = select(listing, criteria, store, [Vault()], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-2"]
+        assert [reason for _, reason in chosen.skipped] == [EXCLUDED]
+
+    def test_an_exclusion_reaches_everything_beneath_it(self, store, settings):
+        listing = [
+            folder("f-1", "Templates"),
+            folder("f-2", "Grids", parent="f-1"),
+            doc("doc-1", "Dotted", parent="f-2"),
+        ]
+
+        chosen = select(
+            listing,
+            SelectionCriteria(exclude=frozenset({"templates"})),
+            store,
+            [Vault()],
+            settings=settings,
+        )
+
+        assert chosen.to_process == ()
+
+    def test_an_exclusion_matches_a_whole_segment_not_a_substring(self, store, settings):
+        """Excluding ``Templates`` must not also exclude ``My Templates 2024``."""
+        listing = [
+            folder("f-1", "My Templates 2024"),
+            doc("doc-1", "Notes", parent="f-1"),
+        ]
+
+        chosen = select(
+            listing,
+            SelectionCriteria(exclude=frozenset({"Templates"})),
+            store,
+            [Vault()],
+            settings=settings,
+        )
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
+
+    def test_naming_a_notebook_overrides_the_exclusions(self, store, settings):
+        """Exclusions narrow a sweep; asking for one document is not a sweep."""
+        listing = [
+            folder("f-1", "Templates"),
+            doc("doc-1", "Grid", parent="f-1"),
+        ]
+        criteria = SelectionCriteria(target="Grid", exclude=frozenset({"Templates"}))
+
+        chosen = select(listing, criteria, store, [Vault()], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
 
     def test_a_type_filter_replaces_rather_than_adds(self, store, settings):
         listing = [doc("doc-1", "Standup"), doc("doc-2", "Manual.pdf")]
