@@ -30,10 +30,13 @@ from living_ink.config import (
 )
 from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.core.listing import (
+    document_id,
+    document_modified,
+    document_name,
     document_version,
     get_document_type,
     get_notebook_path,
-    get_val,
+    is_document,
 )
 from living_ink.core.selection import (
     NOT_TARGETED,
@@ -601,21 +604,16 @@ def to_iso_date(value: Any) -> Optional[str]:
 
 def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any] = None) -> str:
     """Format a notebook item description for display in selection prompts."""
-    name = str(
-        get_val(item, "VissibleName")
-        or get_val(item, "VisibleName")
-        or getattr(item, "name", "")
-        or "Untitled"
-    )
+    name = document_name(item) or "Untitled"
     folder = get_notebook_path(item, id_map)
     title = f"{folder} / {name}" if folder else name
-    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "")
+    doc_id = document_id(item)
     short_id = doc_id[:8] if len(doc_id) > 8 else doc_id
 
     doc_type = get_document_type(item, client)
     type_badge = f" [{doc_type.upper()}]" if doc_type in ("pdf", "epub") else ""
 
-    modified = to_datetime(get_val(item, "ModifiedClient") or getattr(item, "last_modified", None))
+    modified = to_datetime(document_modified(item))
     mod_str = "" if modified is None else f" (modified: {modified.strftime('%Y-%m-%d %H:%M')})"
 
     id_label = f" [ID: {short_id}]" if short_id else ""
@@ -725,11 +723,11 @@ def _item_version(item: Any) -> Any:
     Returns:
         The item's hash, else its integer version, else 1.
     """
-    item_hash = get_val(item, "hash")
+    item_hash = getattr(item, "hash", None)
     if item_hash:
         return item_hash
     try:
-        return int(get_val(item, "Version"))
+        return int(getattr(item, "version", None))
     except (ValueError, TypeError):
         return 1
 
@@ -797,9 +795,7 @@ class DocumentJob:
             never substituted, because "the tablet did not say" and "the tablet
             said today" are different facts.
         """
-        return to_datetime(
-            get_val(self.item, "ModifiedClient") or getattr(self.item, "last_modified", None)
-        )
+        return to_datetime(document_modified(self.item))
 
     def page_number(self, index: int) -> int:
         """Return the document page number for the given transcript index.
@@ -1157,7 +1153,7 @@ class SyncPipeline:
             ``--notebook`` named something the library does not contain, which
             is a failed run rather than an empty one.
         """
-        id_map = {get_val(item, "ID"): item for item in listing}
+        id_map = {document_id(item): item for item in listing}
         self._record_inventory(listing, id_map)
 
         chosen = select(
@@ -1237,9 +1233,9 @@ class SyncPipeline:
             id_map: Every listed item by id, for resolving folder paths.
         """
         for item in listing:
-            if get_val(item, "Type") != "DocumentType":
+            if not is_document(item):
                 continue
-            self._record_seen_document(item, get_val(item, "ID"), document_version(item), id_map)
+            self._record_seen_document(item, document_id(item), document_version(item), id_map)
 
     def _record_seen_document(
         self, item: Any, doc_id: str, version: Any, id_map: Dict[str, Any]
@@ -1257,8 +1253,8 @@ class SyncPipeline:
             id_map: Map of id to document, for resolving the folder path.
         """
         try:
-            name = str(get_val(item, "VissibleName") or get_val(item, "VisibleName") or "").strip()
-            mod = get_val(item, "ModifiedClient") or getattr(item, "last_modified", None)
+            name = document_name(item)
+            mod = document_modified(item)
             get_state_store().record_document(
                 doc_id,
                 name=name or None,
@@ -2608,7 +2604,7 @@ class SyncPipeline:
         self._learn_device(client)
 
         listing = list(client.get_meta_items())
-        id_map = {get_val(item, "ID"): item for item in listing}
+        id_map = {document_id(item): item for item in listing}
         chosen = self.select_documents(listing, client)
         if chosen is None:
             return False
@@ -2672,7 +2668,7 @@ class SyncPipeline:
             self.report.add(
                 DocumentOutcome(
                     name=self._selection_label(item),
-                    doc_id=getattr(item, "doc_id", None) or get_val(item, "ID"),
+                    doc_id=getattr(item, "doc_id", None) or document_id(item),
                     status=SKIPPED,
                     reason=reason,
                 )
@@ -2702,12 +2698,7 @@ class SyncPipeline:
         """
         if isinstance(item, Candidate):
             return item.name or item.doc_id
-        return str(
-            get_val(item, "VissibleName")
-            or get_val(item, "VisibleName")
-            or get_val(item, "ID")
-            or "(unnamed)"
-        )
+        return document_name(item) or document_id(item) or "(unnamed)"
 
     def _print_summary(self) -> None:
         """Print the run summary, as a table or as JSON.

@@ -154,7 +154,7 @@ def rows_from_selection(
         and ``published``. Documents the classifier never reached, because they
         are in the trash, are absent.
     """
-    from living_ink.core.listing import get_val
+    from living_ink.core.listing import document_id
     from living_ink.core.selection import Candidate
     from living_ink.state import DocumentView, classify
 
@@ -171,7 +171,7 @@ def rows_from_selection(
 
     rows: list[dict[str, Any]] = []
     for item in collection:
-        candidate = judged.get(get_val(item, "ID"))
+        candidate = judged.get(document_id(item))
         if candidate is None:
             continue
 

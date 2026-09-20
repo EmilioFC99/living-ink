@@ -20,6 +20,7 @@ from living_ink.api import (
 )
 from living_ink.config.credentials import CLOUD_TOKEN, read_secret, write_secret
 from living_ink.transport import TransportUnavailable, UnsupportedOperation
+from tests.fixtures.listing import make_item
 
 
 def test_get_rmapi_ssh_preferred_connected(monkeypatch, tmp_path):
@@ -255,7 +256,7 @@ class TestTransportHelpers:
         """An unsupported transport leaves the name as the only signal."""
         client = MagicMock()
         client.get_file_type.side_effect = UnsupportedOperation("no")
-        doc = MagicMock(VissibleName="Contract.pdf")
+        doc = make_item("doc-1", "Contract.pdf")
 
         assert get_file_type(client, doc) == "pdf"
 
@@ -263,7 +264,7 @@ class TestTransportHelpers:
         """A plain name with no extension is a notebook."""
         client = MagicMock()
         client.get_file_type.return_value = None
-        doc = MagicMock(VissibleName="Meeting Notes")
+        doc = make_item("doc-1", "Meeting Notes")
 
         assert get_file_type(client, doc) == "notebook"
 

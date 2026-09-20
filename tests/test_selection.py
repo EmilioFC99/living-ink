@@ -28,6 +28,7 @@ from living_ink.destinations.base import Destination, DestinationStatus
 from living_ink.settings import Settings
 from living_ink.sources import source_for_name
 from living_ink.state import StateStore
+from tests.fixtures.listing import make_item
 
 
 class Vault(Destination):
@@ -89,21 +90,14 @@ def store(tmp_path):
 
 
 def doc(doc_id="doc-1", name="Notes", parent="", **fields):
-    """Build a listing entry, spelled the way a transport spells one."""
-    entry = {
-        "ID": doc_id,
-        "Type": "DocumentType",
-        "VissibleName": name,
-        "Parent": parent,
-        "hash": "v1",
-    }
-    entry.update(fields)
-    return entry
+    """Build a listing entry, the shape both transports hand back."""
+    fields.setdefault("content_hash", "v1")
+    return make_item(doc_id, name, parent=parent, **fields)
 
 
 def folder(folder_id, name, parent=""):
     """Build a folder entry."""
-    return {"ID": folder_id, "Type": "CollectionType", "VissibleName": name, "Parent": parent}
+    return make_item(folder_id, name, doc_type="CollectionType", parent=parent)
 
 
 def publish(store, candidate, dest, settings, *, version=None, recipe=None):
@@ -587,7 +581,7 @@ class TestNarrowingByPathTypeAndTag:
     def test_a_tag_filter_drops_the_untagged(self, store, settings):
         class Tagged:
             def get_tags(self, item):
-                return ["work"] if item["ID"] == "doc-1" else []
+                return ["work"] if item.id == "doc-1" else []
 
             def get_file_type(self, item):
                 return ""
@@ -606,7 +600,7 @@ class TestNarrowingByPathTypeAndTag:
 
         class Tagged:
             def get_tags(self, item):
-                asked.append(item["ID"])
+                asked.append(item.id)
                 return ["work"]
 
             def get_file_type(self, item):

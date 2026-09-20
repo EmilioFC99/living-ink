@@ -18,6 +18,7 @@ from living_ink.extract import (
 )
 from living_ink.pipeline import get_document_type
 from tests.builders import make_both, make_page
+from tests.fixtures.listing import make_item
 
 
 class TestDocumentTypeDetection:
@@ -26,40 +27,32 @@ class TestDocumentTypeDetection:
     def test_detects_via_client_get_file_type(self):
         client = MagicMock()
         client.get_file_type.return_value = "pdf"
-        item = {"ID": "doc-1", "VissibleName": "My Document"}
+        item = make_item("doc-1", "My Document")
         assert get_document_type(item, client) == "pdf"
 
         client.get_file_type.return_value = "epub"
         assert get_document_type(item, client) == "epub"
 
     def test_detects_via_files_metadata(self):
-        item_pdf = {
-            "ID": "doc-1",
-            "VissibleName": "Book",
-            "files": [{"id": "doc-1.content"}, {"id": "doc-1.pdf"}],
-        }
+        item_pdf = make_item("doc-1", "Book", files=[{"id": "doc-1.content"}, {"id": "doc-1.pdf"}])
         assert get_document_type(item_pdf) == "pdf"
 
-        item_epub = {
-            "ID": "doc-2",
-            "VissibleName": "Novel",
-            "files": [{"id": "doc-2.content"}, {"id": "doc-2.epub"}],
-        }
+        item_epub = make_item(
+            "doc-2", "Novel", files=[{"id": "doc-2.content"}, {"id": "doc-2.epub"}]
+        )
         assert get_document_type(item_epub) == "epub"
 
     def test_detects_via_filename_extension(self):
-        item_pdf = {"ID": "doc-1", "VissibleName": "Report.pdf"}
+        item_pdf = make_item("doc-1", "Report.pdf")
         assert get_document_type(item_pdf) == "pdf"
 
-        item_epub = {"ID": "doc-2", "VissibleName": "Ebook.epub"}
+        item_epub = make_item("doc-2", "Ebook.epub")
         assert get_document_type(item_epub) == "epub"
 
     def test_defaults_to_notebook(self):
-        item_nb = {
-            "ID": "doc-1",
-            "VissibleName": "My Meeting Notes",
-            "files": [{"id": "doc-1.content"}, {"id": "page1.rm"}],
-        }
+        item_nb = make_item(
+            "doc-1", "My Meeting Notes", files=[{"id": "doc-1.content"}, {"id": "page1.rm"}]
+        )
         assert get_document_type(item_nb) == "notebook"
 
 

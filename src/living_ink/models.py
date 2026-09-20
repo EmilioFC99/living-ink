@@ -16,10 +16,12 @@ from typing import Any, Dict, List, Optional
 class Document:
     """A document or folder in a reMarkable library.
 
-    The ``VissibleName`` / ``ID`` / ``Parent`` / ``Type`` / ``ModifiedClient``
-    properties exist because the pipeline reads items through
-    ``pipeline.get_val()``, which speaks the original rmapy attribute names.
-    They are read-only aliases, not separate state — do not add more.
+    The field names here are the only names for these facts. There used to be
+    ``VissibleName`` / ``ID`` / ``Parent`` / ``Type`` / ``ModifiedClient``
+    properties alongside them, aliasing five of these fields under rmapy's
+    spellings so that a getter taking its key as a string could find them; the
+    readers in :mod:`living_ink.core.listing` are typed now, so a misspelling
+    is an ``AttributeError`` rather than a document with no title.
 
     Attributes:
         id: reMarkable document UUID.
@@ -58,28 +60,3 @@ class Document:
     def is_folder(self) -> bool:
         """Whether this entry is a folder rather than a document."""
         return self.doc_type == "CollectionType"
-
-    @property
-    def VissibleName(self) -> str:
-        """Alias for ``name`` (rmapy spelling, typo and all)."""
-        return self.name
-
-    @property
-    def ID(self) -> str:
-        """Alias for ``id`` (rmapy naming)."""
-        return self.id
-
-    @property
-    def Parent(self) -> str:
-        """Alias for ``parent`` (rmapy naming)."""
-        return self.parent
-
-    @property
-    def Type(self) -> str:
-        """Alias for ``doc_type`` (rmapy naming)."""
-        return self.doc_type
-
-    @property
-    def ModifiedClient(self) -> Optional[datetime]:
-        """Alias for ``last_modified`` (rmapy naming)."""
-        return self.last_modified

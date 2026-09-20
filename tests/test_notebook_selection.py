@@ -5,22 +5,7 @@ from unittest.mock import MagicMock
 
 from living_ink.core.listing import matches_notebook_target, normalize_path_str
 from living_ink.pipeline import format_notebook_item, select_notebook_interactive
-
-
-class DummyItem:
-    """Helper mock item with dict-like and attr-like properties."""
-
-    def __init__(self, item_id: str, name: str, parent: str = "", modified=None):
-        self.id = item_id
-        self.ID = item_id
-        self.name = name
-        self.VisibleName = name
-        self.VissibleName = name
-        self.Parent = parent
-        self.parent = parent
-        self.Type = "DocumentType"
-        self.ModifiedClient = modified
-        self.last_modified = modified
+from tests.fixtures.listing import make_folder, make_item
 
 
 class TestPathNormalization:
@@ -40,40 +25,40 @@ class TestMatchesNotebookTarget:
     """Tests for matches_notebook_target."""
 
     def setup_method(self):
-        self.folder_work = DummyItem("f1", "Work", parent="")
-        self.folder_proj = DummyItem("f2", "Projects", parent="f1")
+        self.folder_work = make_folder("f1", "Work")
+        self.folder_proj = make_folder("f2", "Projects", parent="f1")
         self.id_map = {
             "f1": self.folder_work,
             "f2": self.folder_proj,
         }
 
     def test_match_by_exact_name(self):
-        doc = DummyItem("doc1", "Notes", parent="f1")
+        doc = make_item("doc1", "Notes", parent="f1")
         assert matches_notebook_target(doc, "Notes", self.id_map) is True
         assert matches_notebook_target(doc, "notes", self.id_map) is True
 
     def test_match_by_document_id(self):
-        doc = DummyItem("uuid-1234-abcd", "Notes", parent="f1")
+        doc = make_item("uuid-1234-abcd", "Notes", parent="f1")
         assert matches_notebook_target(doc, "uuid-1234-abcd", self.id_map) is True
         assert matches_notebook_target(doc, "UUID-1234-ABCD", self.id_map) is True
 
     def test_match_by_folder_path_slash(self):
-        doc = DummyItem("doc1", "Sprint", parent="f1")
+        doc = make_item("doc1", "Sprint", parent="f1")
         assert matches_notebook_target(doc, "Work/Sprint", self.id_map) is True
         assert matches_notebook_target(doc, "work/sprint", self.id_map) is True
 
     def test_match_by_folder_path_spaced(self):
-        doc = DummyItem("doc1", "Sprint", parent="f1")
+        doc = make_item("doc1", "Sprint", parent="f1")
         assert matches_notebook_target(doc, "Work / Sprint", self.id_map) is True
         assert matches_notebook_target(doc, "  work  /  sprint  ", self.id_map) is True
 
     def test_match_nested_folder_path(self):
-        doc = DummyItem("doc1", "Milestones", parent="f2")
+        doc = make_item("doc1", "Milestones", parent="f2")
         assert matches_notebook_target(doc, "Work/Projects/Milestones", self.id_map) is True
         assert matches_notebook_target(doc, "Work / Projects / Milestones", self.id_map) is True
 
     def test_non_matching_query(self):
-        doc = DummyItem("doc1", "Notes", parent="f1")
+        doc = make_item("doc1", "Notes", parent="f1")
         assert matches_notebook_target(doc, "Personal/Notes", self.id_map) is False
         assert matches_notebook_target(doc, "OtherBook", self.id_map) is False
         assert matches_notebook_target(doc, "", self.id_map) is False
@@ -83,15 +68,15 @@ class TestFormatNotebookItem:
     """Tests for format_notebook_item."""
 
     def test_format_without_parent(self):
-        doc = DummyItem("doc-12345678-abcd", "RootNote", parent="")
+        doc = make_item("doc-12345678-abcd", "RootNote", parent="")
         res = format_notebook_item(doc, {})
         assert "RootNote" in res
         assert "[ID: doc-1234]" in res
 
     def test_format_with_parent_and_datetime(self):
-        folder = DummyItem("f1", "Work", parent="")
+        folder = make_folder("f1", "Work")
         dt = datetime.datetime(2026, 9, 16, 15, 30)
-        doc = DummyItem("doc-9999", "SprintPlan", parent="f1", modified=dt)
+        doc = make_item("doc-9999", "SprintPlan", parent="f1", modified=dt)
         res = format_notebook_item(doc, {"f1": folder})
         assert "Work / SprintPlan" in res
         assert "[ID: doc-9999]" in res
@@ -102,8 +87,8 @@ class TestSelectNotebookInteractive:
     """Tests for select_notebook_interactive."""
 
     def setup_method(self):
-        self.doc1 = DummyItem("id1", "Notes", parent="")
-        self.doc2 = DummyItem("id2", "Notes", parent="")
+        self.doc1 = make_item("id1", "Notes", parent="")
+        self.doc2 = make_item("id2", "Notes", parent="")
         self.id_map = {}
 
     def test_single_match_returns_directly(self):

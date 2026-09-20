@@ -395,7 +395,7 @@ def get_file_type(client: RemarkableTransport, doc: Document) -> str:
     except UnsupportedOperation:
         pass
 
-    name = doc.VissibleName.lower()
+    name = doc.name.lower()
     if name.endswith(".pdf"):
         return "pdf"
     elif name.endswith(".epub"):

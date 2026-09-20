@@ -26,6 +26,7 @@ from tests.fixtures.builders import (
     write_folder,
     write_rm,
 )
+from tests.fixtures.listing import make_folder, make_item
 from tests.fixtures.transport import (
     CorpusTransport,
     FakeSSHRunner,
@@ -41,6 +42,8 @@ __all__ = [
     "Layer",
     "PageSpec",
     "UnsupportedCorpusTransport",
+    "make_folder",
+    "make_item",
     "point",
     "stroke",
     "write_document",
