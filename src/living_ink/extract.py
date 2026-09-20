@@ -73,7 +73,7 @@ _JSON_ERRORS = (ValueError, TypeError, KeyError)
 #: monkey-patching, the background compositing, the bounds calculation. It is
 #: part of the render cache key, so a bump correctly invalidates every cached
 #: page image rather than serving output the current code would not produce.
-RENDER_FORMAT_VERSION = 3
+RENDER_FORMAT_VERSION = 4
 
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
@@ -552,15 +552,114 @@ def _get_svg_content_bounds(svg_path: Path) -> Optional[tuple]:
         return None
 
 
+def _toposort_items(items: Any) -> Iterator[Any]:
+    """Order CRDT sequence items by their left/right links, in linear time.
+
+    A drop-in replacement for ``rmscene.crdt_sequence.toposort_items``. The
+    upstream implementation is a layered topological sort that rebuilds its
+    entire dependency dictionary once per layer. A run of typed text is one
+    long chain — every character depends on the one before it — so it has as
+    many layers as it has characters, and the sort costs O(n²). A 32 KB page
+    of typed text took 295 seconds to render on the machine this was written
+    on, almost all of it inside that loop; the same notebook's 58 KB page of
+    pure handwriting takes 0.02 s, because ink is a shallow tree rather than a
+    chain.
+
+    This walks the same layers in the same order and yields the same ids — the
+    tie-break inside a layer is still ``sorted()`` — but it keeps a count of
+    unmet dependencies per node and a reverse index of who is waiting on whom,
+    so each edge is visited once instead of once per layer.
+
+    Args:
+        items: The ``CrdtSequenceItem`` objects to order.
+
+    Yields:
+        The ``CrdtId`` of each item, in sequence order. Ids the items refer to
+        but do not contain (the start and end sentinels) are not yielded.
+
+    Raises:
+        ValueError: If the links do not form a sequence — a cycle, or a set of
+            items that cannot all be reached. Upstream raises ``ValueError``
+            for the first and trips an ``assert`` for the second; both are the
+            same corrupt page, so both are reported the same way.
+    """
+    from rmscene.crdt_sequence import END_MARKER
+
+    item_dict = {item.item_id: item for item in items}
+    if not item_dict:
+        return
+
+    def side_id(item: Any, side: str) -> Any:
+        value = getattr(item, f"{side}_id")
+        if value == END_MARKER or value not in item_dict:
+            if value != END_MARKER:
+                logger.debug("Ignoring unknown %s_id %s of %s", side, value, item)
+            return "__start" if side == "left" else "__end"
+        return value
+
+    # waiting_on[node] is the set of nodes that must be yielded before it.
+    waiting_on: Dict[Any, set] = {}
+    for item in item_dict.values():
+        waiting_on.setdefault(item.item_id, set()).add(side_id(item, "left"))
+        waiting_on.setdefault(side_id(item, "right"), set()).add(item.item_id)
+    for node in [dep for deps in waiting_on.values() for dep in deps]:
+        waiting_on.setdefault(node, set())
+
+    # The reverse index, built once. Rebuilding it per layer is the upstream
+    # cost this function exists to avoid.
+    unblocks: Dict[Any, List[Any]] = {}
+    remaining = {}
+    for node, deps in waiting_on.items():
+        remaining[node] = len(deps)
+        for dep in deps:
+            unblocks.setdefault(dep, []).append(node)
+
+    layer = [node for node, count in remaining.items() if count == 0]
+    settled = 0
+    while layer:
+        if len(layer) == 1 and layer[0] == "__end":
+            settled += 1
+            break
+        yield from sorted(node for node in layer if node in item_dict)
+        nxt: List[Any] = []
+        for node in layer:
+            settled += 1
+            for dependent in unblocks.get(node, ()):
+                remaining[dependent] -= 1
+                if remaining[dependent] == 0:
+                    nxt.append(dependent)
+        layer = nxt
+
+    if settled != len(remaining):
+        raise ValueError("cyclic dependency")
+
+
+#: ``_patch_rmc`` replaces bound attributes with wrappers around whatever it
+#: found there, so running it twice wraps the wrapper. Rendering calls it once
+#: per page, which used to nest a new ``Pen.create`` a page deep.
+_rmc_patched = False
+
+
 def _patch_rmc() -> None:
-    """Ensure rmc's RM_PALETTE and Pen.create are resilient to new pen/color types.
+    """Make rmc survive unknown pen colours and export typed text in linear time.
 
     Upstream rmc omits PenColor.HIGHLIGHT (value 9) from RM_PALETTE, which causes
     KeyError: 9 when converting notes that use the highlighter. This function
     ensures all colors have a fallback and unknown pen types default to Ballpoint.
+    It also swaps rmscene's layered topological sort for :func:`_toposort_items`,
+    which yields the same order without the quadratic rebuild — see that
+    function for what the difference costs on a page of typed text.
+
+    Calling this more than once is a no-op: every patch here wraps or replaces
+    what it found, so a second pass would wrap its own output.
     """
+    global _rmc_patched
+    if _rmc_patched:
+        return
+
     try:
         import rmc.exporters.writing_tools as wt
+        import rmscene.crdt_sequence as cs
         import rmscene.scene_items as si
 
         class SafePalette(dict):
@@ -586,9 +685,16 @@ def _patch_rmc() -> None:
                 return Ballpoint(width, color_id)
 
         wt.Pen.create = safe_create
+
+        # CrdtSequence.__iter__ reads this by module global, so rebinding the
+        # name is enough; there is no other importer of it in rmscene.
+        cs.toposort_items = _toposort_items
     except (ImportError, AttributeError):
         # rmc or rmscene is absent, or an upgrade moved what this patches.
         logger.debug("Could not patch rmc", exc_info=True)
+        return
+
+    _rmc_patched = True
 
 
 def output_size(

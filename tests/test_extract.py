@@ -485,6 +485,138 @@ class TestRenderFingerprintCoversTheGuards:
         assert before != after
 
 
+class TestTypedTextExportsInLinearTime:
+    """A page of typed text is one long CRDT chain, and upstream sorts it badly.
+
+    ``rmscene``'s ``toposort_items`` rebuilds its whole dependency dictionary
+    once per layer, and a run of typed characters has one layer per character,
+    so the sort is O(n²). It cost 107 seconds on a real 32 KB page —
+    :func:`~living_ink.extract._toposort_items` does the same page in 0.12 s.
+
+    These assertions are about *time*, which is unusual and deliberate: the
+    failure this guards against is not a wrong answer, it is a sync that never
+    finishes, and nothing else in the suite would notice.
+    """
+
+    #: Long enough that upstream needs ~9 s for it and the replacement ~0.02 s,
+    #: so the budget below has two orders of magnitude of headroom either way.
+    CHAIN = 8000
+
+    #: Generous by design. A CI runner ten times slower than the machine this
+    #: was measured on still passes with room to spare, while the quadratic
+    #: implementation fails by a factor of nine.
+    BUDGET_SECONDS = 1.0
+
+    @staticmethod
+    def _chain(length):
+        """Build ``length`` items linked head to tail, as typed text is."""
+        from rmscene.crdt_sequence import CrdtSequenceItem
+        from rmscene.tagged_block_common import CrdtId
+
+        ids = [CrdtId(1, i + 1) for i in range(length)]
+        end = CrdtId(0, 0)
+        return [
+            CrdtSequenceItem(
+                item_id,
+                ids[i - 1] if i else end,
+                ids[i + 1] if i + 1 < length else end,
+                0,
+                "x",
+            )
+            for i, item_id in enumerate(ids)
+        ]
+
+    def test_the_patch_installs_the_replacement(self):
+        """An rmscene upgrade that moves the name must fail here, not in timing."""
+        import rmscene.crdt_sequence as cs
+
+        extract._patch_rmc()
+        assert cs.toposort_items is extract._toposort_items
+
+    def test_a_long_chain_sorts_within_the_budget(self):
+        import time
+
+        items = self._chain(self.CHAIN)
+
+        started = time.perf_counter()
+        order = list(extract._toposort_items(items))
+        elapsed = time.perf_counter() - started
+
+        assert len(order) == self.CHAIN
+        assert elapsed < self.BUDGET_SECONDS, f"took {elapsed:.2f}s"
+
+    def test_a_chain_comes_back_in_chain_order(self):
+        items = self._chain(50)
+        assert list(extract._toposort_items(items)) == [i.item_id for i in items]
+
+    def test_the_order_is_the_order_upstream_gives(self):
+        """The point is the speed; changing what a page says would be a bug."""
+        import random
+
+        from rmscene.crdt_sequence import toposort_items
+
+        for seed in range(5):
+            items = self._chain(200)
+            random.Random(seed).shuffle(items)
+            assert list(extract._toposort_items(items)) == list(toposort_items(items))
+
+    def test_no_items_is_not_an_error(self):
+        assert list(extract._toposort_items([])) == []
+
+    def test_a_link_to_an_absent_item_is_ignored(self):
+        """Upstream treats an unknown neighbour as the end of the sequence."""
+        from rmscene.crdt_sequence import CrdtSequenceItem, toposort_items
+        from rmscene.tagged_block_common import CrdtId
+
+        absent = CrdtId(9, 9)
+        items = [
+            CrdtSequenceItem(CrdtId(1, 5), absent, CrdtId(1, 6), 0, "a"),
+            CrdtSequenceItem(CrdtId(1, 6), CrdtId(1, 5), absent, 0, "b"),
+            CrdtSequenceItem(CrdtId(1, 7), CrdtId(0, 0), CrdtId(0, 0), 0, "c"),
+        ]
+        assert list(extract._toposort_items(items)) == list(toposort_items(items))
+
+    def test_a_cycle_is_reported_rather_than_looped_on(self):
+        from rmscene.crdt_sequence import CrdtSequenceItem
+        from rmscene.tagged_block_common import CrdtId
+
+        a, b = CrdtId(1, 1), CrdtId(1, 2)
+        items = [
+            CrdtSequenceItem(a, b, b, 0, "a"),
+            CrdtSequenceItem(b, a, a, 0, "b"),
+        ]
+        with pytest.raises(ValueError, match="cyclic"):
+            list(extract._toposort_items(items))
+
+
+class TestPatchingRmcTwiceChangesNothing:
+    """Every patch wraps what it found, so a second pass would wrap itself."""
+
+    def test_the_second_call_leaves_pen_create_alone(self):
+        """Rendering calls this once per page; it used to nest a page deep."""
+        import rmc.exporters.writing_tools as wt
+
+        extract._patch_rmc()
+        first = wt.Pen.__dict__["create"]
+
+        extract._patch_rmc()
+
+        assert wt.Pen.__dict__["create"] is first
+
+    def test_a_reset_flag_lets_it_patch_again(self, monkeypatch):
+        """The guard is a flag, not a claim that rmc can only be patched once."""
+        import rmc.exporters.writing_tools as wt
+
+        extract._patch_rmc()
+        first = wt.Pen.__dict__["create"]
+        monkeypatch.setattr(wt.Pen, "create", first)  # undo the extra wrap
+        monkeypatch.setattr(extract, "_rmc_patched", False)
+
+        extract._patch_rmc()
+
+        assert wt.Pen.__dict__["create"] is not first
+
+
 class TestBreadcrumbsOnlyReadPdfs:
     """An EPUB has no PDF outline; opening it only produces MuPDF noise."""
 
