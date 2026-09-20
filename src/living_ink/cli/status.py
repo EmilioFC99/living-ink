@@ -260,6 +260,46 @@ def _describe_connected_device(host: str, port: int, user: str, *, live: bool = 
         return ""
 
 
+def _section(cfg: dict[str, Any], name: str) -> dict[str, Any]:
+    """Read one config section, tolerating a key written with no value.
+
+    ``ai:`` on a line of its own is valid YAML and parses to ``None``, not to
+    an empty mapping, so ``cfg.get("ai", {})`` hands back ``None`` and the
+    first read off it crashes the health check — the one command a user runs
+    precisely because their config is half-written.
+
+    Args:
+        cfg: The parsed config file.
+        name: The section to read.
+
+    Returns:
+        The section, or an empty mapping when it is absent, empty, or not a
+        mapping at all.
+    """
+    section = cfg.get(name)
+    return section if isinstance(section, dict) else {}
+
+
+def _value(section: dict[str, Any], key: str, default: Any) -> Any:
+    """Read one config value, tolerating a key written with no value.
+
+    A key present with nothing after the colon is an omission — that is what
+    a user means by commenting out a value — so it resolves to the default.
+    A blank string is *not*: ``obsidian.attachments_folder: ""`` says "beside
+    the note", and only ``None`` is the absence.
+
+    Args:
+        section: The section to read from.
+        key: The key to read.
+        default: What to return when the key is absent or valueless.
+
+    Returns:
+        The configured value, or ``default``.
+    """
+    value = section.get(key)
+    return default if value is None else value
+
+
 def _status_ai_key(provider: str, ai_cfg: dict[str, Any], config_path: Path) -> str:
     """Find the API key ``status`` should verify the provider with.
 
@@ -279,7 +319,7 @@ def _status_ai_key(provider: str, ai_cfg: dict[str, Any], config_path: Path) -> 
         stored = credentials.read_secret(credentials.ai_key_name(provider), config_path=config_path)
     except ValueError:
         stored = None
-    return stored or str(ai_cfg.get("api_key", "") or "")
+    return stored or str(_value(ai_cfg, "api_key", ""))
 
 
 def collect_status(config_path: Path) -> StatusReport:
@@ -319,24 +359,24 @@ def collect_status(config_path: Path) -> StatusReport:
 
     # reMarkable transport. Both are probed when configured, because the
     # non-preferred one is the fallback and its health is worth reporting.
-    rm_cfg = cfg.get("remarkable", {})
-    has_ssh = rm_cfg.get("use_ssh", False) or cfg.get("use_ssh", False)
-    report.preferred = rm_cfg.get("preferred_connection", "").strip().lower() or (
+    rm_cfg = _section(cfg, "remarkable")
+    has_ssh = _value(rm_cfg, "use_ssh", False) or _value(cfg, "use_ssh", False)
+    report.preferred = str(_value(rm_cfg, "preferred_connection", "")).strip().lower() or (
         "ssh" if has_ssh else "cloud"
     )
-    report.ssh_host = rm_cfg.get("ssh_host", "10.11.99.1")
+    report.ssh_host = str(_value(rm_cfg, "ssh_host", "10.11.99.1"))
 
     if has_ssh or report.preferred == "ssh":
         report.ssh_ok, report.ssh_msg = verify_remarkable_ssh(
-            host=report.ssh_host, port=rm_cfg.get("ssh_port", 22)
+            host=report.ssh_host, port=_value(rm_cfg, "ssh_port", 22)
         )
 
     # Asked even when SSH is down: the memory of a past USB session is still
     # the best answer available, and saying nothing would hide it.
     report.device = _describe_connected_device(
         report.ssh_host,
-        rm_cfg.get("ssh_port", 22),
-        rm_cfg.get("ssh_user", "root"),
+        _value(rm_cfg, "ssh_port", 22),
+        str(_value(rm_cfg, "ssh_user", "root")),
         live=report.ssh_ok,
     )
 
@@ -346,14 +386,14 @@ def collect_status(config_path: Path) -> StatusReport:
     # well.
     from living_ink.api import resolve_stored_token
 
-    token = rm_cfg.get("device_token", "") or resolve_stored_token(config_path=config_path)
+    token = _value(rm_cfg, "device_token", "") or resolve_stored_token(config_path=config_path)
     if token:
         report.cloud_ok, report.cloud_msg = verify_remarkable_token(token)
 
     # AI provider
-    ai_cfg = cfg.get("ai", {})
-    report.ai_provider = ai_cfg.get("provider", "none")
-    model = ai_cfg.get("model", "")
+    ai_cfg = _section(cfg, "ai")
+    report.ai_provider = str(_value(ai_cfg, "provider", "none"))
+    model = str(_value(ai_cfg, "model", ""))
     report.ai_model = model or "default"
     report.ai_ok, report.ai_msg = verify_ai_provider(
         report.ai_provider, _status_ai_key(report.ai_provider, ai_cfg, config_path), model
@@ -364,12 +404,13 @@ def collect_status(config_path: Path) -> StatusReport:
     ]
 
     # Obsidian
-    obs_cfg = cfg.get("obsidian", {})
-    report.obsidian_enabled = obs_cfg.get("enabled", True)
-    vault = Path(obs_cfg.get("vault_path", ""))
+    obs_cfg = _section(cfg, "obsidian")
+    report.obsidian_enabled = bool(_value(obs_cfg, "enabled", True))
+    vault_path = str(_value(obs_cfg, "vault_path", ""))
+    vault = Path(vault_path)
     report.obsidian_vault = str(vault)
-    report.obsidian_root_folder = obs_cfg.get("root_folder", "")
-    if report.obsidian_enabled and obs_cfg.get("vault_path"):
+    report.obsidian_root_folder = str(_value(obs_cfg, "root_folder", ""))
+    if report.obsidian_enabled and vault_path:
         # The destination's own check, not a second copy of it: a status that
         # says the vault is fine while the sync refuses it is worse than no
         # status at all, and that is what two implementations drift into.
@@ -430,7 +471,7 @@ def _collect_watch(report: StatusReport, cfg: dict[str, Any]) -> None:
     """
     from living_ink import scheduler
 
-    watch_cfg = cfg.get("watch", {}) or {}
+    watch_cfg = _section(cfg, "watch")
     settings = Settings.resolve(cfg, config_path=report.config_path)
     report.watch_enabled = bool(settings.watch_enabled)
     report.watch_schedule = (settings.watch_schedule or "").strip()
@@ -438,7 +479,7 @@ def _collect_watch(report: StatusReport, cfg: dict[str, Any]) -> None:
     try:
         tz, tz_name = scheduler.resolve_timezone(settings.watch_timezone)
     except ValueError as e:
-        report.watch_timezone = str(watch_cfg.get("timezone", "") or "")
+        report.watch_timezone = str(_value(watch_cfg, "timezone", ""))
         report.watch_problem = str(e)
         return
     report.watch_timezone = tz_name

@@ -665,6 +665,76 @@ class TestInfoSettingsReport:
         assert "SYNC_OCR_CONCURRENCY" in out
 
 
+class TestInfoSurvivesAHalfWrittenConfig:
+    """A key with nothing after the colon is an omission, not a traceback.
+
+    ``ai:`` on a line of its own is valid YAML and parses to ``None``, not to
+    an empty mapping — so ``cfg.get("ai", {})`` never applies its default and
+    the next read off it raises ``AttributeError``. Four sections and six
+    leaves crashed this way, and ``info`` is the command a user runs *because*
+    their config is half written, which is exactly when the file looks like
+    this. ``verify_ai_provider`` is left unstubbed on purpose: one of the four
+    crashes was inside it, and a provider that resolves to none returns before
+    it opens a connection.
+    """
+
+    def _report(self, tmp_path, config_text):
+        """Collect a health report for a config file, with probing stubbed out.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+            config_text: Contents of ``config.yml``.
+
+        Returns:
+            The collected StatusReport.
+        """
+        from living_ink.cli import collect_status
+
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(config_text)
+        with (
+            patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(False, "no")),
+            patch("living_ink.setup_wizard.verify_remarkable_token", return_value=(False, "no")),
+            patch("living_ink.api.resolve_stored_token", return_value=""),
+        ):
+            return collect_status(cfg)
+
+    def test_a_valueless_section_reads_as_an_absent_one(self, tmp_path):
+        report = self._report(tmp_path, "remarkable:\n")
+
+        assert report.ssh_host == "10.11.99.1"
+        assert report.preferred == "cloud"
+
+    def test_a_valueless_ai_section_is_no_provider(self, tmp_path):
+        report = self._report(tmp_path, "ai:\n")
+
+        assert report.ai_provider == "none"
+        assert report.ai_ok is True
+
+    def test_a_valueless_provider_is_not_verified_as_one(self, tmp_path):
+        """The empty name used to reach ``verify_ai_provider`` and crash it."""
+        report = self._report(tmp_path, "ai:\n  provider:\n  model:\n")
+
+        assert report.ai_provider == "none"
+        assert report.ai_model == "default"
+        assert (report.ai_ok, report.ai_msg) == (
+            True,
+            "AI cleanup disabled (raw OCR text will be used).",
+        )
+
+    def test_a_valueless_vault_path_is_no_vault(self, tmp_path):
+        report = self._report(tmp_path, "obsidian:\n  enabled: true\n  vault_path:\n")
+
+        assert report.obsidian_valid is False
+        assert "vault_path" in report.obsidian_problem
+
+    def test_a_config_of_nothing_but_headings_still_reports(self, tmp_path):
+        report = self._report(tmp_path, "remarkable:\nai:\nobsidian:\nwatch:\nsync:\n")
+
+        assert report.config_error is None
+        assert report.to_dict()["ai"]["provider"] == "none"
+
+
 class TestInfoChecksStoredCredentials:
     """`info` verifies the provider with the key it will actually use."""
 

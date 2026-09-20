@@ -280,15 +280,18 @@ def verify_ai_provider(
 
     Args:
         provider_name: Provider preset ('gemini', 'openai', 'ollama', etc.).
+            No provider at all — ``None``, or a name that is only whitespace —
+            reads as ``none``: ``config.yml`` can say ``provider:`` with
+            nothing after it, and ``info`` calls this with whatever it found.
         api_key: API key for the provider.
         model: Model name override (optional).
 
     Returns:
         Tuple of (success_bool, message_str).
     """
-    provider_clean = provider_name.strip().lower()
+    provider_clean = (provider_name or "").strip().lower()
 
-    if provider_clean == "none":
+    if provider_clean in ("", "none"):
         return True, "AI cleanup disabled (raw OCR text will be used)."
 
     from living_ink.providers import get_provider
