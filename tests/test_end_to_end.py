@@ -140,11 +140,7 @@ def e2e(tmp_path, corpus_root, monkeypatch):
     # exactly the failure this fixture hit first time round.
     for name, leaf in (
         ("DATA_DIR", "."),
-        ("WHITE_DIR", "remarkable_pngs_white"),
-        ("VISION_DIR", "remarkable_pngs_for_vision"),
-        ("OCR_DIR", "output"),
-        ("PDF_DIR", "remarkable_pdfs"),
-        ("DOCS_DIR", "remarkable_documents"),
+        ("WORK_DIR", "work"),
         ("LOGS_DIR", "logs"),
         ("TRANSCRIPT_CACHE_DIR", "transcripts"),
         ("RENDER_CACHE_DIR", "renders"),

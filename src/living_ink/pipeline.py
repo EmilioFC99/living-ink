@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import sqlite3
 import sys
 import threading
@@ -52,6 +51,7 @@ from living_ink.core.selection import (
     SelectionCriteria,
     select,
 )
+from living_ink.core.temp import DocumentWorkspace, page_number, purge_all
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     Destination,
@@ -122,11 +122,10 @@ ROOT = find_repo_root()
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
 
-WHITE_DIR = DATA_DIR / "remarkable_pngs_white"
-VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
-OCR_DIR = DATA_DIR / "output"  # OCR text files
-PDF_DIR = DATA_DIR / "remarkable_pdfs"
-DOCS_DIR = DATA_DIR / "remarkable_documents"
+# One subdirectory per document, named by its id. Five directories keyed on
+# the sanitised *title* used to live here instead, which is how two similarly
+# named notebooks came to share their pages. See living_ink.core.temp.
+WORK_DIR = DATA_DIR / "work"
 # Deliberately not one of the temp dirs: the whole value of a cached
 # transcription is that it outlives the purge which removes the page it came
 # from. See living_ink.cache.
@@ -152,7 +151,7 @@ def ensure_runtime_dirs() -> None:
     global _runtime_dirs_ready
     if _runtime_dirs_ready:
         return
-    for folder in (DATA_DIR, LOGS_DIR, WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR):
+    for folder in (DATA_DIR, LOGS_DIR, WORK_DIR):
         folder.mkdir(parents=True, exist_ok=True)
     _runtime_dirs_ready = True
 
@@ -541,26 +540,6 @@ def preprocess_image(in_path: Path, out_path: Path):
     im.save(out_path, quality=95)
 
 
-def sanitize_filename(name: str) -> str:
-    """Make a notebook name safe for a temporary working-file path.
-
-    Note:
-        This is deliberately *not* the same as
-        ``ObsidianDestination._sanitize_filename``. This one names throwaway
-        artifacts under the data directory, so it collapses spaces to
-        underscores for shell-friendliness; the Obsidian one names files the
-        user will see in their vault, so it keeps spaces and uses hyphens.
-        Merging the two would silently rename every note in existing vaults.
-
-    Args:
-        name: Raw notebook name.
-
-    Returns:
-        A path-safe variant of the name.
-    """
-    return name.replace("/", "_").replace("\\", "_").replace(" ", "_")
-
-
 def log(msg):
     # Redacted at the single choke point rather than at each of the ~90 call
     # sites: pipeline.log is the file a user attaches to a bug report.
@@ -574,7 +553,7 @@ def log(msg):
 
 
 def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
-    """Clean all temporary working folders (PNG, OCR, PDF, Vision, Documents) and zip archives.
+    """Delete every document workspace left on disk.
 
     Args:
         keep_temp: If True, preserve files on disk for debugging.
@@ -583,28 +562,7 @@ def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
         log("Preserving temporary working files (--keep-temp enabled).")
         return
 
-    import shutil
-
-    temp_folders = [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]
-    for folder in temp_folders:
-        if folder.exists():
-            for item in folder.iterdir():
-                try:
-                    if item.is_file() or item.is_symlink():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                except OSError as e:
-                    logging.debug("Failed to remove temporary item %s: %s", item, e)
-            folder.mkdir(parents=True, exist_ok=True)
-
-    # Clean any lingering zip archives in DATA_DIR
-    if DATA_DIR.exists():
-        for zip_file in DATA_DIR.glob("*.zip"):
-            try:
-                zip_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+    purge_all(WORK_DIR)
 
 
 _temp_cleanup_registered = False
@@ -630,40 +588,6 @@ def register_temp_cleanup(keep_temp: bool) -> None:
         return
     atexit.register(lambda: cleanup_temp_artifacts(keep_temp=_temp_cleanup_keep))
     _temp_cleanup_registered = True
-
-
-def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -> None:
-    """Clean temporary artifacts for a specific completed notebook.
-
-    Args:
-        safe_notebook: Sanitized notebook name prefix.
-        keep_temp: If True, preserve files on disk.
-    """
-    if keep_temp:
-        return
-
-    import shutil
-
-    for folder in [WHITE_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]:
-        if folder.exists():
-            for p in folder.glob(f"{safe_notebook}*"):
-                try:
-                    if p.is_file() or p.is_symlink():
-                        p.unlink()
-                    elif p.is_dir():
-                        shutil.rmtree(p)
-                except OSError:
-                    pass
-
-    if VISION_DIR.exists():
-        for p in VISION_DIR.glob(f"{safe_notebook}*"):
-            try:
-                if p.is_file() or p.is_symlink():
-                    p.unlink()
-                elif p.is_dir():
-                    shutil.rmtree(p)
-            except OSError:
-                pass
 
 
 def validate_environment():
@@ -1010,10 +934,16 @@ class DocumentJob:
     notebook_id: Any
     doc_type: str
     version: Any
-    safe_name: str
+    #: Where this document's throwaway artifacts go. Keyed on the document id,
     folder_path: str
     display_title: str
     keep_temp: bool
+    #: Where this document's throwaway artifacts go. Derived from the document
+    #: id rather than the title, so two notebooks with similar names cannot
+    #: write over each other's pages. Left unset by everything but a test.
+    workspace: DocumentWorkspace = None  # type: ignore[assignment]
+    #: Where the original PDF or EPUB inside the zip is unpacked, for the
+    #: sources that have one. Inside the workspace, like everything else.
     doc_file_path: Optional[Path] = None
 
     #: Recipe digest per destination ``state_key``, computed by the selection
@@ -1038,7 +968,11 @@ class DocumentJob:
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
-    clean_out_txt: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        """Derive the workspace from the document id when none was given."""
+        if self.workspace is None:
+            self.workspace = DocumentWorkspace(WORK_DIR, str(self.notebook_id))
 
     def modified_at(self) -> Optional[datetime.datetime]:
         """Return when the tablet says this notebook was last written on.
@@ -1066,16 +1000,15 @@ class DocumentJob:
             The page number to show in the section header.
         """
         if index < len(self.imgs):
-            match = re.search(r"page-(\d+)", self.imgs[index].name, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
+            number = page_number(self.imgs[index])
+            if number is not None:
+                return number
         return index + 1
 
     def source_file(self) -> Optional[Path]:
         """Return the original PDF/EPUB to attach, if one was retrieved."""
-        if self.doc_file_path and self.doc_file_path.exists():
-            return self.doc_file_path
-        return None
+        path = self.doc_file_path
+        return path if path and path.exists() else None
 
     def folder_parts(self) -> Tuple[str, ...]:
         """Return the reMarkable folder hierarchy, outermost first.
@@ -1526,7 +1459,8 @@ class SyncPipeline:
 
         if success:
             log(f"Notebook {job.notebook} processing complete.")
-            clean_notebook_temp_artifacts(job.safe_name, keep_temp=job.keep_temp)
+            if not job.keep_temp:
+                job.workspace.purge()
         else:
             log(f"Notebook {job.notebook} processing FAILED.")
 
@@ -1624,7 +1558,8 @@ class SyncPipeline:
         notebook = candidate.name
         doc_type = candidate.source
         folder_path = candidate.folder
-        safe_name = sanitize_filename(notebook)
+        workspace = DocumentWorkspace(WORK_DIR, str(candidate.doc_id)).ensure()
+
         # Where the source document lands, if this type has one. The extension
         # comes from the registered source rather than a `doc_type in
         # ("pdf", "epub")` test, so a new format needs no edit here.
@@ -1636,11 +1571,11 @@ class SyncPipeline:
             notebook_id=candidate.doc_id,
             doc_type=doc_type,
             version=_item_version(candidate.item),
-            safe_name=safe_name,
             folder_path=folder_path,
             display_title=f"{folder_path} / {notebook}" if folder_path else notebook,
             keep_temp=self.keep_temp if keep_temp is None else keep_temp,
-            doc_file_path=(DOCS_DIR / f"{safe_name}.{suffix}" if suffix else None),
+            workspace=workspace,
+            doc_file_path=workspace.source_file(suffix),
             recipes=dict(candidate.recipes),
         )
 
@@ -1747,12 +1682,7 @@ class SyncPipeline:
 
     def _rendered_pages(self, job: DocumentJob) -> List[Path]:
         """List the page images already rendered for this job, in page order."""
-        prefix = job.safe_name + "."
-        return sorted(
-            p
-            for p in WHITE_DIR.iterdir()
-            if p.name.startswith(prefix) and p.suffix.lower() == ".png"
-        )
+        return job.workspace.rendered_pages()
 
     def _render_context(self) -> "RenderContext":
         """Build the render settings this run uses, once.
@@ -1786,7 +1716,7 @@ class SyncPipeline:
         from living_ink.extract import extract_tags_from_zip
         from living_ink.sources import SourceBundle, source_for_name
 
-        tmp_zip = DATA_DIR / f"{job.safe_name}.zip"
+        tmp_zip = job.workspace.ensure().download
         raw_bytes = client.download(job.item)
         if not raw_bytes:
             raise _StopProcessing(False, f"Failed to download document zip for {job.notebook}.")
@@ -1951,7 +1881,7 @@ class SyncPipeline:
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
         """Write one rendered page image into the white-background directory."""
-        out_img = WHITE_DIR / f"{job.safe_name}.page-{page}.png"
+        out_img = job.workspace.page_image(page)
         out_img.write_bytes(data)
         log(f"{label}: {out_img}")
 
@@ -1970,8 +1900,8 @@ class SyncPipeline:
     # ── Stage 4: preprocess ──────────────────────────────────────────────
 
     def _preprocess_images(self, job: DocumentJob) -> None:
-        """Prepare each page image for OCR, writing the results to VISION_DIR."""
-        pre_dir = VISION_DIR / job.safe_name
+        """Prepare each page image for OCR, writing the results beside them."""
+        pre_dir = job.workspace.preprocessed_dir
         pre_dir.mkdir(parents=True, exist_ok=True)
 
         for p in job.imgs:
@@ -2245,9 +2175,8 @@ class SyncPipeline:
         """
         meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
 
-        job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
-        self._write_transcript(job, job.clean_out_txt, meta)
-        log(f"Cleaned OCR text saved to {job.clean_out_txt}")
+        self._write_transcript(job, job.workspace.transcript, meta)
+        log(f"Cleaned OCR text saved to {job.workspace.transcript}")
 
     def _write_transcript(self, job: DocumentJob, path: Path, meta: Dict[str, Any]) -> None:
         """Write one transcript: a metadata line, then a section per page.
@@ -2475,9 +2404,9 @@ class SyncPipeline:
                 log("      Replaces the whole note, including anything you added to it.")
             else:
                 log("      Replaces only the pages that changed; your own text is kept.")
-        log(f"   Transcript: {job.clean_out_txt}")
+        log(f"   Transcript: {job.workspace.transcript}")
         if job.imgs:
-            log(f"   {len(job.imgs)} page image(s) in {WHITE_DIR}")
+            log(f"   {len(job.imgs)} page image(s) in {job.workspace.pages_dir}")
         if job.tags:
             log(f"   Tags: {job.tags}")
 

@@ -25,7 +25,6 @@ def make_job(tmp_path: Path, doc_id: str = "nb-1", version: str = "v1") -> Docum
         notebook_id=doc_id,
         doc_type="notebook",
         version=version,
-        safe_name="Notes",
         folder_path="",
         display_title="Notes",
         keep_temp=True,

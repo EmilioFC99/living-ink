@@ -228,9 +228,8 @@ class ObsidianDestination(FileSystemDestination):
             :meth:`~living_ink.destinations.filesystem.FileSystemDestination.contained`,
             which every path here is built through.
 
-            Distinct from ``pipeline.sanitize_filename`` on purpose: this names
-            files the user sees in their vault, so spaces are preserved. The
-            pipeline's version names temporary artifacts and underscores them.
+            Names files the user sees in their vault, so spaces are
+            preserved and separators become hyphens.
 
         Args:
             name: The raw string to sanitize.

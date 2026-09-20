@@ -23,6 +23,7 @@ from living_ink.core import selection
 from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.core.listing import document_name, document_version, get_notebook_path, get_val
 from living_ink.core.selection import Candidate, Selection, SelectionCriteria, select
+from living_ink.core.temp import DocumentWorkspace
 from living_ink.destinations import (
     Destination,
     DestinationError,
@@ -335,13 +336,13 @@ class TestImportPurity:
         """ensure_runtime_dirs creates every runtime folder on demand."""
         monkeypatch.setattr(pipeline, "_runtime_dirs_ready", False)
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "data")
-        monkeypatch.setattr(pipeline, "WHITE_DIR", tmp_path / "data" / "white")
+        monkeypatch.setattr(pipeline, "WORK_DIR", tmp_path / "data" / "work")
         monkeypatch.setattr(pipeline, "LOGS_DIR", tmp_path / "logs")
 
         pipeline.ensure_runtime_dirs()
 
         assert (tmp_path / "data").is_dir()
-        assert (tmp_path / "data" / "white").is_dir()
+        assert (tmp_path / "data" / "work").is_dir()
         assert (tmp_path / "logs").is_dir()
 
 
@@ -421,7 +422,7 @@ def make_job(**overrides) -> DocumentJob:
         "notebook_id": "nb-1",
         "doc_type": "notebook",
         "version": "hash-1",
-        "safe_name": "Test_Notebook",
+        "workspace": DocumentWorkspace(pipeline.WORK_DIR, "nb-1"),
         "folder_path": "",
         "display_title": "Test Notebook",
         "keep_temp": True,
@@ -766,9 +767,9 @@ class TestAFailedPageIsNotABlankPage:
 
     def test_the_transcript_shows_the_reason_where_the_text_would_be(self, tmp_path, monkeypatch):
         """A reader of the transcript sees a gap, not a page that was blank."""
-        monkeypatch.setattr(pipeline, "OCR_DIR", tmp_path)
         pipe = self._pipeline()
         job = self._job_with_pages(2)
+        job = replace(job, workspace=DocumentWorkspace(tmp_path, "nb-1").ensure())
         job.pages = [
             replace(job.pages[0], text="written"),
             replace(job.pages[1], error="429 rate limited"),
@@ -776,16 +777,16 @@ class TestAFailedPageIsNotABlankPage:
 
         pipe._write_transcripts(job)
 
-        assert "429 rate limited" in job.clean_out_txt.read_text(encoding="utf-8")
+        assert "429 rate limited" in job.workspace.transcript.read_text(encoding="utf-8")
 
 
 class TestDryRun:
     """A dry run transcribes as usual, then publishes and records nothing."""
 
     def _job(self, tmp_path) -> DocumentJob:
-        transcript = tmp_path / "Notes_clean.txt"
-        transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
-        return make_job(folder_path="Work", clean_out_txt=transcript)
+        workspace = DocumentWorkspace(tmp_path, "nb-1").ensure()
+        workspace.transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
+        return make_job(folder_path="Work", workspace=workspace)
 
     def test_nothing_is_published(self, tmp_path):
         dest = MockDestination("MockDest")
@@ -806,7 +807,7 @@ class TestDryRun:
         out = capsys.readouterr().out
 
         assert "Dry run" in out
-        assert str(job.clean_out_txt) in out
+        assert str(job.workspace.transcript) in out
 
     def test_it_says_how_much_of_an_existing_note_would_be_rewritten(self, tmp_path, capsys):
         """The whole-note promise is what a user needs before the run, not after."""
@@ -869,9 +870,9 @@ class TestOrderedDurability:
         pipeline.reset_state_store()
 
     def _job(self, tmp_path) -> DocumentJob:
-        transcript = tmp_path / "Notes_clean.txt"
-        transcript.write_text("### Page 1\n\nHello\n", encoding="utf-8")
-        return make_job(clean_out_txt=transcript)
+        workspace = DocumentWorkspace(tmp_path, "nb-1").ensure()
+        workspace.transcript.write_text("### Page 1\n\nHello\n", encoding="utf-8")
+        return make_job(workspace=workspace)
 
     def _row(self, dest):
         return pipeline.get_state_store().get_publication("nb-1", dest.state_key)
@@ -941,15 +942,12 @@ class TestEveryRunReadsItsPages:
     """
 
     def test_a_leftover_transcript_does_not_skip_ocr(self, tmp_path, monkeypatch):
-        white = tmp_path / "white"
-        ocr = tmp_path / "ocr"
-        white.mkdir()
-        ocr.mkdir()
-        monkeypatch.setattr(pipeline, "OCR_DIR", ocr)
+        monkeypatch.setattr(pipeline, "WORK_DIR", tmp_path / "work")
+        workspace = DocumentWorkspace(tmp_path / "work", "nb-1").ensure()
 
-        page = white / "Notes.page-1.png"
+        page = workspace.page_image(1)
         page.write_bytes(b"png")
-        transcript = ocr / "Notes_clean.txt"
+        transcript = workspace.transcript
         transcript.write_text('{"notebook": "Notes"}\n\n### Page 1\n\nHello\n')
         os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
 
@@ -1690,7 +1688,6 @@ class TestPageHashRecording:
             notebook_id="doc-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -1805,7 +1802,6 @@ class TestRenderCaching:
             notebook_id="doc-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -2081,7 +2077,6 @@ class TestTheRendererContractDrivesTheRun:
             notebook_id="doc-1",
             doc_type="fake",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -2207,14 +2202,14 @@ class TestTheDownloadedZipHonoursKeepTemp:
         pipe._render_source = lambda job, source, bundle: None
         return pipe
 
-    def _job(self) -> DocumentJob:
+    def _job(self, tmp_path) -> DocumentJob:
         return DocumentJob(
             item={},
             notebook="Notes",
             notebook_id="doc-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
+            workspace=DocumentWorkspace(tmp_path, "doc-1").ensure(),
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -2226,37 +2221,36 @@ class TestTheDownloadedZipHonoursKeepTemp:
         return client
 
     def test_the_zip_is_removed_by_default(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
         monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
-        self._pipeline(tmp_path, keep_temp=False)._render_document(self._job(), self._client())
-        assert not (tmp_path / "Notes.zip").exists()
+        job = self._job(tmp_path)
+        self._pipeline(tmp_path, keep_temp=False)._render_document(job, self._client())
+        assert not job.workspace.download.exists()
 
     def test_keeping_temp_files_keeps_the_zip(self, tmp_path, monkeypatch):
         """The .rm source is exactly what a render bug needs; it used to vanish."""
-        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
         monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
-        self._pipeline(tmp_path, keep_temp=True)._render_document(self._job(), self._client())
-        assert (tmp_path / "Notes.zip").read_bytes() == b"PK\x03\x04zip"
+        job = self._job(tmp_path)
+        self._pipeline(tmp_path, keep_temp=True)._render_document(job, self._client())
+        assert job.workspace.download.read_bytes() == b"PK\x03\x04zip"
 
     def test_a_failed_render_still_cleans_up(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
         monkeypatch.setattr("living_ink.extract.extract_tags_from_zip", lambda z: [])
         pipe = self._pipeline(tmp_path, keep_temp=False)
+        job = self._job(tmp_path)
 
         def boom(job, source, bundle):
             raise pipeline._StopProcessing(False, "nope")
 
         pipe._render_source = boom
         with pytest.raises(pipeline._StopProcessing):
-            pipe._render_document(self._job(), self._client())
-        assert not (tmp_path / "Notes.zip").exists()
+            pipe._render_document(job, self._client())
+        assert not job.workspace.download.exists()
 
-    def test_a_download_that_returns_nothing_is_a_failure(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+    def test_a_download_that_returns_nothing_is_a_failure(self, tmp_path):
         client = MagicMock()
         client.download.return_value = None
         with pytest.raises(pipeline._StopProcessing) as err:
-            self._pipeline(tmp_path, keep_temp=False)._render_document(self._job(), client)
+            self._pipeline(tmp_path, keep_temp=False)._render_document(self._job(tmp_path), client)
         assert err.value.success is False
 
 
@@ -2264,19 +2258,18 @@ class TestPublicationIdentity:
     """A destination is told which document it is publishing, and where it put it."""
 
     def _job(self, tmp_path) -> DocumentJob:
-        clean = tmp_path / "Notes_clean.txt"
-        clean.write_text("Transcript", encoding="utf-8")
+        workspace = DocumentWorkspace(tmp_path, "nb-1").ensure()
+        workspace.transcript.write_text("Transcript", encoding="utf-8")
         return DocumentJob(
             item={"ID": "nb-1"},
             notebook="Notes",
             notebook_id="nb-1",
             doc_type="notebook",
             version="hash-1",
-            safe_name="Notes",
+            workspace=workspace,
             folder_path="",
             display_title="Notes",
             keep_temp=False,
-            clean_out_txt=clean,
         )
 
     def test_the_document_id_reaches_the_destination(self, tmp_path):
@@ -2486,7 +2479,6 @@ class TestJobModifiedDate:
             notebook_id="doc-1",
             doc_type="notebook",
             version=1,
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -2873,7 +2865,6 @@ class TestRendererRegressionDetection:
             notebook_id="nb-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -2949,7 +2940,6 @@ class TestRunSummary:
             notebook_id="nb-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Meeting Notes",
             keep_temp=False,
@@ -3050,7 +3040,6 @@ class TestDryRunReporting:
             notebook_id="nb-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Test",
             folder_path="",
             display_title="Test",
             keep_temp=False,
@@ -3329,7 +3318,6 @@ class TestRenderGeometryFollowsTheDevice:
             notebook_id="doc-1",
             doc_type="notebook",
             version="v1",
-            safe_name="Notes",
             folder_path="",
             display_title="Notes",
             keep_temp=False,
@@ -3378,7 +3366,6 @@ class TestRenderGeometryFollowsTheDevice:
                 notebook_id="doc-1",
                 doc_type="notebook",
                 version="v1",
-                safe_name="Notes",
                 folder_path="",
                 display_title="Notes",
                 keep_temp=False,

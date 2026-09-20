@@ -187,3 +187,15 @@ class TestTheDomainModelIsALeaf:
 
     def test_document_imports_nothing_from_the_package(self):
         assert module_imports(PACKAGE_ROOT / "core" / "document.py") == []
+
+
+class TestTheWorkspaceIsALeaf:
+    """``core/temp.py`` imports nothing from Living Ink either.
+
+    ``pipeline`` imports it, so an import back is a cycle. It is also what lets
+    a stage, a source or a future renderer be handed a workspace without any of
+    them taking a dependency on the pipeline that built it.
+    """
+
+    def test_temp_imports_nothing_from_the_package(self):
+        assert module_imports(PACKAGE_ROOT / "core" / "temp.py") == []

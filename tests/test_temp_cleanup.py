@@ -7,79 +7,76 @@ and downloaded documents are automatically purged to prevent disk leakage.
 from unittest.mock import MagicMock, patch
 
 from living_ink.cli import SyncCommand, main
-from living_ink.pipeline import (
-    DOCS_DIR,
-    OCR_DIR,
-    PDF_DIR,
-    VISION_DIR,
-    WHITE_DIR,
-    clean_notebook_temp_artifacts,
-    cleanup_temp_artifacts,
-)
+from living_ink.core.temp import DocumentWorkspace
+from living_ink.pipeline import WORK_DIR, cleanup_temp_artifacts
 
 
-def test_cleanup_temp_artifacts_cleans_all_folders(tmp_path, monkeypatch):
-    """cleanup_temp_artifacts purges all temporary working directories."""
-    # Populate temp folders with dummy artifacts
-    folders = [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]
-    created_files = []
-    for f in folders:
-        f.mkdir(parents=True, exist_ok=True)
-        dummy = f / "test_artifact.tmp"
-        dummy.write_text("temporary data")
-        created_files.append(dummy)
+def _populate(doc_id: str) -> DocumentWorkspace:
+    """Give one document a workspace with something in every folder."""
+    workspace = DocumentWorkspace(WORK_DIR, doc_id).ensure()
+    workspace.page_image(1).write_text("png data")
+    (workspace.preprocessed_dir / "page-1.png").write_text("png data")
+    workspace.transcript.write_text("transcribed")
+    workspace.download.write_text("zip data")
+    return workspace
 
-    # Also add a nested directory in VISION_DIR
-    sub_dir = VISION_DIR / "nested_book"
-    sub_dir.mkdir(exist_ok=True)
-    (sub_dir / "page-1.png").write_text("png data")
 
-    cleanup_temp_artifacts(keep_temp=False)
+def test_cleanup_temp_artifacts_cleans_every_workspace():
+    """cleanup_temp_artifacts leaves no document's artifacts behind."""
+    first = _populate("doc-one")
+    second = _populate("doc-two")
 
-    for dummy in created_files:
-        assert not dummy.exists(), f"Expected {dummy} to be deleted"
-    assert not sub_dir.exists(), "Expected nested vision directory to be deleted"
+    try:
+        cleanup_temp_artifacts(keep_temp=False)
+
+        assert not first.dir.exists()
+        assert not second.dir.exists()
+    finally:
+        first.purge()
+        second.purge()
 
 
 def test_cleanup_temp_artifacts_respects_keep_temp():
     """cleanup_temp_artifacts preserves all files when keep_temp=True."""
-    dummy = WHITE_DIR / "keep_me.png"
-    WHITE_DIR.mkdir(parents=True, exist_ok=True)
-    dummy.write_text("png data")
+    workspace = _populate("doc-keep")
 
     try:
         cleanup_temp_artifacts(keep_temp=True)
-        assert dummy.exists()
+        assert workspace.page_image(1).exists()
     finally:
-        dummy.unlink(missing_ok=True)
+        workspace.purge()
 
 
-def test_clean_notebook_temp_artifacts():
-    """clean_notebook_temp_artifacts deletes only artifacts for the target notebook."""
-    WHITE_DIR.mkdir(parents=True, exist_ok=True)
-    OCR_DIR.mkdir(parents=True, exist_ok=True)
-
-    nb1_img = WHITE_DIR / "NotebookOne.page-1.png"
-    nb1_ocr = OCR_DIR / "NotebookOne_clean.txt"
-    nb2_img = WHITE_DIR / "NotebookTwo.page-1.png"
-    nb2_ocr = OCR_DIR / "NotebookTwo_clean.txt"
-
-    nb1_img.write_text("nb1")
-    nb1_ocr.write_text("nb1 text")
-    nb2_img.write_text("nb2")
-    nb2_ocr.write_text("nb2 text")
+def test_purging_one_document_leaves_its_neighbours_alone():
+    """The unit is a directory, so a purge cannot reach past its own document."""
+    first = _populate("doc-one")
+    second = _populate("doc-two")
 
     try:
-        clean_notebook_temp_artifacts("NotebookOne", keep_temp=False)
-        assert not nb1_img.exists()
-        assert not nb1_ocr.exists()
-        assert nb2_img.exists()
-        assert nb2_ocr.exists()
+        first.purge()
+
+        assert not first.dir.exists()
+        assert second.page_image(1).exists()
+        assert second.transcript.exists()
     finally:
-        nb1_img.unlink(missing_ok=True)
-        nb1_ocr.unlink(missing_ok=True)
-        nb2_img.unlink(missing_ok=True)
-        nb2_ocr.unlink(missing_ok=True)
+        first.purge()
+        second.purge()
+
+
+def test_two_similarly_named_documents_do_not_share_artifacts():
+    """The bug this replaced: "Notes" also matched "Notes (2)"'s pages."""
+    notes = DocumentWorkspace(WORK_DIR, "doc-notes").ensure()
+    notes_two = DocumentWorkspace(WORK_DIR, "doc-notes-two").ensure()
+    notes.page_image(1).write_text("the first notebook")
+    notes_two.page_image(1).write_text("the second notebook")
+
+    try:
+        notes.purge()
+
+        assert notes_two.page_image(1).read_text() == "the second notebook"
+    finally:
+        notes.purge()
+        notes_two.purge()
 
 
 @patch.object(SyncCommand, "run", return_value=0)
