@@ -81,6 +81,12 @@ class Answers:
         watch_timezone: The zone that expression is read in. Not asked — a
             first-run wizard that opens with "which timezone are you in?" has
             spent a question on something the machine already knows.
+        enable_completions_rc: Whether to add the lines that make tab
+            completion take effect. The script itself is installed either way
+            and is not an answer — it is Living Ink's own file in a directory
+            meant for it. This is only the edit to a shell rc file the user
+            owns, and it is only asked when the shell is not already
+            completing, which most are.
         warnings: Things that did not verify, repeated in the summary so the
             user confirms them knowingly rather than having watched them
             scroll past ten questions ago.
@@ -101,6 +107,7 @@ class Answers:
     obsidian_mirror_folders: bool = True
     watch_schedule: str = ""
     watch_timezone: str = ""
+    enable_completions_rc: bool = False
     warnings: List[str] = field(default_factory=list)
 
 
@@ -156,6 +163,7 @@ class Wizard:
         self.step_connection()
         self.step_ai()
         self.step_destination()
+        self.step_completions()
 
         if not self.review():
             console("")
@@ -546,6 +554,54 @@ class Wizard:
         chosen = ui.select(f"Sync automatically? (times in {tz_name})", choices, default="")
         return (chosen or ""), tz_name
 
+    # -- tab completion ------------------------------------------------------
+
+    def step_completions(self) -> None:
+        """Ask about the shell rc edit, and only when there is one to make.
+
+        The script itself is not asked about and is not decided here — it is
+        written by :meth:`commit` either way. What can need permission is a
+        line in a file the user owns, and only when the shell would otherwise
+        never read the script: a shell that already completes is left alone,
+        which is most of them, so most runs of the wizard show nothing here.
+        """
+        from living_ink.setup_wizard import (
+            completion_is_live,
+            completion_rc_snippet,
+            completion_target,
+            detect_shell,
+            shell_rc_path,
+        )
+
+        shell = detect_shell()
+        if not shell:
+            return
+
+        target = completion_target(shell)
+        if target is None or completion_is_live(shell):
+            return
+
+        snippet = completion_rc_snippet(target)
+        rc = shell_rc_path(shell)
+        if not snippet or rc is None:
+            return
+
+        console("")
+        console(ui.bold("Tab completion"))
+        console(
+            ui.dim(
+                f"  Your {shell} does not complete commands yet, so the script alone "
+                "will do nothing."
+            )
+        )
+        console(ui.dim(f"  These lines would be added to {rc}:"))
+        for line in snippet.splitlines():
+            console(ui.dim(f"      {line}"))
+        console("")
+        self.answers.enable_completions_rc = bool(
+            ui.confirm(f"Add them to {rc.name}?", default=True)
+        )
+
     def _summary_rows(self) -> List[Tuple[str, str]]:
         """Describe the pending configuration, one line per decision.
 
@@ -596,8 +652,10 @@ class Wizard:
         from living_ink import safeio
         from living_ink.config import credentials, get_config_path
         from living_ink.setup_wizard import (
+            enable_completions_in_rc,
             generate_config_yaml,
             install_cli_command,
+            install_completions,
             install_launch_agent,
         )
 
@@ -646,6 +704,20 @@ class Wizard:
         ok, message = install_cli_command(repo_dir=self.root, bin_dir=self.bin_dir)
         if ok:
             console(ui.green(f"  ✓ {message}"))
+
+        # Not behind a question: the script is Living Ink's own file, in a
+        # directory that exists to hold exactly it, and `uninstall` takes it
+        # back unconditionally. Only the rc edit below was ever asked about.
+        ok, message, target = install_completions(repo_dir=self.root)
+        if ok:
+            console(ui.green(f"  ✓ {message}"))
+        else:
+            console(ui.dim(f"  · {message}"))
+        if ok and target is not None and self.answers.enable_completions_rc:
+            ok, message = enable_completions_in_rc(target)
+            console(ui.green(f"  ✓ {message}") if ok else ui.yellow(f"  ⚠ {message}"))
+            if ok:
+                console(ui.dim("    Open a new terminal, then try: living-ink sy<Tab>"))
 
         # The schedule is the config's business and lands on every platform;
         # the job that keeps the watcher alive is launchd's, and launchd only

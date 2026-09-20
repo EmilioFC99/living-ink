@@ -2436,6 +2436,16 @@ def installation(monkeypatch, tmp_path):
         return True, "Background sync LaunchAgent removed."
 
     monkeypatch.setattr(wizard_module, "uninstall_launch_agent", _remove_job)
+
+    # Tab completion, both halves: the script Living Ink wrote and the block it
+    # added to the rc file to point at it. Both are inside the isolated home —
+    # ``conftest.completions_stay_home`` is what keeps the candidate
+    # directories from naming ``/opt/homebrew`` on the machine running this.
+    ok, _message, target = wizard_module.install_completions("zsh")
+    assert ok, "the completions fixture could not write into the isolated home"
+    wizard_module.enable_completions_in_rc(target)
+    paths["completions"] = target.path
+
     return paths
 
 
@@ -2505,6 +2515,41 @@ class TestUninstallRemovesWhatItInstalled:
 
         assert run.exit_code == 0
         assert installation["job"].exists()
+
+    def test_tab_completion_goes_without_being_asked(self, cli, installation, monkeypatch):
+        """Tier one, symmetrical with the install: no question either way.
+
+        The script is Living Ink's own file, and the rc block is found by the
+        markers ``setup`` wrote rather than by matching on what the lines look
+        like — so this can only remove what Living Ink put there.
+        """
+        from living_ink import ui as ui_module
+        from living_ink.setup_wizard import RC_START
+
+        monkeypatch.setattr(ui_module, "confirm", lambda *a, **k: False)
+        rc = Path.home() / ".zshrc"
+        assert RC_START in rc.read_text(encoding="utf-8")
+
+        run = cli("uninstall")
+
+        assert run.exit_code == 0
+        assert not installation["completions"].exists()
+        assert RC_START not in rc.read_text(encoding="utf-8")
+
+    def test_the_rest_of_the_rc_file_is_left_alone(self, cli, installation):
+        """An uninstall that truncates somebody's shell config is a disaster.
+
+        Only the lines between the two markers go; everything a user wrote
+        themselves stays, which is the difference between removing an edit and
+        removing a file.
+        """
+        rc = Path.home() / ".zshrc"
+        rc.write_text(rc.read_text(encoding="utf-8") + "export EDITOR=vim\n", encoding="utf-8")
+
+        run = cli("uninstall", "--yes")
+
+        assert run.exit_code == 0
+        assert rc.read_text(encoding="utf-8") == "export EDITOR=vim\n"
 
     def test_declining_keeps_the_credentials_and_the_record(self, cli, installation, monkeypatch):
         """Saying no to the questions leaves everything the questions guard.

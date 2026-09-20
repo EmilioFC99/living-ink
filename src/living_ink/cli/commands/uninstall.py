@@ -103,6 +103,7 @@ class UninstallCommand(BaseCommand):
 
         failures: List[str] = []
         failures += self._remove_the_job()
+        failures += self._remove_the_completions()
         failures += self._remove_the_caches()
         failures += self._remove_the_settings(assume_yes)
         failures += self._remove_the_sync_record(assume_yes)
@@ -201,6 +202,33 @@ class UninstallCommand(BaseCommand):
                 (LOGS_DIR, "Logs"),
             ]
         )
+
+    @staticmethod
+    def _remove_the_completions() -> List[str]:
+        """Delete the tab-completion scripts and the rc lines added for them.
+
+        Tier 1, and not a question, for the same reason installing was not:
+        the scripts are Living Ink's own files. The rc block is an edit to a
+        file the user owns, but it is found by the markers ``setup`` wrote
+        rather than by matching on what the lines look like, so this can only
+        remove what Living Ink put there.
+
+        Returns:
+            A list of problems, empty when there was nothing to remove.
+        """
+        from living_ink.logs import console
+        from living_ink.setup_wizard import uninstall_completions
+
+        removed = uninstall_completions()
+        if not removed:
+            console(ui.dim("  · Tab completion: nothing installed"))
+            return []
+
+        problems = [line for line in removed if line.startswith("Could not")]
+        for line in removed:
+            if line not in problems:
+                console(f"  {ui.green('✓')} {line}")
+        return problems
 
     # -- tier 2: removed on confirmation -------------------------------------
 
