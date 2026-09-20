@@ -38,7 +38,6 @@ from living_ink.config.schema import (
     CHOICE,
     DEFAULT_AI_LANGUAGE,
     DEFAULT_AI_TEMPERATURE,
-    DEFAULT_APPLE_NOTES_FOLDER,
     DEFAULT_ATTACHMENTS_FOLDER,
     DEFAULT_CACHE_MAX_AGE_DAYS,
     DEFAULT_MAX_NOTEBOOKS_PER_RUN,
@@ -65,7 +64,6 @@ from living_ink.config.schema import (
 from living_ink.redact import register_secret
 
 __all__ = [
-    "DEFAULT_APPLE_NOTES_FOLDER",
     "DEFAULT_CACHE_MAX_AGE_DAYS",
     "DEFAULT_MAX_NOTEBOOKS_PER_RUN",
     "DEFAULT_OCR_CONCURRENCY",
@@ -283,8 +281,6 @@ class Settings:
         obsidian_mirror_folders: Whether the tablet's folder tree is mirrored.
         obsidian_attachments_folder: Subfolder page images land in.
         obsidian_embed_images: Whether page images are embedded in the note.
-        apple_notes_enabled: Whether the Apple Notes destination is active.
-        apple_notes_folder: Destination folder name in Apple Notes.
         watch_enabled: Whether a scheduled sync is installed.
         watch_schedule: Cron expression for the scheduled sync.
         watch_timezone: Timezone the schedule is read in.
@@ -323,14 +319,12 @@ class Settings:
     max_notebooks_per_run: int = DEFAULT_MAX_NOTEBOOKS_PER_RUN
     prune: bool = False
 
-    obsidian_enabled: bool = False
+    obsidian_enabled: bool = True
     obsidian_vault_path: Optional[str] = None
     obsidian_root_folder: Optional[str] = None
     obsidian_mirror_folders: bool = True
     obsidian_attachments_folder: str = DEFAULT_ATTACHMENTS_FOLDER
     obsidian_embed_images: bool = True
-    apple_notes_enabled: bool = False
-    apple_notes_folder: str = DEFAULT_APPLE_NOTES_FOLDER
 
     watch_enabled: bool = False
     watch_schedule: Optional[str] = None

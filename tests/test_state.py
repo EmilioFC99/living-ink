@@ -106,7 +106,7 @@ class TestPublications:
 
     def test_destinations_are_independent(self, store):
         store.record_publication("doc-1", "Obsidian", "v1")
-        assert store.published_versions("AppleNotesDestination") == {}
+        assert store.published_versions("NotionDestination") == {}
 
     def test_republishing_merges_on_the_natural_key(self, store):
         store.record_publication("doc-1", "Obsidian", "v1")
@@ -129,10 +129,10 @@ class TestPublications:
 
     def test_an_external_id_survives_an_update_that_omits_it(self, store):
         """Most republish calls do not know the far-side id; they must not erase it."""
-        store.record_publication("doc-1", "AppleNotes", "v1", external_id="x-coredata://42")
-        store.record_publication("doc-1", "AppleNotes", "v2")
+        store.record_publication("doc-1", "Notion", "v1", external_id="note-42")
+        store.record_publication("doc-1", "Notion", "v2")
 
-        assert store.get_publication("doc-1", "AppleNotes")["external_id"] == "x-coredata://42"
+        assert store.get_publication("doc-1", "Notion")["external_id"] == "note-42"
 
     def test_a_content_hash_survives_an_update_that_omits_it(self, store):
         store.record_publication("doc-1", "Obsidian", "v1", content_hash="abc123")
@@ -150,15 +150,15 @@ class TestPublications:
 
     def test_forgetting_one_destination(self, store):
         store.record_publication("doc-1", "Obsidian", "v1")
-        store.record_publication("doc-1", "AppleNotes", "v1")
+        store.record_publication("doc-1", "Notion", "v1")
 
         assert store.forget("doc-1", "Obsidian") == 1
         assert store.published_versions("Obsidian") == {}
-        assert store.published_versions("AppleNotes") == {"doc-1": "v1"}
+        assert store.published_versions("Notion") == {"doc-1": "v1"}
 
     def test_forgetting_every_destination(self, store):
         store.record_publication("doc-1", "Obsidian", "v1")
-        store.record_publication("doc-1", "AppleNotes", "v1")
+        store.record_publication("doc-1", "Notion", "v1")
 
         assert store.forget("doc-1") == 2
         assert store.dump()["publications"] == []
@@ -309,11 +309,11 @@ class TestLegacyImport:
 
     def test_each_file_becomes_its_own_destination(self, store, tmp_path):
         self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
-        self._write(tmp_path, "processed_notebooks_AppleNotes.json", {"doc-2": 2})
+        self._write(tmp_path, "processed_notebooks_Notion.json", {"doc-2": 2})
 
         assert import_legacy_json(store, tmp_path) == 2
         assert store.published_versions("Obsidian") == {"doc-1": "1"}
-        assert store.published_versions("AppleNotes") == {"doc-2": "2"}
+        assert store.published_versions("Notion") == {"doc-2": "2"}
 
     def test_the_source_file_is_renamed_not_deleted(self, store, tmp_path):
         path = self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
@@ -459,9 +459,9 @@ class TestPublicationTargets:
 
     def test_each_destination_keeps_its_own_target(self, store):
         store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
-        store.record_publication("doc-1", "AppleNotes", "v1", target="Living Ink/Notes")
+        store.record_publication("doc-1", "Notion", "v1", target="Inbox/Notes")
         assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
-        assert store.get_publication("doc-1", "AppleNotes")["target"] == "Living Ink/Notes"
+        assert store.get_publication("doc-1", "Notion")["target"] == "Inbox/Notes"
 
 
 class TestFailures:
@@ -536,15 +536,15 @@ class TestStatusRegistry:
     def test_a_document_owed_to_a_second_destination_is_changed_not_new(self):
         view = self._view(
             published={"ObsidianDestination": "v1"},
-            pending=["AppleNotesDestination"],
-            destinations=["ObsidianDestination", "AppleNotesDestination"],
+            pending=["NotionDestination"],
+            destinations=["ObsidianDestination", "NotionDestination"],
         )
         assert classify(view) is STATUS_CHANGED
 
     def test_a_disabled_destination_does_not_make_a_document_look_synced_before(self):
         """Published only to a destination since turned off: new to the ones on."""
         view = self._view(
-            published={"AppleNotesDestination": "v1"},
+            published={"NotionDestination": "v1"},
             pending=["ObsidianDestination"],
             destinations=["ObsidianDestination"],
         )
@@ -577,20 +577,20 @@ class TestSyncOverview:
     def test_a_document_published_everywhere_is_up_to_date(self, store):
         store.record_document("doc-1", name="Notes", version="v1")
         store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "NotionDestination", "v1")
 
-        row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
+        row = store.sync_overview(["ObsidianDestination", "NotionDestination"])[0]
         assert row["status"] is STATUS_UP_TO_DATE
         assert row["pending"] == []
 
     def test_one_lagging_destination_makes_it_changed(self, store):
         store.record_document("doc-1", version="v2")
         store.record_publication("doc-1", "ObsidianDestination", "v2")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "NotionDestination", "v1")
 
-        row = store.sync_overview(["ObsidianDestination", "AppleNotesDestination"])[0]
+        row = store.sync_overview(["ObsidianDestination", "NotionDestination"])[0]
         assert row["status"] is STATUS_CHANGED
-        assert row["pending"] == ["AppleNotesDestination"]
+        assert row["pending"] == ["NotionDestination"]
 
     def test_a_never_published_document_is_new(self, store):
         """Never synced and merely stale are different bills; do not conflate."""
@@ -601,7 +601,7 @@ class TestSyncOverview:
         assert row["pending"] == ["ObsidianDestination"]
 
     def test_a_disabled_destination_is_not_counted_as_missing(self, store):
-        """Turning Apple Notes off must not make the whole library pending."""
+        """Turning a destination off must not make the whole library pending."""
         store.record_document("doc-1", version="v1")
         store.record_publication("doc-1", "ObsidianDestination", "v1")
 
@@ -645,12 +645,12 @@ class TestAllPublications:
 
     def test_rows_are_grouped_by_document(self, store):
         store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "NotionDestination", "v1")
         store.record_publication("doc-2", "ObsidianDestination", "v3")
 
         grouped = store.all_publications()
         assert set(grouped) == {"doc-1", "doc-2"}
-        assert set(grouped["doc-1"]) == {"ObsidianDestination", "AppleNotesDestination"}
+        assert set(grouped["doc-1"]) == {"ObsidianDestination", "NotionDestination"}
 
     def test_an_empty_database_returns_nothing(self, store):
         assert store.all_publications() == {}
@@ -733,11 +733,11 @@ class TestForgetting:
     def test_forgetting_one_destination_leaves_the_others(self, store):
         store.record_document("doc-1")
         store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "NotionDestination", "v1")
 
         store.forget("doc-1", "ObsidianDestination")
 
-        assert store.published_versions("AppleNotesDestination") == {"doc-1": "v1"}
+        assert store.published_versions("NotionDestination") == {"doc-1": "v1"}
 
     def test_forgetting_one_destination_keeps_the_page_hashes(self, store):
         """Other destinations still rely on them."""
@@ -746,6 +746,90 @@ class TestForgetting:
 
         store.forget("doc-1", "ObsidianDestination")
 
+        assert store.get_pages("doc-1")[0]["source_hash"] == "abc"
+
+
+class TestForgettingADestinationThatIsGone:
+    """Deleting a destination has to take its publication rows with it.
+
+    Apple Notes was deleted in 1.0 and its rows were not. Every later run read
+    them as real: the document looked published somewhere, ``--prune`` declined
+    because the destination "is not configured", and ``sync --status`` printed
+    a key no code could act on. Nothing the user could type would clear it.
+    """
+
+    def test_a_destination_that_no_longer_exists_loses_its_rows(self, store):
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        assert store.forget_unknown_destinations(["ObsidianDestination"]) == {
+            "AppleNotesDestination": 1
+        }
+        assert store.published_versions("AppleNotesDestination") == {}
+
+    def test_the_destinations_that_remain_are_untouched(self, store):
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        store.forget_unknown_destinations(["ObsidianDestination"])
+
+        assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}
+
+    def test_it_counts_every_document_the_dead_destination_held(self, store):
+        for doc in ("doc-1", "doc-2", "doc-3"):
+            store.record_publication(doc, "AppleNotesDestination", "v1")
+
+        assert store.forget_unknown_destinations(["ObsidianDestination"]) == {
+            "AppleNotesDestination": 3
+        }
+
+    def test_nothing_to_forget_reports_nothing(self, store):
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        assert store.forget_unknown_destinations(["ObsidianDestination"]) == {}
+
+    def test_it_is_safe_to_run_on_every_open(self, store):
+        """It runs once per process, so running it twice must be a no-op."""
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        store.forget_unknown_destinations(["ObsidianDestination"])
+
+        assert store.forget_unknown_destinations(["ObsidianDestination"]) == {}
+        assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}
+
+    def test_a_disabled_destination_is_not_a_deleted_one(self, store):
+        """Registered is the question, not enabled.
+
+        A destination the user turned off keeps its rows, so turning it back on
+        republishes nothing. Passing the enabled list here instead of the
+        registry would silently make every toggle a full re-sync.
+        """
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "NotionDestination", "v1")
+
+        store.forget_unknown_destinations(["ObsidianDestination", "NotionDestination"])
+
+        assert store.published_versions("NotionDestination") == {"doc-1": "v1"}
+
+    def test_an_empty_registry_deletes_nothing(self, store):
+        """No destination at all is a failed import, not a mass retirement."""
+        store.record_publication("doc-1", "ObsidianDestination", "v1")
+
+        with pytest.raises(ValueError, match="no destination is registered"):
+            store.forget_unknown_destinations([])
+
+        assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}
+
+    def test_the_document_and_its_pages_survive(self, store):
+        """The rows that go are the ones naming the destination, and no others."""
+        store.record_document("doc-1", name="Notes")
+        store.record_page("doc-1", 0, source_hash="abc")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+
+        store.forget_unknown_destinations(["ObsidianDestination"])
+
+        assert store.get_document("doc-1")["name"] == "Notes"
         assert store.get_pages("doc-1")[0]["source_hash"] == "abc"
 
 

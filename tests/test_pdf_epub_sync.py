@@ -3,14 +3,13 @@
 import io
 import json
 import zipfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pymupdf as fitz
 import pytest
 from PIL import Image
 
-from living_ink.destinations import AppleNotesDestination, ObsidianDestination
+from living_ink.destinations import ObsidianDestination
 from living_ink.extract import (
     extract_raw_document_from_zip,
     format_page_label,
@@ -202,33 +201,6 @@ class TestDestinationDocumentPublishing:
         assert attach_file.exists()
         assert attach_file.read_bytes() == b"%PDF-1.4 dummy book content"
 
-    def test_apple_notes_handles_document_path(self, monkeypatch):
-        dest = AppleNotesDestination(folder_name="TestFolder")
-
-        dummy_doc = Path("/tmp/mock_note.pdf")
-        dummy_doc.write_bytes(b"dummy")
-
-        # Mock subprocess.run to verify osascript command
-        captured_script = []
-
-        def mock_run(cmd, **kwargs):
-            captured_script.append(cmd[2])
-            res = MagicMock()
-            res.returncode = 0
-            return res
-
-        monkeypatch.setattr("subprocess.run", mock_run)
-
-        success = dest.publish(
-            *make_both("My PDF Note", "Some note text", source="pdf", source_file=dummy_doc)
-        )
-        assert success.ok is True
-        assert len(captured_script) == 1
-        script = captured_script[0]
-        assert "Source Document:" in script
-        assert "mock_note.pdf" in script
-        dummy_doc.unlink(missing_ok=True)
-
 
 class TestPageLabelFormatting:
     """Test format_page_label and dual page number formatting."""
@@ -402,21 +374,6 @@ class TestPageSectionHeaderFormatting:
             in header
         )
 
-    def test_apple_notes_html_conversion_with_styled_header(self):
-        from living_ink.destinations import AppleNotesDestination
-
-        dest = AppleNotesDestination()
-        text = (
-            "---\n"
-            '<span style="font-size: 0.9em; color: #777777"><b>Data Management</b><br>'
-            '<span style="font-size: 0.8em; color: #aaaaaa">Chapter 2 | Page 51 (pdf-77)</span></span>\n\n'
-            "Some notes here"
-        )
-        html_out = dest._convert_to_html(text)
-        assert "<hr>" in html_out
-        assert '<span style="font-size: 0.9em; color: #777777"><b>Data Management</b>' in html_out
-        assert "&lt;span" not in html_out
-
     def test_normalize_callout_annotations(self):
         from living_ink.clean import normalize_callout_annotations
 
@@ -434,14 +391,3 @@ class TestPageSectionHeaderFormatting:
         assert "> !!!" in normalized
         assert "> [!quote] Highlight" in normalized
         assert '> "Important text"' in normalized
-
-    def test_apple_notes_converts_callouts(self):
-        from living_ink.destinations import AppleNotesDestination
-
-        dest = AppleNotesDestination()
-        md = '> [!quote] Highlight\n> "Sample quote"\n\n> [!note] Margin Note\n> !!!'
-        html_out = dest._convert_to_html(md)
-        assert "<b>Highlight</b>" in html_out
-        assert "<blockquote>&quot;Sample quote&quot;</blockquote>" in html_out
-        assert "<b>Margin Note</b>" in html_out
-        assert "<blockquote>!!!</blockquote>" in html_out

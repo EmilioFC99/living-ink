@@ -1,13 +1,14 @@
 """Destinations for publishing reMarkable notes.
 
-Abstracts the publication target (Apple Notes, Obsidian, etc.) from the
+Abstracts the publication target (Obsidian, and whatever follows it) from the
 processing logic. All publication targets inherit from
 :class:`~living_ink.destinations.base.Destination`.
 
 Destinations publish in registry order, and registry order is the order of the
-imports below, which is alphabetical. With one destination that is invisible;
-with two, "whose failure is reported first" would otherwise be decided by an
-import statement nobody thinks of as configuration.
+imports below, which is alphabetical. 1.0 ships one, so that is invisible today;
+the rule is written down because with two, "whose failure is reported first"
+would otherwise be decided by an import statement nobody thinks of as
+configuration.
 
 Example:
     >>> from living_ink.destinations import ObsidianDestination
@@ -19,13 +20,11 @@ import logging
 from typing import Any, Dict, List
 
 from living_ink import logs
-from living_ink.destinations.apple_notes import AppleNotesDestination
 from living_ink.destinations.base import (
     DESTINATION_REGISTRY,
     Destination,
     DestinationError,
     DestinationStatus,
-    DestinationUnavailable,
     MergeUnit,
     register_destination,
 )
@@ -42,12 +41,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DESTINATION_REGISTRY",
-    "AppleNotesDestination",
     "AttachmentPolicy",
     "Destination",
     "DestinationError",
     "DestinationStatus",
-    "DestinationUnavailable",
     "FileSystemDestination",
     "MergeUnit",
     "NoteBlock",

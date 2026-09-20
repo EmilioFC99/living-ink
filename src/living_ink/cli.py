@@ -4,7 +4,7 @@ Provides an extensible Command Pattern architecture for CLI execution.
 
 Commands:
     living-ink               Run sync (or setup if unconfigured)
-    living-ink sync          Sync notes from reMarkable to Obsidian/Apple Notes
+    living-ink sync          Sync notes from reMarkable to Obsidian
     living-ink watch         Sync repeatedly on a timer until interrupted
     living-ink setup         Launch interactive configuration walkthrough
     living-ink status        Display connection, vault, and sync service status
@@ -93,7 +93,7 @@ class SyncCommand(BaseCommand):
 
     name = "sync"
     help = "Run the sync pipeline"
-    description = "Sync notes and documents from reMarkable to Obsidian/Apple Notes."
+    description = "Sync notes and documents from reMarkable to an Obsidian vault."
 
     offer_setup_on_missing_config = True
 
@@ -109,7 +109,6 @@ class SyncCommand(BaseCommand):
             help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
         )
         parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
-        parser.add_argument("--folder", help="Apple Notes folder override")
         # A transport is a choice, not a preference order: asking for both
         # says nothing about which one was meant, so argparse rejects the
         # pair rather than silently picking SSH and syncing from a source
@@ -486,9 +485,6 @@ class StatusReport:
     #: so status and preflight cannot disagree about it. Empty when it is fine.
     obsidian_problem: str = ""
 
-    apple_notes_enabled: bool = False
-    apple_notes_folder: str = "Living Ink"
-
     auto_sync_installed: bool = False
     auto_sync_active: bool = False
 
@@ -513,6 +509,9 @@ class StatusReport:
 
         The key names and nesting are a stable contract for anyone scripting
         against ``living-ink status --json``; change them only deliberately.
+        1.0 drops the ``apple_notes`` object, which is such a change: the
+        destination it described no longer exists, and reporting it as
+        permanently disabled would be a fiction a script could still branch on.
 
         Returns:
             A JSON-serialisable dict. When the config is missing or unparsable,
@@ -523,7 +522,6 @@ class StatusReport:
             "remarkable": {},
             "ai": {},
             "obsidian": {},
-            "apple_notes": {},
             "auto_sync": {},
             "documents": {},
             "settings": [],
@@ -561,10 +559,6 @@ class StatusReport:
                 "root_folder": self.obsidian_root_folder,
                 "valid": self.obsidian_valid,
                 "problem": self.obsidian_problem,
-            },
-            "apple_notes": {
-                "enabled": self.apple_notes_enabled,
-                "folder": self.apple_notes_folder,
             },
             "auto_sync": {
                 "installed": self.auto_sync_installed,
@@ -736,7 +730,7 @@ def collect_status(config_path: Path) -> StatusReport:
 
     # Obsidian
     obs_cfg = cfg.get("obsidian", {})
-    report.obsidian_enabled = obs_cfg.get("enabled", False)
+    report.obsidian_enabled = obs_cfg.get("enabled", True)
     vault = Path(obs_cfg.get("vault_path", ""))
     report.obsidian_vault = str(vault)
     report.obsidian_root_folder = obs_cfg.get("root_folder", "")
@@ -750,11 +744,6 @@ def collect_status(config_path: Path) -> StatusReport:
     else:
         report.obsidian_valid = False
         report.obsidian_problem = "" if not report.obsidian_enabled else "No vault_path is set."
-
-    # Apple Notes
-    an_cfg = cfg.get("apple_notes", {})
-    report.apple_notes_enabled = an_cfg.get("enabled", False)
-    report.apple_notes_folder = an_cfg.get("folder_name", "Living Ink")
 
     # Effective settings, resolved exactly as a sync would resolve them.
     report.settings = Settings.explain(cfg)
@@ -787,10 +776,10 @@ def short_destination(class_name: str) -> str:
     """Turn a destination class name into something worth printing.
 
     Args:
-        class_name: e.g. ``AppleNotesDestination``.
+        class_name: e.g. ``FakeApiDestination``.
 
     Returns:
-        e.g. ``Apple Notes``.
+        e.g. ``Fake Api``.
     """
     import re
 
@@ -1661,12 +1650,6 @@ class StatusCommand(BaseCommand):
         else:
             print(f"Obsidian:      {dim('Disabled')}")
 
-        # Apple Notes
-        if report.apple_notes_enabled:
-            print(f"Apple Notes:   {green('Enabled')} (Folder: {report.apple_notes_folder})")
-        else:
-            print(f"Apple Notes:   {dim('Disabled')}")
-
         # Background sync
         if not report.auto_sync_installed:
             print(f"Auto-Sync:     {dim('Not installed (run living-ink setup to enable)')}")
@@ -1836,7 +1819,7 @@ class LivingInkCLI:
 
         parser = argparse.ArgumentParser(
             prog="living-ink",
-            description="Sync handwritten reMarkable notebooks to Obsidian and Apple Notes.",
+            description="Sync handwritten reMarkable notebooks to an Obsidian vault.",
         )
         parser.add_argument(
             "-v",

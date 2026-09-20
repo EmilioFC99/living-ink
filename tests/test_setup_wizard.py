@@ -242,7 +242,6 @@ class TestConfigGeneration:
             obsidian_vault_path="/Users/test/Vault",
             obsidian_root_folder="Living Ink",
             obsidian_mirror_folders=True,
-            apple_notes_enabled=False,
         )
         parsed = yaml.safe_load(yaml_str)
         assert parsed["ai"]["provider"] == "gemini"
@@ -251,7 +250,6 @@ class TestConfigGeneration:
         assert parsed["obsidian"]["vault_path"] == "/Users/test/Vault"
         assert parsed["obsidian"]["root_folder"] == "Living Ink"
         assert parsed["obsidian"]["mirror_folders"] is True
-        assert parsed["apple_notes"]["enabled"] is False
 
     def test_generate_config_yaml_holds_no_secrets(self):
         """The generated config carries no key for a secret at all.
@@ -300,21 +298,18 @@ class TestConfigGeneration:
                 obsidian_enabled=True,
                 obsidian_vault_path=vault_path,
                 obsidian_root_folder=folder,
-                apple_notes_enabled=True,
-                apple_notes_folder=folder,
             )
         )
 
         assert parsed["obsidian"]["vault_path"] == vault_path
         assert parsed["obsidian"]["root_folder"] == folder
-        assert parsed["apple_notes"]["folder_name"] == folder
 
     def test_generate_config_yaml_preserves_section_comments(self):
         """The generated file stays readable and hand-editable."""
         yaml_str = generate_config_yaml(ai_provider="gemini", ai_model="gemini-flash-latest")
         assert "# Living Ink Configuration" in yaml_str
         assert "# 1. AI Handwriting OCR & Text Cleanup" in yaml_str
-        assert "# 5. Apple Notes Destination" in yaml_str
+        assert "# 4. Obsidian Destination" in yaml_str
 
     def test_generate_config_yaml_offers_no_second_ocr_backend(self):
         """There is one way to read a page, so the config stops implying two."""
@@ -416,7 +411,6 @@ class TestRunWizard:
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
         #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # Apple Notes -> "n"
         # macOS background sync -> "n"
         # First sync -> "n"
         inputs = iter(
@@ -430,7 +424,6 @@ class TestRunWizard:
                 "1",  # Vault 1
                 "1",  # Existing folder 1
                 "y",  # Mirror folders
-                "n",  # Apple notes
                 "n",  # Background sync
                 "n",  # First sync
             ]
@@ -484,7 +477,6 @@ class TestRunWizard:
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
         #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # Apple Notes -> "n"
         # macOS background sync -> "n"
         # First sync -> "n"
         inputs = iter(
@@ -498,7 +490,6 @@ class TestRunWizard:
                 "1",  # Vault 1
                 "1",  # Existing folder 1
                 "y",  # Mirror folders
-                "n",  # Apple notes
                 "n",  # Background sync
                 "n",  # First sync
             ]
@@ -554,7 +545,7 @@ class TestRunWizard:
         # Step 2: Provider -> "1" (gemini), API key -> "AIzaTestKey"
         # Step 3: Enable Obsidian -> "y", Select vault -> "1",
         #         Choose folder -> "1" (Living Ink), Mirror -> "y"
-        # Apple Notes -> "n", Background sync -> "n", First sync -> "n"
+        # Background sync -> "n", First sync -> "n"
         inputs = iter(
             [
                 "1",  # SSH connection
@@ -567,7 +558,6 @@ class TestRunWizard:
                 "1",  # Vault 1
                 "1",  # Existing folder 1
                 "y",  # Mirror folders
-                "n",  # Apple notes
                 "n",  # Background sync
                 "n",  # First sync
             ]
@@ -635,7 +625,6 @@ class TestSavedConfigPermissions:
                 "1",  # Vault 1
                 "1",  # Existing folder 1
                 "y",  # Mirror folders
-                "n",  # Apple notes
                 "n",  # Background sync
                 "n",  # First sync
             ]

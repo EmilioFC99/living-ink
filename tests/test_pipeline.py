@@ -19,7 +19,6 @@ from living_ink import logs, pipeline
 from living_ink.config import ConfigurationMissing, credentials
 from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.destinations import (
-    AppleNotesDestination,
     Destination,
     DestinationError,
     DestinationStatus,
@@ -159,16 +158,6 @@ def test_sync_pipeline_properties_ssh_and_cloud():
     pipeline_cloud = SyncPipeline(SyncOptions(cloud=True))
     assert pipeline_cloud.preferred_connection == "cloud"
     assert pipeline_cloud.use_ssh is False
-
-
-def test_sync_pipeline_folder_override(monkeypatch):
-    """SyncPipeline(folder=...) overrides AppleNotes folder in environment and destination."""
-    monkeypatch.delenv("APPLE_NOTES_FOLDER", raising=False)
-    an_dest = AppleNotesDestination(folder_name="InitialFolder")
-    pipeline = SyncPipeline(SyncOptions(folder="WorkNotes"), destinations=[an_dest])
-
-    assert pipeline.folder == "WorkNotes"
-    assert an_dest.folder_name == "WorkNotes"
 
 
 def test_sync_pipeline_discover_documents_filtering():
@@ -928,7 +917,7 @@ class TestConfigIsValidatedOnLoad:
 
     def test_a_registered_destination_section_is_not_a_typo(self, tmp_path, capsys):
         """Every shipped destination's own section must pass its own check."""
-        cfg = self._write(tmp_path, "apple_notes:\n  enabled: true\n")
+        cfg = self._write(tmp_path, "obsidian:\n  enabled: true\n")
         pipeline.load_yaml_config(cfg)
         assert "unknown section" not in capsys.readouterr().out
 
@@ -1051,49 +1040,124 @@ class TestProcessedLog:
 
     def test_entries_round_trip(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
-        pipeline.add_to_processed_log("Obsidian", "doc-2", "v9")
-        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1", "doc-2": "v9"}
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-2", "v9")
+        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v9"}
 
     def test_republishing_updates_rather_than_duplicating(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v2")
-        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v2"}
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v2")
+        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v2"}
 
     def test_destinations_do_not_share_state(self, tmp_path, monkeypatch):
-        """A notebook can be published to Obsidian and still pending for Notes."""
+        """A notebook can be published to one destination and pending for another."""
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
-        assert pipeline.load_processed_log("AppleNotes") == {}
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        assert pipeline.load_processed_log("NotionDestination") == {}
 
     def test_state_survives_a_restart(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
         pipeline.reset_state_store()
-        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1"}
+        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1"}
 
     def test_a_second_process_sees_the_write(self, tmp_path, monkeypatch):
         """`watch` and a manual sync used to overwrite each other's progress."""
         from living_ink import state
 
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("Obsidian", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
 
         with state.StateStore(pipeline.get_state_db_path()) as other:
-            other.record_publication("doc-2", "Obsidian", "v2")
+            other.record_publication("doc-2", "ObsidianDestination", "v2")
 
-        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "v1", "doc-2": "v2"}
+        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v2"}
 
     def test_legacy_json_state_is_imported_once(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        legacy = tmp_path / "processed_notebooks_Obsidian.json"
+        legacy = tmp_path / "processed_notebooks_ObsidianDestination.json"
         legacy.write_text('{"doc-1": 7}', encoding="utf-8")
 
-        assert pipeline.load_processed_log("Obsidian") == {"doc-1": "7"}
+        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "7"}
         # Renamed rather than deleted, so a downgrade still has the state.
         assert not legacy.exists()
-        assert (tmp_path / "processed_notebooks_Obsidian.json.migrated").exists()
+        assert (tmp_path / "processed_notebooks_ObsidianDestination.json.migrated").exists()
+
+
+class TestOpeningTheStoreSweepsDeadDestinations:
+    """A destination that no longer ships loses its rows on the first open.
+
+    ``state`` cannot do this itself — it must not know what a destination is —
+    and ``destinations`` cannot, because it never sees the store. The pipeline
+    is the only layer holding both, so this is where the two are joined and
+    where it has to be tested.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory, before and after."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _seed(self, destination: str, doc_id: str = "doc-1") -> None:
+        """Write one publication row straight into the database on disk.
+
+        Args:
+            destination: The state key to file it under.
+            doc_id: The document it belongs to.
+        """
+        from living_ink import state
+
+        with state.StateStore(pipeline.get_state_db_path()) as store:
+            store.record_publication(doc_id, destination, "v1")
+
+    def test_the_registry_is_what_counts_as_known(self):
+        """Every shipped destination's declared key, not its class name."""
+        from living_ink.destinations import ObsidianDestination
+
+        assert pipeline.registered_state_keys() == [ObsidianDestination.state_key]
+
+    def test_rows_from_a_deleted_destination_are_gone(self, capsys):
+        self._seed("AppleNotesDestination")
+        capsys.readouterr()
+
+        store = pipeline.get_state_store()
+
+        assert store.published_versions("AppleNotesDestination") == {}
+        assert "AppleNotesDestination" in capsys.readouterr().out
+
+    def test_the_shipped_destination_keeps_its_rows(self):
+        self._seed("ObsidianDestination")
+
+        store = pipeline.get_state_store()
+
+        assert store.published_versions("ObsidianDestination") == {"doc-1": "v1"}
+
+    def test_a_clean_database_says_nothing(self, capsys):
+        self._seed("ObsidianDestination")
+        capsys.readouterr()
+
+        pipeline.get_state_store()
+
+        assert "Forgot" not in capsys.readouterr().out
+
+    def test_a_row_arriving_from_legacy_json_is_swept_in_the_same_pass(self):
+        """The import runs first, so its rows must be visible to the sweep.
+
+        Otherwise an upgrade from the JSON era resurrects exactly the rows this
+        is meant to remove, and they survive until the run after next.
+        """
+        legacy = pipeline.DATA_DIR / "processed_notebooks_AppleNotesDestination.json"
+        legacy.write_text('{"doc-1": 7}', encoding="utf-8")
+
+        store = pipeline.get_state_store()
+
+        assert store.published_versions("AppleNotesDestination") == {}
 
 
 class TestLogRedaction:
@@ -1201,21 +1265,17 @@ class TestExternalIdRoundTrip:
         pipeline.reset_state_store()
 
     def test_an_id_is_stored_with_the_publication(self):
-        pipeline.add_to_processed_log(
-            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
-        )
-        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
-        assert record["external_id"] == "x-coredata://p7"
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
+        record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
+        assert record["external_id"] == "obj-7"
 
     def test_a_later_sync_without_an_id_keeps_the_old_one(self):
         """A destination that fails to report an id must not erase the record."""
-        pipeline.add_to_processed_log(
-            "AppleNotesDestination", "doc-1", "v1", external_id="x-coredata://p7"
-        )
-        pipeline.add_to_processed_log("AppleNotesDestination", "doc-1", "v2")
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v2")
 
-        record = pipeline.get_state_store().get_publication("doc-1", "AppleNotesDestination")
-        assert record["external_id"] == "x-coredata://p7"
+        record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
+        assert record["external_id"] == "obj-7"
         assert record["version"] == "v2"
 
 

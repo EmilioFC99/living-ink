@@ -66,10 +66,6 @@ class DestinationError(Exception):
     """
 
 
-class DestinationUnavailable(DestinationError):
-    """The destination could not be reached; retrying later is sensible."""
-
-
 DESTINATION_REGISTRY: Dict[str, Type["Destination"]] = {}
 
 

@@ -1,8 +1,8 @@
 # Living Ink
 
-**Automate the flow of your "Living Signal" from reMarkable to Apple Notes or Obsidian.**
+**Automate the flow of your "Living Signal" from reMarkable to Obsidian.**
 
-Living Ink is an automated pipeline that bridges the gap between your reMarkable tablet and your digital "Second Brain" (Apple Notes or Obsidian). It goes beyond simple PDF export by converting your handwritten notebooks into fully searchable, typed text while preserving the original context and folder structure.
+Living Ink is an automated pipeline that bridges the gap between your reMarkable tablet and your digital "Second Brain" (Obsidian). It goes beyond simple PDF export by converting your handwritten notebooks into fully searchable, typed text while preserving the original context and folder structure.
 
 ## 🚀 Features
 
@@ -14,7 +14,6 @@ Living Ink is an automated pipeline that bridges the gap between your reMarkable
     *   **Ollama** (100% local, no API key needed)
     *   **Groq, OpenRouter, Mistral, Together AI**, or any custom OpenAI-compatible endpoint
     *   Option to disable AI cleanup entirely for raw OCR text
-*   **Apple Notes Integration**: Creates formatted notes containing cleaned text and original handwritten page images.
 *   **Obsidian Integration**: Exports notes as Markdown files with YAML frontmatter, WikiLinked page attachments, and **full folder hierarchy mirroring** inside your vault (or a configurable root folder).
 *   **Folder Mirroring**: Replicates your exact reMarkable folder structure (e.g., `Finance/2026/Q1/Budget` → `Living Ink/Finance/2026/Q1/Budget.md`).
 

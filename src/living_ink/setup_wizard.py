@@ -4,7 +4,7 @@ Provides a guided, user-friendly terminal walkthrough to:
 1. Pair or verify reMarkable tablet connection.
 2. Select and verify AI handwriting OCR provider (Gemini, OpenAI, Ollama, etc.).
 3. Auto-detect Obsidian vaults, choose existing or new destination folders.
-4. Optionally configure Apple Notes and automated background sync (LaunchAgent).
+4. Optionally configure automated background sync (LaunchAgent).
 5. Validate all credentials live and save ~/.config/living-ink/config.yml.
 
 Example:
@@ -28,7 +28,6 @@ import yaml
 from living_ink import safeio
 from living_ink.config import SCHEMA_VERSION, credentials
 from living_ink.config.schema import (
-    DEFAULT_APPLE_NOTES_FOLDER,
     DEFAULT_ATTACHMENTS_FOLDER,
     DEFAULT_PREFERRED_CONNECTION,
     DEFAULT_SSH_HOST,
@@ -577,8 +576,6 @@ def generate_config_yaml(
     obsidian_vault_path: str = "",
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
-    apple_notes_enabled: bool = False,
-    apple_notes_folder: str = DEFAULT_APPLE_NOTES_FOLDER,
     max_notebooks_per_run: int = 5,
 ) -> str:
     """Generate clean, commented config.yml content.
@@ -599,8 +596,6 @@ def generate_config_yaml(
         obsidian_vault_path: Absolute path to Obsidian vault.
         obsidian_root_folder: Root folder inside the vault.
         obsidian_mirror_folders: Whether to mirror reMarkable folder hierarchy.
-        apple_notes_enabled: Whether Apple Notes destination is enabled.
-        apple_notes_folder: Folder name in Apple Notes.
         max_notebooks_per_run: Maximum notebooks to process per sync run.
 
     Returns:
@@ -649,15 +644,6 @@ def generate_config_yaml(
                     "root_folder": obsidian_root_folder,
                     "mirror_folders": obsidian_mirror_folders,
                     "attachments_folder": DEFAULT_ATTACHMENTS_FOLDER,
-                }
-            },
-        ),
-        (
-            "5. Apple Notes Destination",
-            {
-                "apple_notes": {
-                    "enabled": apple_notes_enabled,
-                    "folder_name": apple_notes_folder,
                 }
             },
         ),
@@ -760,7 +746,7 @@ def run_wizard(
     print_func()
     print_func(bold(cyan("============================================================")))
     print_func(bold(cyan("              🖋️   Welcome to Living Ink Setup  🖋️            ")))
-    print_func(bold(cyan("   Sync your reMarkable notebooks to Obsidian & Apple Notes ")))
+    print_func(bold(cyan("   Sync your reMarkable notebooks to Obsidian ")))
     print_func(bold(cyan("============================================================")))
     print_func()
 
@@ -949,10 +935,10 @@ def run_wizard(
                     ai_key = key_input
 
     # -----------------------------------------------------------------------
-    # Step 3: Destinations (Obsidian & Apple Notes)
+    # Step 3: Destination
     # -----------------------------------------------------------------------
     print_func()
-    print_func(bold("[Step 3 of 4] Notes Destinations"))
+    print_func(bold("[Step 3 of 4] Notes Destination"))
     print_func(dim("-" * 60))
 
     # Obsidian Setup
@@ -1050,17 +1036,6 @@ def run_wizard(
     else:
         obsidian_enabled = False
 
-    # Apple Notes Setup
-    print_func()
-    apple_notes_enabled = False
-    apple_notes_folder = "Living Ink"
-    if platform.system() == "Darwin":
-        an_choice = input_func(bold("Enable Apple Notes sync? [y/N]: ")).strip().lower()
-        if an_choice in ("y", "yes"):
-            apple_notes_enabled = True
-            an_folder = input_func(bold("Apple Notes folder name [Living Ink]: ")).strip()
-            apple_notes_folder = an_folder or "Living Ink"
-
     # -----------------------------------------------------------------------
     # Step 4: Final Validation & Save
     # -----------------------------------------------------------------------
@@ -1079,8 +1054,6 @@ def run_wizard(
         obsidian_vault_path=obsidian_vault_path,
         obsidian_root_folder=obsidian_root_folder,
         obsidian_mirror_folders=obsidian_mirror_folders,
-        apple_notes_enabled=apple_notes_enabled,
-        apple_notes_folder=apple_notes_folder,
     )
 
     config_dir.mkdir(parents=True, exist_ok=True)
