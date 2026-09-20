@@ -64,6 +64,7 @@ from typing import Any
 
 import pytest
 
+from living_ink import scheduler
 from living_ink.cli import LivingInkCLI, sync_arguments
 from living_ink.cli.flags import flaggable
 from living_ink.config.schema import CHOICE, FLAG, LIST, NUMBER, WHOLE, Setting
@@ -341,9 +342,11 @@ SYNC_SURFACE: set[str] = {
 COMMAND_SURFACE: dict[str, set[str]] = {
     "": {"-h", "--help", "-v", "--version", "-c", "--config", "--verbose", "-q", "--quiet"},
     "sync": SYNC_SURFACE,
-    # Watch delegates ``register_args`` to sync, so the two lists can only ever
-    # differ by watch's own flag — which is the point of spelling it this way.
-    "watch": SYNC_SURFACE | {"--interval"},
+    # Watch takes the output flags and nothing else. A supervised process is
+    # restarted without its arguments, so a behaviour flag typed once would
+    # apply until the first restart and then silently stop — which is worse
+    # than never having been accepted. What a scheduled run does is configured.
+    "watch": {"-h", "--help", "--verbose", "-q", "--quiet", "--json"},
     "setup": {"-h", "--help", "--verbose", "-q", "--quiet"},
     # One read-only surface with one ``--json``, where ``status``, ``state``
     # and ``cache`` used to be three commands with three of them. Everything
@@ -355,12 +358,12 @@ COMMAND_SURFACE: dict[str, set[str]] = {
     # question it asks, and a flag here would be a third way to set a setting
     # that already has a config key and an environment variable.
     "config": {"-h", "--help", "--verbose", "-q", "--quiet"},
+    # One flag, and it does not select *what* is removed — it answers the
+    # questions. A ``--credentials`` or ``--everything`` would be a second way
+    # to say what the prompts already say, and a way for a script to remove
+    # something its author never read the consequence of.
+    "uninstall": {"-h", "--help", "--verbose", "-q", "--quiet", "--yes", "-y"},
 }
-
-#: Commands §7.1 of the 1.0 design specifies but that have not been built. They
-#: must still be rejected as usage errors rather than half-working, and this
-#: list is what makes their absence a stated fact instead of an oversight.
-UNBUILT_COMMANDS = ("uninstall",)
 
 #: Commands that shipped in 0.x and are gone. Listed rather than deleted,
 #: because a retired command has to fail the same clean way an unbuilt one
@@ -400,28 +403,29 @@ CLOUD_WALKTHROUGH: tuple[tuple[str, object], ...] = (
     ("Which vault?", THE_DETECTED_VAULT),
     ("Which folder inside the vault?", "Living Ink"),
     ("Mirror the tablet's folder structure", True),
-    ("Sync automatically every hour?", False),
+    # A schedule, not a yes, and asked on every platform. It used to be "sync
+    # automatically every hour?" and macOS-only, because the answer went into
+    # a launchd plist; it now goes into ``config.yml``, where systemd, a
+    # terminal left open and launchd all read the same line. "" is the preset
+    # that means no automatic syncing.
+    ("Sync automatically?", ""),
     ("Save this configuration?", True),
     ("Run your first sync now?", False),
 )
 
-#: Steps the wizard only offers on macOS, because there is nothing behind them
-#: anywhere else: background sync installs a launchd plist. Linux therefore
-#: gets a walkthrough that is genuinely one question shorter — which CI
-#: discovered, because the first version of this table assumed everyone was on
-#: a Mac.
-MACOS_ONLY_STEPS = frozenset({"Sync automatically every hour?"})
-
 
 def walkthrough_for_this_platform() -> list[tuple[str, object]]:
-    """Return the conversation the wizard actually holds on this machine.
+    """Return the conversation the wizard holds.
+
+    Every question is now platform-neutral — the schedule was the last one
+    that was not. Kept as a function because the call sites read better for
+    it and because the next platform-specific step should land here rather
+    than in a second table.
 
     Returns:
-        :data:`CLOUD_WALKTHROUGH` with the macOS-only steps removed when not
-        running on macOS.
+        :data:`CLOUD_WALKTHROUGH` as a list.
     """
-    on_macos = platform.system() == "Darwin"
-    return [step for step in CLOUD_WALKTHROUGH if on_macos or step[0] not in MACOS_ONLY_STEPS]
+    return list(CLOUD_WALKTHROUGH)
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +486,12 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     Combination(("sync", "--nonsense"), False, "unknown flags are a usage error"),
     Combination(("sync", "--prev"), True, "argparse accepts unambiguous abbreviations"),
     Combination(("sync", "--s"), False, "--ssh, --ssh-host and --skip-empty all match"),
-    # watch — every sync flag, plus its own.
-    Combination(("watch", "--interval", "600"), True, "the documented usage"),
-    Combination(("watch", "--notebook", "Foo", "--preview"), True, "watch takes every sync option"),
-    Combination(("watch", "--ssh", "--cloud"), False, "including sync's exclusions"),
-    Combination(("watch", "--interval", "fast"), False, "--interval is typed int"),
+    # watch — the output flags, and nothing that would change a scheduled run.
+    Combination(("watch",), True, "the documented usage: the schedule is configured"),
+    Combination(("watch", "--json"), True, "one object per tick is a reading, not a behaviour"),
+    Combination(("watch", "--verbose"), True, "so is how much it says"),
+    Combination(("watch", "--interval", "600"), False, "the interval is a cron expression now"),
+    Combination(("watch", "--notebook", "Foo"), False, "scoping a scheduled run is config"),
     # info and setup take almost nothing, and that is the point.
     Combination(("info",), True, "a bare info prints the report"),
     Combination(("info", "--json"), True, "the only flag info has"),
@@ -527,7 +532,10 @@ COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
     ("sync", "--notebook", "Foo"): {"pipeline.construct", "pipeline.run"},
     ("sync", "--preview"): {"compare_with_device"},
     ("sync", "--preview", "--json"): {"compare_with_device"},
-    ("watch", "--interval", "60"): {"pipeline.construct", "pipeline.run"},
+    # Nothing at all, because watching is off until it is configured: a bare
+    # ``watch`` on a fresh machine says so and stops. Reaching the pipeline
+    # here would mean the command had invented a schedule of its own.
+    ("watch",): set(),
     ("info",): {"collect_status"},
     ("info", "--json"): {"collect_status"},
     ("setup",): {"run_wizard"},
@@ -550,6 +558,7 @@ class _Recorder:
         """Start with an empty log."""
         self.calls: list[str] = []
         self.options: list[dict[str, Any]] = []
+        self.triggers: list[tuple[str, str | None]] = []
         self.state_db = state_db
         self.pipeline_error: BaseException | None = None
 
@@ -573,6 +582,7 @@ class Invocation:
         stderr: Everything printed to standard error.
         calls: Subsystem labels, in the order they fired.
         options: The keyword arguments each constructed pipeline was given.
+        triggers: What asked for each run, as ``(trigger, fire time)``.
     """
 
     argv: list[str]
@@ -581,6 +591,7 @@ class Invocation:
     stderr: str
     calls: list[str] = field(default_factory=list)
     options: list[dict[str, Any]] = field(default_factory=list)
+    triggers: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 @pytest.fixture(autouse=True)
@@ -631,13 +642,13 @@ def cli(monkeypatch, capsys, tmp_path):
     """
     from living_ink import cli as cli_module
     from living_ink import pipeline as pipeline_module
+    from living_ink import scheduler as scheduler_module
     from living_ink import ui as ui_module
     from living_ink.cli import caches as caches_module
     from living_ink.cli import inventory as inventory_module
     from living_ink.cli import status as status_module
     from living_ink.cli.commands import config as config_module
     from living_ink.cli.commands import setup as setup_module
-    from living_ink.cli.commands import watch as watch_module
 
     state_db = tmp_path / "state.db"
     state_db.write_bytes(b"")
@@ -646,15 +657,28 @@ def cli(monkeypatch, capsys, tmp_path):
     class _RecordingPipeline:
         """Stands in for the pipeline, remembering what it was told to do."""
 
-        def __init__(self, *, config_path=None, data_dir=None, destinations=None, **options):
+        def __init__(
+            self,
+            *,
+            config_path=None,
+            data_dir=None,
+            destinations=None,
+            trigger="manual",
+            scheduled_fire_time=None,
+            **options,
+        ):
             """Record the instruction without acting on it.
 
-            The three the front end supplies itself are named so that the rest
+            The five the front end supplies itself are named so that the rest
             can be collected: what a test asserts on is the instruction the
-            flags encode, not where the config happened to live.
+            flags encode, not where the config happened to live or who asked.
+            Who asked is recorded separately — it is the scheduler's whole
+            contribution, and it belongs in the ``runs`` row rather than in the
+            instruction.
             """
             recorder.note("pipeline.construct")
             recorder.options.append(options)
+            recorder.triggers.append((trigger, scheduled_fire_time))
 
         def run(self) -> bool:
             """Report success without doing any work.
@@ -799,7 +823,7 @@ def cli(monkeypatch, capsys, tmp_path):
         test that calls it either waits for the heat death of the suite or
         supplies the interrupt. Raising it from the sleep is the honest place:
         it is exactly what a user pressing Ctrl+C during the wait produces, and
-        ``WatchCommand`` already catches it there.
+        it is where :meth:`Schedule.ticks` documents the interrupt arriving.
 
         Args:
             seconds: Ignored.
@@ -812,7 +836,9 @@ def cli(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(socket, "socket", _no_network)
     monkeypatch.setattr(subprocess, "run", _no_subprocess)
     monkeypatch.setattr(subprocess, "Popen", _no_subprocess)
-    monkeypatch.setattr(watch_module.time, "sleep", _no_waiting)
+    # The scheduler resolves ``time.sleep`` when a Schedule is constructed, not
+    # at import, which is what makes this patch reach the running loop.
+    monkeypatch.setattr(scheduler_module.time, "sleep", _no_waiting)
 
     def _run(*argv: str, fails_with: BaseException | None = None) -> Invocation:
         """Run the CLI once and describe what happened.
@@ -828,6 +854,7 @@ def cli(monkeypatch, capsys, tmp_path):
         recorder.pipeline_error = fails_with
         recorder.calls.clear()
         recorder.options.clear()
+        recorder.triggers.clear()
         capsys.readouterr()
         try:
             code = cli_module.main(list(argv))
@@ -841,9 +868,27 @@ def cli(monkeypatch, capsys, tmp_path):
             stderr=captured.err,
             calls=list(recorder.calls),
             options=list(recorder.options),
+            triggers=list(recorder.triggers),
         )
 
     return _run
+
+
+@pytest.fixture
+def watching(monkeypatch):
+    """Turn the schedule on for a test that needs ``watch`` to actually tick.
+
+    Through the environment rather than a config file, because the settings
+    layer is what the command reads and the environment is the one layer a test
+    can set without also deciding where the config lives. Every minute, so the
+    catch-up fire is always due and the first tick runs without waiting.
+
+    Args:
+        monkeypatch: Pytest's environment patcher.
+    """
+    monkeypatch.setenv("LIVING_INK_WATCH_ENABLED", "true")
+    monkeypatch.setenv("LIVING_INK_WATCH_SCHEDULE", "* * * * *")
+    monkeypatch.setenv("LIVING_INK_WATCH_TIMEZONE", "UTC")
 
 
 # ---------------------------------------------------------------------------
@@ -934,10 +979,11 @@ class TestSyncFlagsMapExactly:
     def test_a_namespace_missing_a_flag_reads_as_the_flag_being_unset(self):
         """A partial namespace is a missing flag, not an AttributeError.
 
-        ``watch`` borrows the sync parser and a caller can construct one by
-        hand, so every read is a ``getattr`` with the same default the parser
-        declares. A flag added to the parser and forgotten here therefore
-        degrades to "not given" rather than crashing the run.
+        A caller can construct a namespace by hand — the scheduler hands one
+        straight to ``execute_sync`` — so every read is a ``getattr`` with the
+        same default the parser declares. A flag added to the parser and
+        forgotten here therefore degrades to "not given" rather than crashing
+        the run.
         """
         assert sync_arguments(argparse.Namespace()) == BARE_SYNC
         assert sync_arguments(argparse.Namespace(preview=True, transcribe=True))["dry_run"] is True
@@ -1359,17 +1405,17 @@ class TestAnUnreachableTabletIsReportedNotRaised:
         run = cli("sync", fails_with=TransportUnavailable("no route"))
         assert run.calls == ["pipeline.construct", "pipeline.run"]
 
-    def test_watch_survives_a_cycle_with_no_route(self, cli):
+    def test_watch_survives_a_cycle_with_no_route(self, cli, watching):
         """One unreachable cycle is not the end of the daemon.
 
-        ``watch`` is what the compose service runs, and a tablet is unplugged
-        far more often than it is broken; exiting on the first missed cycle
-        would mean a daemon that stops the first time someone takes the cable
-        to another room.
+        ``watch`` is what the supervised service runs, and a tablet is
+        unplugged far more often than it is broken; exiting on the first missed
+        cycle would mean a daemon that stops the first time someone takes the
+        cable to another room.
         """
         from living_ink.transport import TransportUnavailable
 
-        run = cli("watch", "--interval", "1", fails_with=TransportUnavailable("no route"))
+        run = cli("watch", fails_with=TransportUnavailable("no route"))
         # 130, not 0: the loop ended because the harness pressed Ctrl+C during
         # the wait, and a watch has no other way out. The missed cycle is
         # visible as a completed ``pipeline.run``, not as the exit code.
@@ -1713,7 +1759,6 @@ class TestCommandRouting:
         "argv,expected",
         [
             (["sync"], "pipeline.construct"),
-            (["watch", "--interval", "60"], "pipeline.construct"),
             (["setup"], "run_wizard"),
             (["info"], "collect_status"),
         ],
@@ -1721,6 +1766,23 @@ class TestCommandRouting:
     def test_the_word_picks_the_command(self, cli, argv, expected):
         """Each subcommand enters its own subsystem first."""
         assert cli(*argv).calls[0] == expected
+
+    def test_watch_reaches_the_pipeline_once_a_schedule_exists(self, cli, watching):
+        """Listed apart because it is the one command with a precondition.
+
+        ``watch`` on an unscheduled machine reaches nothing at all, which is
+        :data:`COMMAND_REACH`'s row for it; this is the other half of the same
+        fact, and the two together say the schedule — not the word — is what
+        decides whether a sync happens.
+        """
+        run = cli("watch")
+
+        assert run.calls[0] == "get_state_store"
+        assert "pipeline.run" in run.calls
+        # And it says so, because that is what ``info``'s staleness banner
+        # reads back: a scheduled run indistinguishable from a manual one
+        # cannot answer "did last night's sync happen?".
+        assert [trigger for trigger, _fire in run.triggers] == ["scheduled"]
 
     def test_a_bare_invocation_syncs_when_configured(self, cli, tmp_path, monkeypatch):
         """``living-ink`` with a config present runs a sync."""
@@ -1983,15 +2045,19 @@ class TestTheSurfaceIsPinned:
         )
         assert not undeclared, f"add these to SYNC_BOOLEAN_FLAGS or explain them: {undeclared}"
 
-    def test_watch_accepts_every_sync_flag(self):
-        """A watch can be scoped exactly the way a single sync can.
+    def test_watch_accepts_no_flag_that_changes_what_a_sync_does(self):
+        """The two parsers now overlap only where the overlap is harmless.
 
-        The design intends to take this away — 1.0 gives ``watch`` no behaviour
-        flags at all — so this records what is true now and will fail loudly on
-        the day that changes, which is when the tables above need rewriting.
+        ``watch`` used to borrow sync's parser wholesale, so a scheduled run
+        could be scoped from the command line — and then silently stop being
+        scoped the first time the supervisor restarted it without the
+        arguments. What is left is the reading flags, which change how the
+        process prints rather than what it publishes.
         """
         parsers = _subparsers(LivingInkCLI().build_parser())
-        assert _option_strings(parsers["sync"]) <= _option_strings(parsers["watch"])
+        shared = _option_strings(parsers["sync"]) & _option_strings(parsers["watch"])
+
+        assert shared == {"-h", "--help", "--verbose", "-q", "--quiet", "--json"}
 
 
 class TestSetupWritesOnlyWhatItWasTold:
@@ -2041,6 +2107,13 @@ class TestSetupWritesOnlyWhatItWasTold:
         # is the one thing in the flow that legitimately reaches the network.
         # Its own behaviour is tested in ``tests/test_wizard.py``.
         monkeypatch.setattr(setup_module.Wizard, "estimate", lambda self: None)
+        # Choosing a schedule installs a launchd job, which writes into the
+        # user's real ``~/Library`` and shells out to ``launchctl``. What the
+        # wizard owes is the *config*; that it hands the job off is asserted by
+        # the message, and the plist itself is ``tests/test_setup_wizard.py``'s.
+        monkeypatch.setattr(
+            wizard_module, "install_launch_agent", lambda **kw: (True, "Installed the job")
+        )
 
         def _run(script: list[tuple[str, object]] | None = None):
             """Run the wizard against an expected conversation.
@@ -2156,30 +2229,57 @@ class TestSetupWritesOnlyWhatItWasTold:
         for prompt, (fragment, _reply) in zip(asked, expected):
             assert fragment in prompt
 
-    @pytest.mark.skipif(platform.system() != "Darwin", reason="launchd is macOS")
-    def test_the_macos_only_steps_are_offered_on_macos(self, wizard):
-        """Every platform-specific question is asked here."""
-        _, asked, _ = wizard()
-        for fragment in MACOS_ONLY_STEPS:
-            assert any(fragment in prompt for prompt in asked), fragment
+    def test_the_schedule_is_asked_on_every_platform(self, wizard):
+        """The same question on macOS and on Linux, because the answer is config.
 
-    @pytest.mark.skipif(platform.system() == "Darwin", reason="checks the non-macOS walkthrough")
-    def test_the_macos_only_steps_are_skipped_elsewhere(self, wizard):
-        """Neither is asked, rather than asked and then quietly ignored.
-
-        Offering to install a launchd agent on Linux would be a question whose
-        answer cannot be honoured, and a wizard that asks those trains people
-        to distrust the ones that matter.
+        It used to be macOS-only: the answer became a ``StartInterval`` in a
+        launchd plist, so there was nothing behind it anywhere else. It now
+        becomes a cron expression in ``config.yml``, which a systemd-supervised
+        watcher reads exactly as launchd's does — so skipping the question off
+        a Mac would withhold the setting, not spare the user a dead end.
         """
         _, asked, _ = wizard()
-        for fragment in MACOS_ONLY_STEPS:
-            assert not any(fragment in prompt for prompt in asked), fragment
+        assert any("Sync automatically?" in prompt for prompt in asked), asked
 
-    def test_declining_every_extra_still_saves(self, wizard):
-        """Saying no to background sync and to the first sync works."""
+    def test_declining_a_schedule_still_saves(self, wizard, tmp_path):
+        """Choosing no automatic syncing writes ``enabled: false``, not nothing.
+
+        Same reason a declined destination is recorded rather than omitted: an
+        absent ``watch`` section reads as "never asked" and would have the tool
+        offer again.
+        """
+        import yaml
+
         result, _, _ = wizard()
         assert result.saved is True
         assert result.run_sync_requested is False
+
+        cfg = yaml.safe_load((tmp_path / "config" / "config.yml").read_text(encoding="utf-8"))
+        assert cfg["watch"]["enabled"] is False
+        assert "schedule" not in cfg["watch"]
+
+    def test_choosing_a_schedule_writes_the_expression_and_the_zone(self, wizard, tmp_path):
+        """A preset lands as cron plus a timezone, with no second question.
+
+        The zone is the host's. Asking for it would spend a first-run question
+        on something the machine already knows, and a cron expression without
+        one is a schedule that fires at a different hour depending on where
+        the process happens to be running.
+        """
+        import yaml
+
+        chosen = [
+            (fragment, "0 9 * * *" if fragment == "Sync automatically?" else reply)
+            for fragment, reply in walkthrough_for_this_platform()
+        ]
+        wizard(chosen)
+
+        cfg = yaml.safe_load((tmp_path / "config" / "config.yml").read_text(encoding="utf-8"))
+        assert cfg["watch"] == {
+            "enabled": True,
+            "schedule": "0 9 * * *",
+            "timezone": scheduler.host_timezone_name(),
+        }
 
     def test_the_wizard_never_shells_out_or_opens_a_socket(self, wizard, monkeypatch):
         """Choosing no background sync means no ``launchctl``, no network.
@@ -2252,31 +2352,227 @@ class TestSetupWritesOnlyWhatItWasTold:
         assert report.obsidian_vault.endswith("MyVault")
 
 
-class TestCommandsThatDoNotExistYet:
-    """The two commands 1.0 specifies but that have not been built.
+@pytest.fixture
+def installation(monkeypatch, tmp_path):
+    """Build a complete installation under a throwaway directory.
 
-    Recorded rather than skipped: an unimplemented command must be a clean
-    usage error, not a traceback and not a command that half-works. When one
-    ships, this fails and its own rows join the tables above.
+    Every path ``uninstall`` can delete is redirected here first. The suite
+    shares one data directory for the whole session, so an uninstall test that
+    ran against the real constants would delete another test's cache — and
+    would pass, because a cache that is gone is indistinguishable from a cache
+    that missed.
+
+    Args:
+        monkeypatch: Pytest's patcher.
+        tmp_path: Pytest's per-test directory.
+
+    Returns:
+        A dict of every path that exists, by the label the command prints.
+    """
+    from living_ink import pipeline as pipeline_module
+    from living_ink import setup_wizard as wizard_module
+    from living_ink.cli import caches as caches_module
+    from living_ink.config import credentials_dir, get_config_path
+
+    paths = {
+        "transcripts": tmp_path / "transcripts",
+        "renders": tmp_path / "renders",
+        "work": tmp_path / "work",
+        "logs": tmp_path / "logs",
+        "state": tmp_path / "state.db",
+    }
+    for name in ("transcripts", "renders", "work", "logs"):
+        paths[name].mkdir()
+        (paths[name] / "something").write_text("x", encoding="utf-8")
+    paths["state"].write_bytes(b"")
+
+    monkeypatch.setattr(pipeline_module, "TRANSCRIPT_CACHE_DIR", paths["transcripts"])
+    monkeypatch.setattr(pipeline_module, "RENDER_CACHE_DIR", paths["renders"])
+    monkeypatch.setattr(pipeline_module, "WORK_DIR", paths["work"])
+    monkeypatch.setattr(pipeline_module, "LOGS_DIR", paths["logs"])
+    monkeypatch.setattr(caches_module, "state_db_path", lambda: paths["state"])
+
+    # The config and the credentials are already inside the isolated home.
+    config = get_config_path()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("schema_version: 1\n", encoding="utf-8")
+    secrets = credentials_dir(config)
+    secrets.mkdir(parents=True, exist_ok=True)
+    (secrets / "ai.api_key.gemini").write_text("AIzaSecret", encoding="utf-8")
+
+    paths["config"] = config
+    paths["credentials"] = secrets
+
+    # The job stands in for itself. Removing a real one means ``launchctl``,
+    # which this file forbids on principle and which
+    # ``tests/test_setup_wizard.py`` already drives with a mocked
+    # ``subprocess``. What is worth asserting here is that ``uninstall`` calls
+    # it, reports what it said, and leaves the job gone — so the stub does the
+    # one filesystem effect and skips the shell.
+    paths["job"] = tmp_path / "com.livingink.sync.plist"
+    paths["job"].write_text("<plist/>", encoding="utf-8")
+
+    def _remove_job():
+        """Unload nothing and delete the plist.
+
+        Returns:
+            The same ``(ok, message)`` pair the real remover returns.
+        """
+        paths["job"].unlink(missing_ok=True)
+        return True, "Background sync LaunchAgent removed."
+
+    monkeypatch.setattr(wizard_module, "uninstall_launch_agent", _remove_job)
+    return paths
+
+
+class TestUninstallRemovesWhatItInstalled:
+    """``uninstall`` is the only command whose job is deletion.
+
+    Which makes the interesting assertions negative ones: what it leaves, what
+    it refuses to do without being asked, and what no flag can reach.
     """
 
-    @pytest.mark.parametrize("command", UNBUILT_COMMANDS)
-    def test_it_is_rejected_as_a_usage_error(self, cli, command):
-        """Exit 2 and a message naming the valid choices."""
-        run = cli(command)
-        assert run.exit_code == 2
-        assert "invalid choice" in run.stderr
+    def test_the_notes_are_never_touched(self, cli, installation, tmp_path):
+        """A vault full of notes survives ``--yes``, the most destructive form.
 
-    def test_uninstall_cannot_run_at_all(self, cli):
-        """Nothing is removed, because nothing can be invoked.
-
-        The strongest statement available about "uninstall leaves nothing
-        behind" while there is no uninstall: no subsystem is reached, so there
-        is no partial removal to recover from.
+        The one guarantee the command makes in its help text. Tested with the
+        flag that skips every prompt, because a promise that only holds while
+        someone is watching is not the promise that was made.
         """
+        vault = tmp_path / "vault"
+        (vault / "Living Ink").mkdir(parents=True)
+        note = vault / "Living Ink" / "Notes.md"
+        note.write_text("# Notes\n\nhandwriting\n", encoding="utf-8")
+        installation["config"].write_text(
+            f"schema_version: 1\nobsidian:\n  vault_path: {vault}\n", encoding="utf-8"
+        )
+
+        run = cli("uninstall", "--yes")
+
+        assert run.exit_code == 0
+        assert note.read_text(encoding="utf-8") == "# Notes\n\nhandwriting\n"
+        assert str(vault) in run.stdout
+
+    def test_yes_removes_every_tier(self, cli, installation):
+        """``--yes`` is the whole installation, caches and credentials alike."""
+        run = cli("uninstall", "--yes")
+
+        assert run.exit_code == 0
+        for label, path in installation.items():
+            if label == "job":
+                continue  # Its own test: there is no job to remove off a Mac.
+            assert not path.exists(), f"{label} survived --yes"
+
+    @pytest.mark.skipif(platform.system() != "Darwin", reason="launchd is macOS")
+    def test_the_background_job_goes_without_being_asked(self, cli, installation, monkeypatch):
+        """The job is tier one: an uninstall that leaves it is not one.
+
+        It is also the tier that costs nothing to rebuild — one ``setup`` —
+        which is why it is the thing removed without a question while a
+        credential is not.
+        """
+        from living_ink import ui as ui_module
+
+        monkeypatch.setattr(ui_module, "confirm", lambda *a, **k: False)
+
         run = cli("uninstall")
-        assert run.calls == []
+
+        assert run.exit_code == 0
+        assert not installation["job"].exists()
+
+    @pytest.mark.skipif(platform.system() == "Darwin", reason="checks the non-macOS path")
+    def test_it_does_not_guess_at_a_job_it_never_installed(self, cli, installation):
+        """Off a Mac there is no launchd, and no unit file of ours to delete.
+
+        Hunting for a systemd unit by name is how an uninstall removes a file
+        somebody else wrote.
+        """
+        run = cli("uninstall", "--yes")
+
+        assert run.exit_code == 0
+        assert installation["job"].exists()
+
+    def test_declining_keeps_the_credentials_and_the_record(self, cli, installation, monkeypatch):
+        """Saying no to the questions leaves everything the questions guard.
+
+        The caches and the job go either way — they are the tier that is not
+        asked about — but a user who declines must keep their API key, their
+        pairing and their sync record. Answering no to one and yes to another
+        is the same code path with a different table; what matters here is
+        that "no" reaches the filesystem as no deletion at all.
+        """
+        from living_ink import ui as ui_module
+
+        monkeypatch.setattr(ui_module, "confirm", lambda *a, **k: False)
+
+        run = cli("uninstall")
+
+        assert run.exit_code == 0
+        assert installation["credentials"].exists()
+        assert installation["config"].exists()
+        assert installation["state"].exists()
+        assert not installation["renders"].exists()
+
+    def test_a_cancelled_prompt_is_a_no(self, cli, installation, monkeypatch):
+        """Ctrl+C at a deletion prompt declines it rather than confirming it.
+
+        ``ui.confirm`` returns None when the user leaves, and None is not
+        False — everywhere else in the CLI that distinction matters. Here it
+        must not: the one reading of an interrupted deletion prompt is that
+        the deletion was not agreed to.
+        """
+        from living_ink import ui as ui_module
+
+        monkeypatch.setattr(ui_module, "confirm", lambda *a, **k: None)
+
+        run = cli("uninstall")
+
+        assert run.exit_code == 0
+        assert installation["credentials"].exists()
+        assert installation["state"].exists()
+
+    def test_it_refuses_to_guess_without_a_terminal(self, cli, installation, monkeypatch):
+        """No terminal and no ``--yes`` is a usage error, and removes nothing.
+
+        Not a silent "assume no": a scripted uninstall that quietly skips the
+        credentials leaves a machine the author believes is clean.
+        """
+        from living_ink import ui as ui_module
+
+        monkeypatch.setattr(ui_module, "is_tty", lambda: False)
+
+        run = cli("uninstall")
+
         assert run.exit_code == 2
+        assert "--yes" in run.stderr
+        for label, path in installation.items():
+            assert path.exists(), f"{label} was removed without a terminal"
+
+    def test_it_reaches_no_other_subsystem(self, cli, installation):
+        """No sync, no status probe, no wizard — deletion is the whole command.
+
+        The ``COMMAND_REACH`` statement for ``uninstall``, made here rather
+        than in the table because the table's rows run against the real path
+        constants and this one must not.
+        """
+        run = cli("uninstall", "--yes")
+
+        assert run.calls == []
+
+    def test_uninstalling_twice_is_not_a_failure(self, cli, installation):
+        """The second run exits 0 and says nothing alarming.
+
+        A half-installed machine is the normal case for this command: somebody
+        already deleted the config by hand, or never had a background job.
+        Reporting five warnings for five things that were already gone reads
+        as an uninstall that failed.
+        """
+        assert cli("uninstall", "--yes").exit_code == 0
+
+        again = cli("uninstall", "--yes")
+
+        assert again.exit_code == 0
+        assert "⚠" not in again.stdout
 
 
 class TestCommandsThatUsedToExist:
