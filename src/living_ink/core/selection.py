@@ -390,8 +390,8 @@ def _owes_a_publish(
         dest: The destination being asked about.
 
     Returns:
-        True if the note is missing, out of date, or would be produced
-        differently now.
+        True if the note is missing, out of date, incomplete, or would be
+        produced differently now.
     """
     row = store.get_publication(doc_id, dest.state_key)
     if row is None:
@@ -399,6 +399,12 @@ def _owes_a_publish(
     if row["version"] != version:
         return True
     if (row["recipe"] or "") != recipe:
+        return True
+    if row["pages_failed"]:
+        # A partial publish is a publish, so the row exists and the version
+        # matches — without this the gaps would be permanent. The pages that
+        # did come back are served from the transcript cache, so retrying a
+        # 200-page notebook for three rate-limited pages costs three calls.
         return True
     return not _still_there(dest, doc_id, row)
 

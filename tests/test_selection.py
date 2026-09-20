@@ -665,3 +665,84 @@ class TestOrphans:
         chosen = select([], SelectionCriteria(), store, [Vault()], settings=settings)
 
         assert chosen.orphans == ()
+
+
+class TestAPartialPublishIsNotADonePublish:
+    """A note published with gaps in it is a debt the next run has to pay."""
+
+    def _publish_with_gaps(self, store, dest, settings, *, pages_failed):
+        """Record exactly what a partial run records: current version, current recipe, N gaps."""
+        store.record_publication(
+            "doc-1",
+            dest.state_key,
+            "v1",
+            recipe=document_recipe(source_for_name("notebook"), dest, settings),
+            pages_failed=pages_failed,
+            target="Notes.md",
+        )
+
+    def test_a_row_with_failed_pages_is_still_pending(self, store, settings):
+        """Nothing else will ever flip: the tablet is unchanged and so is the recipe.
+
+        Publishing 197 of 200 pages and recording the row as done would make
+        the three rate-limited gaps permanent — the user would have to force a
+        re-sync of the whole library to get pages the run already knew it lost.
+        """
+        dest = Vault(exists=True)
+        self._publish_with_gaps(store, dest, settings, pages_failed=3)
+
+        chosen = select([doc()], SelectionCriteria(), store, [dest], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
+
+    def test_a_row_with_no_failed_pages_is_not_pending(self, store, settings):
+        """The control: without it the previous test would pass on any stale row.
+
+        The two rows differ in one column, so a run that re-syncs the complete
+        one is re-transcribing a library for nothing.
+        """
+        dest = Vault(exists=True)
+        self._publish_with_gaps(store, dest, settings, pages_failed=0)
+
+        chosen = select([doc()], SelectionCriteria(), store, [dest], settings=settings)
+
+        assert chosen.to_process == ()
+        assert [reason for _, reason in chosen.skipped] == [UNCHANGED]
+
+    def test_the_predicate_owns_the_rule_with_gaps(self, store, settings):
+        """``sync --status`` and the run both reach this through one predicate.
+
+        Asserting it here as well as through :func:`select` is what stops the
+        preview and the run disagreeing about whether a gapped note is done.
+        """
+        from living_ink.core.selection import _owes_a_publish
+
+        dest = Vault(exists=True)
+        recipe = document_recipe(source_for_name("notebook"), dest, settings)
+        self._publish_with_gaps(store, dest, settings, pages_failed=1)
+
+        assert _owes_a_publish(store, "doc-1", "v1", recipe, dest) is True
+
+    def test_the_predicate_owns_the_rule_without_gaps(self, store, settings):
+        """A complete row with a matching version and recipe owes nothing."""
+        from living_ink.core.selection import _owes_a_publish
+
+        dest = Vault(exists=True)
+        recipe = document_recipe(source_for_name("notebook"), dest, settings)
+        self._publish_with_gaps(store, dest, settings, pages_failed=0)
+
+        assert _owes_a_publish(store, "doc-1", "v1", recipe, dest) is False
+
+    def test_the_gaps_are_retried_only_where_they_happened(self, store, settings):
+        """The count is a fact about one row, and a run can lose a page at one place only.
+
+        Reading it per document instead of per destination would rewrite a
+        complete note somewhere else every time another destination stumbled.
+        """
+        vault, archive = Vault(exists=True), Archive(exists=True)
+        self._publish_with_gaps(store, vault, settings, pages_failed=2)
+        self._publish_with_gaps(store, archive, settings, pages_failed=0)
+
+        chosen = select([doc()], SelectionCriteria(), store, [vault, archive], settings=settings)
+
+        assert [d.state_key for d in chosen.to_process[0].pending] == ["Vault"]
