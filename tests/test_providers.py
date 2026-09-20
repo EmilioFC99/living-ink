@@ -7,6 +7,7 @@ of ``UniversalChatProvider``.
 
 import json
 import urllib.error
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -102,6 +103,44 @@ class TestTextRepairProviderABC:
         p = Complete()
         with pytest.raises(NotImplementedError, match="does not support vision OCR"):
             p.ocr_image("/path/to/img.png", "instructions")
+
+    def test_probe_vision_sends_a_real_image_through_ocr_image(self):
+        """The probe has to exercise the path a sync uses, not a second one."""
+        seen = {}
+
+        class Complete(TextRepairProvider):
+            def repair_text(self, raw_text, instructions):
+                return raw_text
+
+            @property
+            def name(self):
+                return "test"
+
+            def ocr_image(self, image_path, instructions):
+                seen["path"] = image_path
+                seen["header"] = Path(image_path).read_bytes()[:8]
+                seen["instructions"] = instructions
+                return "READY"
+
+        assert Complete().probe_vision() == "READY"
+        assert seen["header"] == b"\x89PNG\r\n\x1a\n"
+        assert seen["instructions"] == "Reply with exactly: READY"
+        # The workspace is a temp directory, and nothing outlives the call.
+        assert not Path(seen["path"]).exists()
+
+    def test_probe_vision_carries_the_no_vision_refusal(self):
+        """A provider with no ``ocr_image`` says so rather than looking broken."""
+
+        class Complete(TextRepairProvider):
+            def repair_text(self, raw_text, instructions):
+                return raw_text
+
+            @property
+            def name(self):
+                return "test"
+
+        with pytest.raises(NotImplementedError, match="does not support vision OCR"):
+            Complete().probe_vision()
 
 
 # =========================================================================

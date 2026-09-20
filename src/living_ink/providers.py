@@ -28,9 +28,11 @@ import base64
 import json
 import logging
 import random
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Dict, Optional, Type
 
 from living_ink.redact import redact, register_secret
@@ -132,6 +134,20 @@ def register_provider(name: str):
 # ---------------------------------------------------------------------------
 
 
+#: A 64×64 blank PNG, base64-encoded — the smallest thing that is
+#: unambiguously an image to every endpoint. The probe asks what the *request*
+#: is worth, not what the model can read, so there is nothing on it to read.
+PROBE_IMAGE_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAAAAACPAi4CAAAAK0lEQVR42u3MMREAAAgE"
+    "oNf+nTWEmwcBqMlNRyAQCAQCgUAgEAgEAsHzYAFQLQF/OJ8+2wAAAABJRU5ErkJggg=="
+)
+
+#: What the probe asks for. Deliberately not a transcription instruction: a
+#: blank page transcribes to nothing, and an empty reply is how a *failed*
+#: verification is reported.
+PROBE_INSTRUCTIONS = "Reply with exactly: READY"
+
+
 class TextRepairProvider(abc.ABC):
     """Abstract base class for AI text cleanup providers.
 
@@ -204,6 +220,29 @@ class TextRepairProvider(abc.ABC):
             NotImplementedError: If the provider does not support vision OCR.
         """
         raise NotImplementedError(f"Provider '{self.name}' does not support vision OCR.")
+
+    def probe_vision(self) -> str:
+        """Send one real image and return whatever comes back.
+
+        Verification has to ask the question a sync will ask. Every page is
+        read by :meth:`ocr_image` and there is no second OCR backend to fall
+        back to, so a text-only model that answers a text prompt perfectly is
+        still a provider that fails on the first page of the first notebook —
+        one wasted call per page, discovered after the run. This goes through
+        ``ocr_image`` rather than building its own request for the same
+        reason: a probe that exercises a different code path can pass while
+        the path that matters is broken.
+
+        Returns:
+            The provider's reply, empty if the request failed.
+
+        Raises:
+            NotImplementedError: If the provider has no vision support at all.
+        """
+        with tempfile.TemporaryDirectory(prefix="living-ink-probe-") as tmp:
+            image = Path(tmp) / "probe.png"
+            image.write_bytes(base64.b64decode(PROBE_IMAGE_B64))
+            return self.ocr_image(str(image), PROBE_INSTRUCTIONS)
 
 
 # ---------------------------------------------------------------------------
