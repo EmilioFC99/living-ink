@@ -28,6 +28,7 @@ import argparse
 import logging
 import platform
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -48,11 +49,6 @@ DEFAULT_ROOT_FOLDER = "Living Ink"
 #: Chosen in the folder menu to mean "not one of these". A byte no folder
 #: name can contain, so it cannot collide with a real answer.
 NEW_FOLDER = "\x00new"
-
-#: The interval a background sync runs at when the user says yes. An hour is
-#: short enough to feel automatic and long enough that a tablet left plugged in
-#: is not re-listed every few minutes.
-BACKGROUND_INTERVAL_SECONDS = 3600
 
 
 @dataclass
@@ -78,7 +74,13 @@ class Answers:
         obsidian_vault_path: Absolute path to the vault.
         obsidian_root_folder: Folder inside the vault, "" for the vault root.
         obsidian_mirror_folders: Whether to mirror the tablet's folder tree.
-        background_sync: Whether to install the hourly launch agent.
+        watch_schedule: The cron expression automatic syncs run on, or "" for
+            none. This is what decides whether a background job is installed
+            at all: a supervisor with no schedule to read is a process that
+            wakes up forever to do nothing.
+        watch_timezone: The zone that expression is read in. Not asked — a
+            first-run wizard that opens with "which timezone are you in?" has
+            spent a question on something the machine already knows.
         warnings: Things that did not verify, repeated in the summary so the
             user confirms them knowingly rather than having watched them
             scroll past ten questions ago.
@@ -97,7 +99,8 @@ class Answers:
     obsidian_vault_path: str = ""
     obsidian_root_folder: str = DEFAULT_ROOT_FOLDER
     obsidian_mirror_folders: bool = True
-    background_sync: bool = False
+    watch_schedule: str = ""
+    watch_timezone: str = ""
     warnings: List[str] = field(default_factory=list)
 
 
@@ -496,10 +499,52 @@ class Wizard:
                 console(ui.yellow(f"  ⚠ {warning}"))
 
         console("")
-        if platform.system() == "Darwin":
-            answers.background_sync = bool(ui.confirm("Sync automatically every hour?"))
+        answers.watch_schedule, answers.watch_timezone = self._ask_schedule()
 
         return bool(ui.confirm("Save this configuration?", default=True))
+
+    @staticmethod
+    def _ask_schedule() -> Tuple[str, str]:
+        """Ask how often to sync, and in which zone to read that.
+
+        A schedule, not a yes. The question used to be "sync automatically
+        every hour?", which offered one cadence and hid it in a launchd plist
+        — so a user who wanted weekday mornings had no answer, and a user who
+        said yes could not find out what they had agreed to. Each preset shows
+        the moment it would next fire, because that is the only way to tell
+        ``0 9 * * 1`` from ``0 9 1 * *`` without reading cron fluently.
+
+        Asked on every platform: the schedule is a line in ``config.yml`` that
+        a watcher reads, so it means the same thing under systemd, under a
+        terminal left open, and under launchd.
+
+        Returns:
+            ``(cron expression, timezone name)``. The expression is "" when
+            the user chose not to sync automatically, and the timezone is the
+            host's either way, so turning watching on later in ``config`` does
+            not also mean answering a second question.
+        """
+        from living_ink import scheduler
+
+        tz, tz_name = scheduler.resolve_timezone("")
+        now = datetime.now(tz)
+
+        choices: List[ui.Choice] = []
+        for label, expression in scheduler.SCHEDULE_PRESETS:
+            if expression is None:
+                choices.append(ui.Choice(value="", label=label))
+                continue
+            upcoming = scheduler.next_fire(expression, now, tz)
+            choices.append(
+                ui.Choice(
+                    value=expression,
+                    label=label,
+                    description=f"next: {scheduler.format_moment(upcoming, tz)}",
+                )
+            )
+
+        chosen = ui.select(f"Sync automatically? (times in {tz_name})", choices, default="")
+        return (chosen or ""), tz_name
 
     def _summary_rows(self) -> List[Tuple[str, str]]:
         """Describe the pending configuration, one line per decision.
@@ -577,6 +622,8 @@ class Wizard:
                 obsidian_vault_path=answers.obsidian_vault_path,
                 obsidian_root_folder=answers.obsidian_root_folder,
                 obsidian_mirror_folders=answers.obsidian_mirror_folders,
+                watch_schedule=answers.watch_schedule,
+                watch_timezone=answers.watch_timezone,
             ),
         )
         console("")
@@ -600,11 +647,17 @@ class Wizard:
         if ok:
             console(ui.green(f"  ✓ {message}"))
 
-        if answers.background_sync:
-            ok, message = install_launch_agent(
-                repo_dir=self.root, interval_seconds=BACKGROUND_INTERVAL_SECONDS
-            )
-            console(ui.green(f"  ✓ {message}") if ok else ui.yellow(f"  ⚠ {message}"))
+        # The schedule is the config's business and lands on every platform;
+        # the job that keeps the watcher alive is launchd's, and launchd only
+        # exists on a Mac. Elsewhere the schedule is written and the user is
+        # told what still has to run it, rather than being silently given a
+        # config nothing reads.
+        if answers.watch_schedule:
+            if platform.system() == "Darwin":
+                ok, message = install_launch_agent(repo_dir=self.root)
+                console(ui.green(f"  ✓ {message}") if ok else ui.yellow(f"  ⚠ {message}"))
+            else:
+                console(ui.dim("  · Start 'living-ink watch' to run this schedule"))
 
         return config_file
 

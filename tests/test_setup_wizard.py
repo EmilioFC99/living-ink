@@ -337,17 +337,52 @@ class TestLaunchAgent:
     @patch("subprocess.run")
     @patch("platform.system", return_value="Darwin")
     def test_install_launch_agent_macos(self, mock_system, mock_run, tmp_path):
-        """Generates valid LaunchAgent plist file and runs launchctl."""
+        """Writes a plist that supervises ``watch`` and schedules nothing.
+
+        The three assertions are the whole of §13.3. ``StartInterval`` is gone
+        because *when* a sync happens is a cron expression in ``config.yml``
+        that the watcher re-reads every tick — left in the plist, it would be a
+        second schedule, invisible to ``info`` and unreachable from ``config``.
+        ``KeepAlive`` is what replaces it: launchd's remaining job is to
+        restart the watcher, not to time it.
+        """
         mock_run.return_value = MagicMock(returncode=0)
 
+        cli_path = tmp_path / "living-ink"
+        cli_path.write_text("#!/bin/sh\n", encoding="utf-8")
         mock_plist_path = tmp_path / "com.livingink.sync.plist"
-        with patch.object(setup_wizard, "LAUNCH_AGENT_PLIST", mock_plist_path):
-            ok, msg = install_launch_agent(repo_dir=tmp_path, interval_seconds=3600)
+        with (
+            patch.object(setup_wizard, "LAUNCH_AGENT_PLIST", mock_plist_path),
+            patch.object(setup_wizard.shutil, "which", return_value=str(cli_path)),
+        ):
+            ok, msg = install_launch_agent(repo_dir=tmp_path)
             assert ok is True
             assert mock_plist_path.exists()
             content = mock_plist_path.read_text(encoding="utf-8")
             assert "com.livingink.sync" in content
-            assert "<integer>3600</integer>" in content
+            assert "<string>watch</string>" in content
+            assert "StartInterval" not in content
+            assert "<key>KeepAlive</key>" in content
+
+    @patch("platform.system", return_value="Darwin")
+    def test_install_launch_agent_needs_the_command(self, mock_system, tmp_path):
+        """Refuses rather than supervising an interpreter out of a checkout.
+
+        The old fallback was ``uv run python -m living_ink`` from the
+        repository, which works until the directory is renamed — and then the
+        background job dies silently, months later, with the only symptom
+        being notebooks that stop arriving.
+        """
+        mock_plist_path = tmp_path / "com.livingink.sync.plist"
+        with (
+            patch.object(setup_wizard, "LAUNCH_AGENT_PLIST", mock_plist_path),
+            patch.object(setup_wizard.shutil, "which", return_value=None),
+        ):
+            ok, msg = install_launch_agent(repo_dir=tmp_path)
+
+        assert ok is False
+        assert "not installed" in msg
+        assert not mock_plist_path.exists()
 
     @patch("subprocess.run")
     def test_uninstall_launch_agent(self, mock_run, tmp_path):
