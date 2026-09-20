@@ -1,6 +1,5 @@
 """Tests for living_ink.pipeline module and SyncPipeline class."""
 
-import dataclasses
 import datetime
 import json
 import os
@@ -8,8 +7,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -589,78 +586,6 @@ class TestOcrPreflight:
         assert err.value.hint == "run: living-ink setup"
 
 
-class TestPageConcurrency:
-    """Pages are transcribed several at a time, but always reported in order."""
-
-    def _pipeline(self, concurrency: int) -> SyncPipeline:
-        p = SyncPipeline(destinations=[])
-        p.settings = replace(p.settings, ocr_concurrency=concurrency)
-        return p
-
-    def test_results_stay_in_page_order(self):
-        """A slow first page must not end up after a fast last page."""
-        pipeline_obj = self._pipeline(4)
-        paths = [Path(f"page-{i}.png") for i in range(4)]
-
-        def transcribe(path):
-            # Earlier pages finish last, which reorders anything unordered.
-            time.sleep(0.05 * (len(paths) - int(path.stem.split("-")[1])))
-            return path.name
-
-        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
-            results = pipeline_obj._transcribe_pages(paths)
-
-        assert results == [p.name for p in paths]
-
-    def test_pages_are_transcribed_concurrently(self):
-        """Four pages at width four take about one page's time, not four."""
-        pipeline_obj = self._pipeline(4)
-        paths = [Path(f"page-{i}.png") for i in range(4)]
-
-        def transcribe(path):
-            time.sleep(0.1)
-            return ""
-
-        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
-            started = time.monotonic()
-            pipeline_obj._transcribe_pages(paths)
-            elapsed = time.monotonic() - started
-
-        assert elapsed < 0.3, f"pages appear to have run serially ({elapsed:.2f}s)"
-
-    def test_concurrency_of_one_runs_serially(self):
-        pipeline_obj = self._pipeline(1)
-        paths = [Path("a.png"), Path("b.png")]
-        in_flight = []
-
-        def transcribe(path):
-            in_flight.append(path.name)
-            assert len(in_flight) == 1
-            in_flight.pop()
-            return path.name
-
-        with patch.object(pipeline_obj, "_transcribe_page", side_effect=transcribe):
-            results = pipeline_obj._transcribe_pages(paths)
-
-        assert results == ["a.png", "b.png"]
-
-    def test_no_pages_needs_no_workers(self):
-        assert self._pipeline(4)._transcribe_pages([]) == []
-
-    def test_the_vision_result_is_the_transcript(self):
-        pipeline_obj = self._pipeline(1)
-
-        with patch.object(pipeline_obj, "_vision_ocr_page", return_value="clean text"):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == ("clean text", None)
-
-    def test_an_empty_vision_result_has_nowhere_left_to_fall_back_to(self):
-        """One backend: a page the model could not read is an empty page."""
-        pipeline_obj = self._pipeline(1)
-
-        with patch.object(pipeline_obj, "_vision_ocr_page", return_value=""):
-            assert pipeline_obj._transcribe_page(Path("p.png")) == ("", None)
-
-
 class TestAFailedPageIsNotABlankPage:
     """Three pages out of two hundred failing is not a failed notebook.
 
@@ -681,56 +606,13 @@ class TestAFailedPageIsNotABlankPage:
         SyncPipeline(destinations=[MockDestination()])._describe_pages(job)
         return job
 
-    def test_a_raising_page_reports_the_reason_instead_of_propagating(self):
-        pipe = self._pipeline()
-
-        with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("429 rate limited")):
-            text, error = pipe._transcribe_page(Path("p.png"))
-
-        assert text == ""
-        assert "429 rate limited" in error
-
-    def test_the_error_names_the_exception_type(self):
-        pipe = self._pipeline()
-
-        with patch.object(pipe, "_vision_ocr_page", side_effect=OSError("truncated")):
-            _, error = pipe._transcribe_page(Path("p.png"))
-
-        assert error.startswith("OSError:")
-
-    def test_a_key_in_the_message_is_redacted_before_it_reaches_the_user(self):
-        """The reason is printed and put in the report; a provider URL can carry a key."""
-        pipe = self._pipeline()
-        register_secret("sk-supersecret")
-
-        try:
-            with patch.object(pipe, "_vision_ocr_page", side_effect=RuntimeError("sk-supersecret")):
-                _, error = pipe._transcribe_page(Path("p.png"))
-        finally:
-            clear_secrets()
-
-        assert "sk-supersecret" not in error
-
-    def test_one_bad_page_does_not_cost_the_other_two(self):
-        pipe = self._pipeline()
-        job = self._job_with_pages(3)
-
-        def read(path):
-            if path.name.endswith("page-2.png"):
-                raise RuntimeError("boom")
-            return "text"
-
-        with patch.object(pipe, "_vision_ocr_page", side_effect=read):
-            pipe._ocr_pages(job)
-
-        assert [p.text for p in job.pages] == ["text", "", "text"]
-        assert "boom" in job.pages[1].error
-
     def test_the_failure_is_recorded_on_the_page_that_failed(self):
         pipe = self._pipeline()
         job = self._job_with_pages(2)
 
-        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+        with patch.object(
+            pipe.transcriber, "transcribe_one", side_effect=[("a", None), ("", "boom")]
+        ):
             pipe._ocr_pages(job)
 
         assert job.pages[0].error is None
@@ -740,7 +622,7 @@ class TestAFailedPageIsNotABlankPage:
         pipe = self._pipeline()
         job = self._job_with_pages(1)
 
-        with patch.object(pipe, "_transcribe_page", return_value=("", None)):
+        with patch.object(pipe.transcriber, "transcribe_one", return_value=("", None)):
             pipe._ocr_pages(job)
 
         assert job.pages[0].error is None
@@ -749,7 +631,9 @@ class TestAFailedPageIsNotABlankPage:
         pipe = self._pipeline()
         job = self._job_with_pages(2)
 
-        with patch.object(pipe, "_transcribe_page", side_effect=[("", "boom"), ("", "boom")]):
+        with patch.object(
+            pipe.transcriber, "transcribe_one", side_effect=[("", "boom"), ("", "boom")]
+        ):
             pipe._ocr_pages(job)
 
         assert job.failed_pages == 2
@@ -759,7 +643,9 @@ class TestAFailedPageIsNotABlankPage:
         pipe.report = RunReport()
         job = self._job_with_pages(2)
 
-        with patch.object(pipe, "_transcribe_page", side_effect=[("a", None), ("", "boom")]):
+        with patch.object(
+            pipe.transcriber, "transcribe_one", side_effect=[("a", None), ("", "boom")]
+        ):
             pipe._ocr_pages(job)
 
         assert any("Page 2" in w and "boom" in w for w in pipe.report.warnings)
@@ -1441,7 +1327,6 @@ class TestOutcomeRecording:
 
     def test_secrets_are_redacted_from_the_message(self):
         """An error quoting a token must not park it in the database."""
-        from living_ink.redact import clear_secrets, register_secret
 
         store = pipeline.get_state_store()
         store.record_document("doc-1")
@@ -1460,132 +1345,6 @@ class TestOutcomeRecording:
             pipeline, "get_state_store", MagicMock(side_effect=OSError("disk is gone"))
         )
         self._pipeline()._record_outcome(self._job(), False, "boom")
-
-
-class TestTranscriptionCaching:
-    """A page already paid for is never paid for twice."""
-
-    @pytest.fixture
-    def page(self, tmp_path):
-        """A file standing in for a prepared page image."""
-        path = tmp_path / "page-1.png"
-        path.write_bytes(b"fake png bytes")
-        return path
-
-    def _pipeline(self, tmp_path, enabled=True):
-        """A pipeline whose cache is a throwaway directory."""
-        from living_ink.cache import TranscriptCache
-
-        pipe = SyncPipeline.__new__(SyncPipeline)
-        pipe.settings = Settings(ai_provider="openai", ai_model="gpt-4o-mini")
-        pipe.cache = TranscriptCache(tmp_path / "transcripts", enabled=enabled)
-        pipe._cache_lock = threading.Lock()
-        pipe._cache_hits = 0
-        pipe._cache_misses = 0
-        return pipe
-
-    def test_the_first_read_calls_the_provider(self, tmp_path, page):
-        pipe = self._pipeline(tmp_path)
-        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == ("text", None)
-        assert ocr.call_count == 1
-
-    def test_the_second_read_does_not(self, tmp_path, page):
-        """The whole point: an unchanged page costs nothing the next time."""
-        pipe = self._pipeline(tmp_path)
-        with patch.object(pipe, "_vision_ocr_page", return_value="text"):
-            pipe._transcribe_page(page)
-
-        with patch.object(pipe, "_vision_ocr_page") as ocr:
-            assert pipe._transcribe_page(page) == ("text", None)
-        ocr.assert_not_called()
-        assert pipe._cache_hits == 1
-
-    def test_a_run_interrupted_mid_notebook_only_pays_for_what_it_missed(self, tmp_path):
-        """Each page is banked as it comes back, so Ctrl+C loses one page."""
-        pages = []
-        for index in range(4):
-            path = tmp_path / f"page-{index}.png"
-            path.write_bytes(f"page {index}".encode("utf-8"))
-            pages.append(path)
-
-        pipe = self._pipeline(tmp_path)
-        pipe.settings = dataclasses.replace(pipe.settings, ocr_concurrency=1)
-
-        def transcribe_then_quit(path):
-            if path == pages[2]:
-                raise KeyboardInterrupt
-            return path.name
-
-        with patch.object(pipe, "_vision_ocr_page", side_effect=transcribe_then_quit):
-            with pytest.raises(KeyboardInterrupt):
-                pipe._transcribe_pages(pages)
-
-        resumed = self._pipeline(tmp_path)
-        resumed.settings = dataclasses.replace(resumed.settings, ocr_concurrency=1)
-        with patch.object(resumed, "_vision_ocr_page", side_effect=lambda p: p.name) as ocr:
-            resumed._transcribe_pages(pages)
-
-        # Pages 0 and 1 were banked before the interrupt; only 2 and 3 are paid for.
-        assert [call.args[0] for call in ocr.call_args_list] == pages[2:]
-        assert resumed._cache_hits == 2
-
-    def test_a_cache_survives_a_new_pipeline(self, tmp_path, page):
-        """Entries outlive the run, which is what the temp purge does not."""
-        with patch.object(SyncPipeline, "_vision_ocr_page", return_value="text"):
-            self._pipeline(tmp_path)._transcribe_page(page)
-
-        second = self._pipeline(tmp_path)
-        with patch.object(second, "_vision_ocr_page") as ocr:
-            assert second._transcribe_page(page) == ("text", None)
-        ocr.assert_not_called()
-
-    def test_an_edited_page_is_read_again(self, tmp_path, page):
-        pipe = self._pipeline(tmp_path)
-        with patch.object(pipe, "_vision_ocr_page", return_value="text"):
-            pipe._transcribe_page(page)
-
-        page.write_bytes(b"different png bytes")
-        with patch.object(pipe, "_vision_ocr_page", return_value="new text") as ocr:
-            assert pipe._transcribe_page(page) == ("new text", None)
-        assert ocr.call_count == 1
-
-    def test_an_entry_from_the_two_backend_era_is_not_served(self, tmp_path, page):
-        """Its payload is a raw/clean pair, and neither half is this build's answer."""
-        pipe = self._pipeline(tmp_path)
-        key = pipe._cache_key(page)
-        pipe.cache._write(key, b'{"raw": "google text", "clean": "repaired text"}')
-
-        with patch.object(pipe, "_vision_ocr_page", return_value="vision text") as ocr:
-            assert pipe._transcribe_page(page) == ("vision text", None)
-        assert ocr.call_count == 1
-
-    def test_an_empty_transcription_is_not_cached(self, tmp_path, page):
-        """A blank page is usually a rate limit, and must not become permanent."""
-        pipe = self._pipeline(tmp_path)
-        with patch.object(pipe, "_vision_ocr_page", return_value=""):
-            pipe._transcribe_page(page)
-
-        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(page) == ("text", None)
-        assert ocr.call_count == 1
-
-    def test_a_disabled_cache_reads_every_time(self, tmp_path, page):
-        pipe = self._pipeline(tmp_path, enabled=False)
-        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            pipe._transcribe_page(page)
-            pipe._transcribe_page(page)
-        assert ocr.call_count == 2
-        assert not pipe.cache.root.exists()
-
-    def test_an_unreadable_page_is_transcribed_uncached(self, tmp_path):
-        """No bytes to hash means no key; transcribe rather than fail."""
-        pipe = self._pipeline(tmp_path)
-        missing = tmp_path / "gone.png"
-        with patch.object(pipe, "_vision_ocr_page", return_value="text") as ocr:
-            assert pipe._transcribe_page(missing) == ("text", None)
-        assert ocr.call_count == 1
-        assert not pipe.cache.root.exists()
 
 
 class TestPageHashRecording:
