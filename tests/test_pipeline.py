@@ -2571,6 +2571,113 @@ class TestPruningRunsLast:
         assert "Pruned 2 unused transcribed page cache entries." in capsys.readouterr().out
 
 
+class TestOneDocumentCannotEndTheRun:
+    """An unexpected error costs one document, the way one costs one page.
+
+    Only ``_StopProcessing`` was caught, so a transport that gave up after
+    both fallbacks, or a truncated PNG throwing inside PIL, propagated out of
+    the batch loop and past every handler to ``cli.main``. Document 12 of 40
+    took the other 28 with it — unprocessed, unrecorded, and with no summary,
+    because ``_print_summary`` runs after the loop.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _pipeline(self, dry_run=False):
+        pipe = SyncPipeline(SyncOptions(dry_run=dry_run), destinations=[MockDestination()])
+        pipe.report = RunReport()
+        return pipe
+
+    def _candidate(self, doc_id, name):
+        return make_candidate({"ID": doc_id, "VissibleName": name, "hash": "h"})
+
+    def test_a_document_that_raises_is_a_failure_not_a_crash(self, monkeypatch):
+        pipe = self._pipeline()
+        monkeypatch.setattr(
+            pipe,
+            "process_notebook_item",
+            lambda **kw: (_ for _ in ()).throw(ConnectionError("both transports refused")),
+        )
+
+        assert pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock()) is False
+
+    def test_the_documents_after_it_are_still_processed(self, monkeypatch):
+        """The whole point: notebook 12 does not take notebooks 13-40 with it."""
+        pipe = self._pipeline()
+        seen = []
+
+        def flaky(*, candidate, client, keep_temp):
+            seen.append(candidate.doc_id)
+            if candidate.doc_id == "doc-2":
+                raise ConnectionError("both transports refused")
+            return True
+
+        monkeypatch.setattr(pipe, "process_notebook_item", flaky)
+        results = [
+            pipe._process_one(self._candidate(doc_id, doc_id), MagicMock())
+            for doc_id in ("doc-1", "doc-2", "doc-3")
+        ]
+
+        assert seen == ["doc-1", "doc-2", "doc-3"]
+        assert results == [True, False, True]
+
+    def test_the_failure_reaches_the_run_summary(self, monkeypatch):
+        pipe = self._pipeline()
+        monkeypatch.setattr(
+            pipe,
+            "process_notebook_item",
+            lambda **kw: (_ for _ in ()).throw(ValueError("truncated PNG")),
+        )
+
+        pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock())
+
+        outcome = pipe.report.documents[0]
+        assert (outcome.name, outcome.doc_id, outcome.status) == ("Notes", "doc-1", FAILED)
+        assert "truncated PNG" in outcome.reason
+
+    def test_the_failure_is_remembered_for_the_next_run(self, monkeypatch):
+        """``list`` has to be able to say this document is broken."""
+        pipe = self._pipeline()
+        pipeline.get_state_store().record_document("doc-1", name="Notes")
+        monkeypatch.setattr(
+            pipe,
+            "process_notebook_item",
+            lambda **kw: (_ for _ in ()).throw(ValueError("truncated PNG")),
+        )
+
+        pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock())
+
+        assert "truncated PNG" in pipeline.get_state_store().get_document("doc-1")["last_error"]
+
+    def test_a_dry_run_records_nothing(self, monkeypatch):
+        """A rehearsal that hit an error still leaves the state store alone."""
+        pipe = self._pipeline(dry_run=True)
+        pipeline.get_state_store().record_document("doc-1", name="Notes")
+        monkeypatch.setattr(
+            pipe, "process_notebook_item", lambda **kw: (_ for _ in ()).throw(ValueError("boom"))
+        )
+
+        pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock())
+
+        assert pipeline.get_state_store().get_document("doc-1")["last_error"] is None
+
+    def test_an_interrupt_is_not_a_document_failure(self, monkeypatch):
+        """Ctrl+C ends the run; swallowing it would make the next document start."""
+        pipe = self._pipeline()
+        monkeypatch.setattr(
+            pipe, "process_notebook_item", lambda **kw: (_ for _ in ()).throw(KeyboardInterrupt)
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock())
+
+
 class TestInterruptedRuns:
     """Ctrl+C is not a failure, and the run did not do nothing."""
 

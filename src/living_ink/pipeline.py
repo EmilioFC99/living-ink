@@ -1532,6 +1532,68 @@ class SyncPipeline:
         except (sqlite3.Error, OSError, RuntimeError) as e:
             log(f"⚠️ Could not record the outcome for {job.notebook_id}: {e}")
 
+    def _process_one(self, candidate: Candidate, client: Any) -> bool:
+        """Process one document, and never let its failure end the run.
+
+        The stages catch ``_StopProcessing``, which is the failure they *mean*;
+        anything else — a transport that gave up after both fallbacks, a
+        truncated PNG that throws inside PIL — used to propagate out of the
+        batch loop, past ``_run_recorded``, to ``cli.main``. On the unattended
+        nightly run this product is built around, that meant document 12 of 40
+        took the other 28 with it: not processed, not recorded as failed, and
+        no run summary at all, because ``_print_summary`` is after the loop.
+
+        ``_transcribe_page`` already says "an error here costs one page, never
+        the document". This is the same rule one level up.
+
+        Args:
+            candidate: The document to process.
+            client: reMarkable API client.
+
+        Returns:
+            True if the document published, False if it failed for any reason.
+        """
+        try:
+            return self.process_notebook_item(
+                candidate=candidate,
+                client=client,
+                keep_temp=self.keep_temp,
+            )
+        except KeyboardInterrupt:
+            # Ctrl+C is the user ending the run, not this document failing.
+            raise
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            log(f"❌ {candidate.name} failed unexpectedly: {redact(reason)}")
+            self._record_candidate_failure(candidate, reason)
+            return False
+
+    def _record_candidate_failure(self, candidate: Candidate, reason: str) -> None:
+        """Report and remember a document that died before its stages could.
+
+        Reported from the candidate rather than the job, because the job is
+        one of the things that may not exist yet.
+
+        Args:
+            candidate: The document that failed.
+            reason: What went wrong, unredacted; redacted on the way out.
+        """
+        if self.report is not None:
+            self.report.add(
+                DocumentOutcome(
+                    name=candidate.name,
+                    doc_id=candidate.doc_id,
+                    status=FAILED,
+                    reason=redact(reason),
+                )
+            )
+        if self.dry_run:
+            return
+        try:
+            get_state_store().record_failure(candidate.doc_id, redact(reason))
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            log(f"⚠️ Could not record the outcome for {candidate.doc_id}: {e}")
+
     # ── Stage 1: identify ────────────────────────────────────────────────
 
     def _describe_job(
@@ -2753,11 +2815,7 @@ class SyncPipeline:
         all_success = True
         published = failed = 0
         for candidate in chosen.to_process:
-            item_success = self.process_notebook_item(
-                candidate=candidate,
-                client=client,
-                keep_temp=self.keep_temp,
-            )
+            item_success = self._process_one(candidate, client)
             if item_success:
                 published += 1
             else:
