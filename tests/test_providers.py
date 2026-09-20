@@ -778,7 +778,38 @@ class TestGetProviderCustom:
 
 
 class TestGetProviderLegacy:
-    """Tests for backward compatibility with legacy openai config."""
+    """A key with no provider named is treated as OpenAI.
+
+    Reads as backward compatibility and is not only that. Three configurations
+    reach the branch — a pre-0.2 ``openai:`` block, an ``ai.api_key`` typed
+    into the file, and ``LIVING_INK_AI_API_KEY`` exported on its own — and the
+    last two are what a user writes *today* when they have a key and have not
+    read the schema. Only the first is historical, so the branch outlives the
+    deprecation that appears to own it. The two live paths are exercised
+    through ``Settings.resolve`` rather than a hand-built ``Settings``,
+    because what is being asserted is that the key *arrives*.
+    """
+
+    def test_a_key_in_the_ai_section_with_no_provider(self, monkeypatch):
+        """The spelling a user reaches for first, and it is not the legacy one."""
+        monkeypatch.delenv("LIVING_INK_AI_API_KEY", raising=False)
+        settings = Settings.resolve({"ai": {"api_key": "sk-in-the-file"}})
+
+        p = get_provider(settings)
+
+        assert isinstance(p, UniversalChatProvider)
+        assert "api.openai.com" in p.base_url
+        assert p.api_key == "sk-in-the-file"
+
+    def test_a_key_from_the_environment_with_no_provider(self, monkeypatch):
+        monkeypatch.setenv("LIVING_INK_AI_API_KEY", "sk-from-the-env")
+        settings = Settings.resolve({})
+
+        p = get_provider(settings)
+
+        assert isinstance(p, UniversalChatProvider)
+        assert "api.openai.com" in p.base_url
+        assert p.api_key == "sk-from-the-env"
 
     def test_legacy_openai_section(self):
         """A key with no provider named is the pre-'ai:' config, which was OpenAI."""

@@ -668,10 +668,15 @@ def get_provider(settings: Settings) -> TextRepairProvider:
     api_key = str(settings.ai_api_key or "").strip()
     model = str(settings.ai_model or "").strip()
 
-    # ── Backward compat: a key from before there was an 'ai:' section ──
-    # The pre-0.2 config named no provider, only an ``openai:`` block; the key
-    # in it now resolves as ``ai_api_key``. A key with nothing to use it on
-    # meant OpenAI then and still does. "YOUR..." is the sample config's
+    # ── A key with no provider named ──
+    # Three configurations arrive here and only one of them is historical: a
+    # pre-0.2 ``openai:`` block (deprecated, so ``apply_status`` still copies
+    # it forward), an ``ai.api_key`` written into the file by hand, and
+    # ``LIVING_INK_AI_API_KEY`` exported with nothing else set — the last two
+    # being what a user does today when they have a key and have not read the
+    # schema. Refusing them would mean answering "you gave me a key and no
+    # provider" with silent raw OCR. A key with nothing to use it on meant
+    # OpenAI in 0.1 and still does. "YOUR..." is the sample config's
     # placeholder, which configures nothing.
     if not provider_name and api_key and "YOUR" not in api_key:
         logger.info("No 'ai.provider' set; using the API key with OpenAI.")
