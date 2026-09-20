@@ -358,12 +358,24 @@ COMMAND_SURFACE: dict[str, set[str]] = {
     # question it asks, and a flag here would be a third way to set a setting
     # that already has a config key and an environment variable.
     "config": {"-h", "--help", "--verbose", "-q", "--quiet"},
+    # No flags of its own either. Which shell to write for is the one thing it
+    # needs and it is a positional, because there is no default that is right
+    # on two machines and guessing from ``$SHELL`` would write bash into a zsh
+    # file whenever the user's login shell is not the one they are sitting in.
+    "completions": {"-h", "--help", "--verbose", "-q", "--quiet"},
     # One flag, and it does not select *what* is removed — it answers the
     # questions. A ``--credentials`` or ``--everything`` would be a second way
     # to say what the prompts already say, and a way for a script to remove
     # something its author never read the consequence of.
     "uninstall": {"-h", "--help", "--verbose", "-q", "--quiet", "--yes", "-y"},
 }
+
+#: Positional arguments a command needs before it will parse at all.
+#:
+#: Only one command has any. Kept as a table rather than special-cased inside
+#: the one test that trips over it, so the next command with a positional is a
+#: row here instead of an exclusion.
+COMMAND_ARGUMENTS: dict[str, list[str]] = {"completions": ["bash"]}
 
 #: Commands that shipped in 0.x and are gone. Listed rather than deleted,
 #: because a retired command has to fail the same clean way an unbuilt one
@@ -542,6 +554,11 @@ COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
     # The menu reads the config and the caches lazily, from inside the rows
     # that need them — so opening it touches neither.
     ("config",): {"run_config_menu"},
+    # Nothing, and that is the whole design: a completion script is written
+    # from the parser this process just built, so it needs no config, no
+    # database and no tablet. It is the one command that works correctly
+    # before ``setup`` has ever been run.
+    ("completions", "bash"): set(),
 }
 
 
@@ -1693,8 +1710,9 @@ class TestVerbosityIsAcceptedOnBothSides:
     def test_both_placements_parse_for_every_command(self, command, flag):
         """Neither ordering is a usage error."""
         parser = LivingInkCLI().build_parser()
-        parser.parse_args([flag, command])
-        parser.parse_args([command, flag])
+        rest = COMMAND_ARGUMENTS.get(command, [])
+        parser.parse_args([flag, command, *rest])
+        parser.parse_args([command, *rest, flag])
 
 
 # ---------------------------------------------------------------------------

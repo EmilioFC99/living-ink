@@ -48,6 +48,7 @@ living-ink watch     # Keep syncing on the schedule in config.yml until you stop
 living-ink setup     # Re-run interactive setup wizard
 living-ink info      # Check tablet, AI, vault, caches, schedule, and sync state
 living-ink config    # Change any setting, edit the prompts, clear the caches
+living-ink completions bash|zsh|fish   # Print a tab-completion script
 living-ink uninstall # Remove the background job, settings and caches
 ```
 
@@ -65,6 +66,19 @@ and puts a banner above everything if one was missed.
 `uninstall` removes the background job and the caches, then asks separately before
 removing your settings, credentials and sync record. **It never touches your notes,
 under any flag** — pass `--yes` to answer every question with yes.
+
+For tab completion, redirect `completions` into the file named in the comment at
+the top of its output:
+
+```bash
+living-ink completions bash > ~/.local/share/bash-completion/completions/living-ink
+living-ink completions zsh  > ~/.zfunc/_living-ink        # with fpath+=(~/.zfunc) before compinit
+living-ink completions fish > ~/.config/fish/completions/living-ink.fish
+```
+
+The script is generated from the installed version's own commands and flags, so
+it is never out of date with the program — regenerate it after an upgrade rather
+than editing it.
 
 ---
 

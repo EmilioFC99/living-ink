@@ -118,7 +118,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 ```bash
 uv sync --all-extras                                  # install deps (incl. dev)
-uv run living-ink --help                              # CLI: sync | watch | setup | info | config | uninstall
+uv run living-ink --help                              # CLI: sync | watch | setup | info | config | completions | uninstall
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
 uv run living-ink sync --preview --transcribe         # transcribe, publish nothing
 uv run living-ink sync --json                         # run summary as JSON
@@ -128,6 +128,7 @@ uv run living-ink info --json                         # machine-readable health 
 uv run living-ink sync --preview                      # what is new, changed, or up to date
 uv run living-ink sync --prune                        # also delete notes whose notebook is gone
 uv run living-ink config                              # settings menu, prompts, destructive maintenance
+uv run living-ink completions zsh                     # tab completion, generated from this build's parser
 uv run living-ink uninstall --yes                     # remove the background job, settings and caches
 
 uv run ruff check .           # lint
