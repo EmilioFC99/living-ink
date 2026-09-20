@@ -131,5 +131,18 @@ class TestReadingTheFieldsTheModelDeclares:
 
         assert document_version(item) == "3"
 
+    def test_a_counter_the_transport_sent_as_text_is_still_a_counter(self):
+        """The SSH transport reads it out of a JSON file, so it arrives typed."""
+        item = doc()
+        item.version = "7"
+
+        assert document_version(item) == "7"
+
+    def test_a_counter_that_is_not_a_number_falls_back(self):
+        item = doc()
+        item.version = "not-a-number"
+
+        assert document_version(item) == "1"
+
     def test_a_document_with_neither_still_answers(self):
         assert document_version(doc()) == "1"

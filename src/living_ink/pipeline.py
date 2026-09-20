@@ -616,27 +616,6 @@ class _StopProcessing(Exception):
         self.reason = reason
 
 
-def _item_version(item: Any) -> Any:
-    """Return the value that identifies this revision of a document.
-
-    Sync v3/v4 items carry a content hash; older items only carry an integer
-    version. Either is stored in the processed log and compared on the next run.
-
-    Args:
-        item: reMarkable item metadata.
-
-    Returns:
-        The item's hash, else its integer version, else 1.
-    """
-    item_hash = getattr(item, "hash", None)
-    if item_hash:
-        return item_hash
-    try:
-        return int(getattr(item, "version", None))
-    except (ValueError, TypeError):
-        return 1
-
-
 @dataclass
 class DocumentJob:
     """One document's state as it moves through the processing stages.
@@ -650,8 +629,11 @@ class DocumentJob:
     notebook: str
     notebook_id: Any
     doc_type: str
-    version: Any
-    #: Where this document's throwaway artifacts go. Keyed on the document id,
+    #: What the tablet says this revision of the content is, as
+    #: ``core.listing.document_version`` reads it — a string, because the
+    #: selector compares it against a string column and the two answers have
+    #: to be the same answer.
+    version: str
     folder_path: str
     display_title: str
     keep_temp: bool
@@ -1366,7 +1348,7 @@ class SyncPipeline:
             notebook=notebook,
             notebook_id=candidate.doc_id,
             doc_type=doc_type,
-            version=_item_version(candidate.item),
+            version=document_version(candidate.item),
             folder_path=folder_path,
             display_title=f"{folder_path} / {notebook}" if folder_path else notebook,
             keep_temp=self.keep_temp if keep_temp is None else keep_temp,

@@ -495,28 +495,6 @@ class TestPagesAreDescribedAtRenderTime:
         assert job.pages[0].error is None
 
 
-class TestJobHelpers:
-    """Small pure helpers the stages rely on."""
-
-    def test_version_prefers_the_content_hash(self):
-        item = make_item(content_hash="abc")
-        item.version = "3"
-
-        assert pipeline._item_version(item) == "abc"
-
-    def test_version_falls_back_to_the_integer_version(self):
-        item = make_item()
-        item.version = "7"
-
-        assert pipeline._item_version(item) == 7
-
-    def test_version_defaults_to_one_when_unusable(self):
-        item = make_item()
-        item.version = "not-a-number"
-
-        assert pipeline._item_version(item) == 1
-
-
 class TestRendererDispatch:
     """Document type selects the renderer, and the registry is the only table.
 
