@@ -32,7 +32,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle: transport does not need state
     from living_ink.transport import DeviceInfo
@@ -569,7 +579,7 @@ class StateStore:
             destination: Destination class name.
             version: Device version or content hash that was published.
             external_id: Identifier on the far side, where the destination has
-                one (an Apple Notes note id, for instance).
+                one (the id an API hands back, for instance).
             target: Where the note landed, in whatever terms the destination
                 names its notes — a vault-relative path, a folder and title.
                 Recorded so a later run can tell that a note has moved.
@@ -641,6 +651,56 @@ class StateStore:
                 (doc_id,),
             )
             return cursor.rowcount
+
+    def forget_unknown_destinations(self, known: Iterable[str]) -> Dict[str, int]:
+        """Drop publication rows filed under a destination that no longer exists.
+
+        A deleted destination leaves its rows behind, and every later run reads
+        them as real: ``compare_with_listing`` reports the document as still
+        published somewhere, ``_prune_orphan`` declines to prune because the
+        destination "is not configured", and ``sync --status`` prints a dead
+        key in each row's published map. None of that is recoverable by the
+        user, because there is no longer any code that could unpublish.
+
+        Enabled is not the question — *registered* is. A destination the user
+        turned off keeps its rows, so turning it back on does not re-publish
+        the whole library; only a destination the build no longer ships loses
+        them.
+
+        Args:
+            known: Every :attr:`Destination.state_key` this build registers.
+
+        Returns:
+            Mapping of the destination name removed to how many rows it had,
+            empty when there was nothing to forget.
+
+        Raises:
+            ValueError: If ``known`` is empty. No registered destination at all
+                means the registry failed to populate, not that every
+                destination retired at once, and the difference is the whole
+                publication history.
+        """
+        keys = list(known)
+        if not keys:
+            raise ValueError(
+                "refusing to forget every destination: no destination is registered, "
+                "which is a failed import rather than a retirement"
+            )
+
+        placeholders = ",".join("?" * len(keys))
+        with self._write() as conn:
+            rows = conn.execute(
+                f"SELECT destination, COUNT(*) AS n FROM publications "
+                f"WHERE destination NOT IN ({placeholders}) GROUP BY destination",
+                keys,
+            ).fetchall()
+            if not rows:
+                return {}
+            conn.execute(
+                f"DELETE FROM publications WHERE destination NOT IN ({placeholders})",
+                keys,
+            )
+        return {row["destination"]: row["n"] for row in rows}
 
     def all_publications(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """Return every publication row, grouped by document.

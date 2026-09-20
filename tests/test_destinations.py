@@ -369,10 +369,10 @@ class TestStateLocation:
     def test_legacy_state_beside_the_checkout_is_imported(self, tmp_path, monkeypatch):
         """State written before it moved under the data directory still counts."""
         pipeline = self._at(tmp_path, monkeypatch)
-        legacy = tmp_path / "processed_notebooks_Obsidian.json"
+        legacy = tmp_path / "processed_notebooks_ObsidianDestination.json"
         legacy.write_text('{"doc1": 1}', encoding="utf-8")
         try:
-            assert pipeline.load_processed_log("Obsidian") == {"doc1": "1"}
+            assert pipeline.load_processed_log("ObsidianDestination") == {"doc1": "1"}
             assert not legacy.exists()
         finally:
             pipeline.reset_state_store()

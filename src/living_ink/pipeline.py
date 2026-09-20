@@ -345,6 +345,19 @@ def get_destinations_from_config(
     return build_destinations(config_dict, settings or Settings.resolve(config_dict))
 
 
+def registered_state_keys() -> List[str]:
+    """Return the state key of every destination this build registers.
+
+    Registered, not enabled: a destination the user has turned off still owns
+    its publication rows, and turning it back on must not re-publish the whole
+    library. Only a destination that no longer exists has no claim on them.
+
+    Returns:
+        One :attr:`Destination.state_key` per entry in the registry.
+    """
+    return [cls.state_key for cls in DESTINATION_REGISTRY.values()]
+
+
 _default_destinations: Optional[List[Destination]] = None
 
 
@@ -373,6 +386,13 @@ def get_state_store() -> "state.StateStore":
     touches no disk. The one-time import of the old per-destination JSON files
     happens here, on the first open after an upgrade.
 
+    So does the sweep of publication rows belonging to a destination this build
+    no longer ships. This is the layer that can do it: ``state`` must not know
+    what a destination is, and the registry only exists once ``destinations``
+    has been imported. It runs after the legacy import, so a row that arrives
+    from an old JSON file naming a deleted destination is swept in the same
+    pass rather than surviving until the next run.
+
     Returns:
         The process-wide open StateStore.
     """
@@ -387,6 +407,8 @@ def get_state_store() -> "state.StateStore":
             imported = state.import_legacy_json(store, source)
             if imported:
                 log(f"📦 Imported {imported} sync records from {source} into {db_path.name}.")
+        for name, count in store.forget_unknown_destinations(registered_state_keys()).items():
+            log(f"🧹 Forgot {count} publication record(s) for {name}, which no longer exists.")
         _state_store = store
     return _state_store
 
