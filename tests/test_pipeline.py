@@ -3273,3 +3273,250 @@ class TestRenderGeometryFollowsTheDevice:
         )
 
         assert seen["screen"] == (1620, 2160)
+
+
+class TestTheVerdictStageIsWiredIntoTheSequence:
+    """Stage 7 is asked, is asked in its place, and its answer is what is reported.
+
+    What the verdict *is* belongs to ``core.stages.verdict``; what breaks
+    silently is the wiring. Dropped from ``process_notebook_item``, a notebook
+    whose every page hit a 429 publishes as a note of nothing but gap markers
+    and then writes a ``publications`` row, so the next run sees nothing pending
+    and the real text never arrives. Reported with the wrong verdict, a rate
+    limit is recorded as a successful skip. Moved one line earlier, a run that
+    published nothing also leaves no transcript to say why.
+    """
+
+    def _pipeline(self, dest, *, skip_empty=False):
+        """Build a pipeline carrying a run report and a resolved ``skip_empty``.
+
+        Args:
+            dest: The destination the document is pending for.
+            skip_empty: What ``sync.skip_empty`` resolved to for this run.
+
+        Returns:
+            The pipeline.
+        """
+        pipe = SyncPipeline(destinations=[dest])
+        pipe.settings = replace(pipe.settings, skip_empty=skip_empty)
+        pipe.report = RunReport()
+        return pipe
+
+    def _process(
+        self,
+        pipe,
+        pages,
+        dest,
+        tmp_path,
+        monkeypatch,
+        *,
+        on_transcripts=None,
+        on_judge=None,
+    ):
+        """Drive one document through the real sequence with stages 2-5 stubbed.
+
+        Only the tail of the sequence is under test, so acquiring, tagging,
+        preprocessing and OCR are replaced by handing the job the pages they
+        would have produced. Stage 7 itself is wrapped rather than replaced:
+        the real verdict runs, and the wrapper only records that it was reached.
+
+        Args:
+            pipe: The pipeline under test.
+            pages: The transcribed pages stage 5 hands on.
+            dest: The destination the document is pending for.
+            tmp_path: Where the document workspace is allowed to land.
+            monkeypatch: Pytest's patcher, for the work directory.
+            on_transcripts: Called instead of writing the transcript artifact.
+            on_judge: Called just before the real stage 7.
+
+        Returns:
+            What ``process_notebook_item`` returned.
+        """
+        monkeypatch.setattr(pipeline, "WORK_DIR", tmp_path / "work")
+        real_judge = pipe._judge_pages
+
+        def judge(job):
+            if on_judge is not None:
+                on_judge(job)
+            return real_judge(job)
+
+        item = {"ID": "nb-1", "VissibleName": "Notes", "hash": "h"}
+        with (
+            patch.object(
+                pipe,
+                "_acquire_pages",
+                side_effect=lambda job, client: job.imgs.extend(
+                    Path(f"nb.page-{page.number}.png") for page in pages
+                ),
+            ),
+            patch.object(pipe, "_collect_tags"),
+            patch.object(pipe, "_preprocess_images"),
+            patch.object(pipe, "_ocr_pages", side_effect=lambda job: job.pages.extend(pages)),
+            patch.object(
+                pipe,
+                "_write_transcripts",
+                side_effect=on_transcripts if on_transcripts else lambda job: None,
+            ),
+            patch.object(pipe, "_judge_pages", side_effect=judge),
+        ):
+            return pipe.process_notebook_item(
+                candidate=make_candidate(item, pending=(dest,)),
+                client=MagicMock(),
+                keep_temp=True,
+            )
+
+    def test_every_page_failing_stops_the_document_short_of_publish(self):
+        """A rate-limited notebook has to come back next run, so it is not a success.
+
+        ``_StopProcessing(True)`` here would have the caller record the document
+        as done and clear its failure, and the 429'd pages would never be asked
+        for again.
+        """
+        pipe = self._pipeline(MockDestination())
+        job = make_job(pages=[make_page(1, error="429 rate limited")])
+
+        with pytest.raises(pipeline._StopProcessing) as err:
+            pipe._judge_pages(job)
+
+        assert err.value.success is False
+
+    def test_the_reason_reaches_the_report_under_the_notebooks_name(self, tmp_path, monkeypatch):
+        """A summary line reading only "every page failed" names no document.
+
+        On a forty-document nightly run the reason is the only thing tying the
+        failure to the notebook the user has to go and look at.
+        """
+        dest = MockDestination("MockDest")
+        pipe = self._pipeline(dest)
+
+        result = self._process(
+            pipe,
+            [make_page(1, error="429 rate limited"), make_page(2, error="429 rate limited")],
+            dest,
+            tmp_path,
+            monkeypatch,
+        )
+
+        entry = pipe.report.documents[0]
+        assert result is False
+        assert entry.status == FAILED
+        assert entry.reason.startswith("Notes: ")
+        assert "every page failed" in entry.reason
+        assert dest.published == []
+
+    def test_a_blank_document_is_a_skip_the_run_counts_as_a_success(self):
+        """The user asked for empty notebooks to be skipped; a skip is not a failure.
+
+        Reported as a failure it would be recorded as broken in the state store
+        and shown in red every night for a notebook that is merely unwritten.
+        """
+        pipe = self._pipeline(MockDestination(), skip_empty=True)
+        job = make_job(pages=[make_page(1, text="   ")])
+
+        with pytest.raises(pipeline._StopProcessing) as err:
+            pipe._judge_pages(job)
+
+        assert err.value.success is True
+
+    def test_the_blank_skip_publishes_nothing_and_reports_the_skip(self, tmp_path, monkeypatch):
+        """An empty notebook must not reach the vault as an empty note."""
+        dest = MockDestination("MockDest")
+        pipe = self._pipeline(dest, skip_empty=True)
+
+        result = self._process(pipe, [make_page(1, text="")], dest, tmp_path, monkeypatch)
+
+        assert result is True
+        assert dest.published == []
+        assert pipe.report.documents[0].status == SKIPPED
+
+    def test_the_stage_reads_skip_empty_off_the_runs_settings(self, tmp_path, monkeypatch):
+        """The same blank document publishes with the setting off.
+
+        The flag is resolved once into ``Settings``, so ``--skip-empty`` and the
+        env var outrank the config file. A stage reading the config section
+        directly would answer the file's value whatever the user typed.
+        """
+        dest = MockDestination("MockDest")
+        pipe = self._pipeline(dest, skip_empty=False)
+
+        result = self._process(pipe, [make_page(1, text="")], dest, tmp_path, monkeypatch)
+
+        assert result is True
+        assert len(dest.published) == 1
+
+    def test_a_partially_failed_document_is_published_gaps_and_all(self, tmp_path, monkeypatch):
+        """Holding 197 good pages hostage to 3 rate-limited ones gives the user nothing.
+
+        The failed pages travel with the document so the destination can leave a
+        marked gap for the next run to heal, which only happens if stage 7 lets
+        the document through.
+        """
+        dest = MockDestination("MockDest")
+        pipe = self._pipeline(dest)
+
+        result = self._process(
+            pipe,
+            [make_page(1, text="written"), make_page(2, error="429 rate limited")],
+            dest,
+            tmp_path,
+            monkeypatch,
+        )
+
+        assert result is True
+        assert len(dest.published) == 1
+        assert dest.published[0]["doc"].failed_pages() == 1
+
+    def test_the_transcript_is_written_before_the_verdict_is_taken(self, tmp_path, monkeypatch):
+        """A run that published nothing is debugged from the transcript artifact.
+
+        Judging first would be cheaper and would leave a user staring at "every
+        page failed" with no file saying what the model actually returned.
+        """
+        order = []
+        dest = MockDestination("MockDest")
+        pipe = self._pipeline(dest)
+
+        result = self._process(
+            pipe,
+            [make_page(1, error="429 rate limited")],
+            dest,
+            tmp_path,
+            monkeypatch,
+            on_transcripts=lambda job: order.append("transcripts"),
+            on_judge=lambda job: order.append("verdict"),
+        )
+
+        assert result is False
+        assert order == ["transcripts", "verdict"]
+        assert dest.published == []
+
+    def test_an_extracted_text_layer_is_what_the_stage_is_told_about(self):
+        """Stage 7 is the only place that knows a PDF brought its own content.
+
+        ``judge_pages`` takes ``has_text`` because both its verdicts mean
+        "nothing came back", and a 400-page book whose three annotated pages hit
+        a 429 has plenty in hand. Only the job knows that, so the wiring has to
+        pass it — dropping the keyword silently reinstates the old behaviour of
+        publishing nothing.
+        """
+        pipe = self._pipeline(MockDestination(), skip_empty=True)
+        pages = [make_page(1, error="429 rate limited")]
+
+        pipe._judge_pages(make_job(pages=pages, extracted_doc_text="Chapter 1\n\nIt was..."))
+
+        with pytest.raises(pipeline._StopProcessing):
+            pipe._judge_pages(make_job(pages=pages, extracted_doc_text=""))
+
+    def test_a_whitespace_only_text_layer_is_not_content(self):
+        """An extractor that yields form feeds has found no text, and must not rescue the run.
+
+        Some PDFs extract to nothing but page separators. Treating that as
+        content would report a rate-limited document as published.
+        """
+        pipe = self._pipeline(MockDestination())
+        job = make_job(pages=[make_page(1, error="429 rate limited")], extracted_doc_text="\n\f\n")
+
+        with pytest.raises(pipeline._StopProcessing) as err:
+            pipe._judge_pages(job)
+
+        assert err.value.success is False

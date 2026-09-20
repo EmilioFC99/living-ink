@@ -19,7 +19,9 @@ from living_ink.destinations import (
     DestinationStatus,
     ObsidianDestination,
 )
-from tests.builders import make_both, make_context
+from living_ink.destinations.markup import BlockKind, to_blocks
+from tests.builders import make_both, make_context, make_page
+from tests.fakes import PlainTextWriter
 
 # =========================================================================
 # Destination (ABC)
@@ -925,3 +927,187 @@ class TestObsidianCheck:
             assert "writable" in status.detail
         finally:
             vault.chmod(0o700)
+
+
+class TestObsidianGapMarker:
+    """A page that failed to transcribe leaves a visible gap in the note.
+
+    A partial document publishes rather than being held back, so the note the
+    user reads contains pages that produced nothing. Two very different
+    failures look identical there unless the note says which is which: a page
+    that is genuinely blank, and a page the API refused to serve. The second is
+    temporary and will be retried, and the callout is where next run's text
+    goes.
+    """
+
+    def _publish(self, tmp_path, pages):
+        """Publish one document made of the given pages and return the note.
+
+        Args:
+            tmp_path: The pytest temp directory standing in for the vault.
+            pages: The pages the document is made of.
+
+        Returns:
+            The text of the note that was written.
+        """
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        doc, ctx = make_both("Notes", pages=pages)
+        result = dest.publish(doc, ctx)
+        assert result.ok is True
+        return (tmp_path / result.target).read_text(encoding="utf-8")
+
+    def _page_section(self, written, number):
+        """Return the body of one page's managed block, markers stripped.
+
+        Args:
+            written: The whole note, frontmatter included.
+            number: The page number whose block is wanted.
+
+        Returns:
+            What Living Ink wrote between that page's begin and end markers.
+        """
+        _, body = notemerge.split_frontmatter(written)
+        segments = notemerge.parse_segments(body)
+        return next(seg.content for seg in segments if seg.block_id == f"page-{number}")
+
+    def test_a_failed_page_reads_as_a_warning_not_as_a_stack_trace(self, tmp_path):
+        """The note is read by a person, and a bare exception tells them nothing.
+
+        The page used to emit its error text as if it were the transcription,
+        so ``RateLimitError: 429`` sat in the body looking like something the
+        user had written on the tablet.
+        """
+        written = self._publish(
+            tmp_path, [make_page(1, "", error="RateLimitError: 429 Too Many Requests")]
+        )
+
+        assert "> [!warning] Page not transcribed" in written
+        # The reason is kept, but only inside the callout — never as a bare
+        # line masquerading as transcribed text.
+        mentions = [line for line in written.splitlines() if "RateLimitError" in line]
+        assert mentions == ["> RateLimitError: 429 Too Many Requests"]
+
+    def test_the_marker_parses_back_as_one_callout(self, tmp_path):
+        """A marker that does not survive the round trip is a marker that can be lost.
+
+        Every destination's body goes through ``to_blocks``. If the gap marker
+        parsed as a plain quote, or as two blocks, a writer with no callout
+        support would flatten it into ordinary text instead of reporting the
+        degradation the contract promises.
+        """
+        written = self._publish(tmp_path, [make_page(1, "", error="429 Too Many Requests")])
+
+        callouts = [
+            block
+            for block in to_blocks(self._page_section(written, 1))
+            if block.kind is BlockKind.CALLOUT
+        ]
+
+        assert len(callouts) == 1
+        assert callouts[0].attrs["callout_type"] == "warning"
+        assert callouts[0].text == "Page not transcribed"
+
+    def test_a_writer_without_callouts_reports_the_gap_rather_than_swallowing_it(self, tmp_path):
+        """The marker is only worth writing if a second writer cannot lose it quietly.
+
+        Obsidian renders callouts natively, so nothing shipped exercises
+        ``degrade()``; a destination added later that cannot must still tell the
+        user the gap marker was flattened.
+        """
+        written = self._publish(tmp_path, [make_page(1, "", error="429 Too Many Requests")])
+
+        _, degradations = PlainTextWriter().render(to_blocks(self._page_section(written, 1)))
+
+        assert BlockKind.CALLOUT in {degradation.kind for degradation in degradations}
+
+    def test_a_blank_line_in_the_reason_does_not_strand_the_tail(self, tmp_path):
+        """This is why every line of the reason is quoted, blank ones included.
+
+        A blank line closes a Markdown blockquote. An unquoted one in the
+        middle of a multi-line reason ends the callout early and drops the rest
+        of the explanation into the note as loose text below the marker, where
+        it reads as part of the transcription.
+        """
+        written = self._publish(
+            tmp_path,
+            [make_page(1, "", error="429 Too Many Requests\n\nRetrying on the next sync.")],
+        )
+
+        blocks = to_blocks(self._page_section(written, 1))
+        callouts = [block for block in blocks if block.kind is BlockKind.CALLOUT]
+
+        assert len(callouts) == 1
+        assert [child.text for child in callouts[0].children] == [
+            "429 Too Many Requests",
+            "Retrying on the next sync.",
+        ]
+        # Nothing escaped: the tail is not a sibling of the callout.
+        assert not [
+            block for block in blocks if block is not callouts[0] and "Retrying" in block.text
+        ]
+
+    def test_a_failed_page_does_not_look_like_a_blank_one(self, tmp_path):
+        """A blank page and an unread page call for different actions.
+
+        A page that failed is worth re-running; a page that is blank is worth
+        nothing. Publishing the heading alone for both made them identical, so
+        a rate-limited notebook looked like a mostly empty one.
+        """
+        written = self._publish(
+            tmp_path, [make_page(1, "", error="429 Too Many Requests"), make_page(2, "")]
+        )
+
+        assert "Page not transcribed" in self._page_section(written, 1)
+        assert "Page not transcribed" not in self._page_section(written, 2)
+        assert not [
+            block
+            for block in to_blocks(self._page_section(written, 2))
+            if block.kind is BlockKind.CALLOUT
+        ]
+
+    def test_a_page_that_transcribed_is_left_exactly_as_it_was(self, tmp_path):
+        """The marker is for gaps only; a warning on a good page would be noise.
+
+        ``Page.error`` is the only signal, so a page carrying text and no error
+        has to come through untouched — otherwise every note in the vault grows
+        a callout.
+        """
+        written = self._publish(tmp_path, [make_page(1, "Handwritten thoughts")])
+
+        assert "Handwritten thoughts" in written
+        assert "Page not transcribed" not in written
+        assert "[!warning]" not in written
+
+    def test_text_salvaged_from_a_failed_page_is_published_under_the_marker(self, tmp_path):
+        """An error and a partial transcription are not exclusive, and both belong in the note.
+
+        Rendering the marker *instead of* the text discards a transcription the
+        user has already paid for. The marker leads so a reader who stops at the
+        first line knows the page is incomplete before reading the part of it
+        that did arrive.
+        """
+        written = self._publish(
+            tmp_path, [make_page(1, "The half that arrived", error="truncated response")]
+        )
+
+        section = self._page_section(written, 1)
+        assert "The half that arrived" in section
+        assert section.index("Page not transcribed") < section.index("The half that arrived")
+
+    def test_a_reason_that_says_nothing_still_makes_a_well_formed_marker(self, tmp_path):
+        """A provider that fails without a message must not produce a malformed callout.
+
+        The reason is whatever the exception carried, which can be an empty
+        string. The marker still has to parse back as one callout, because a
+        trailing quote line with nothing after it is a block a writer can trip on.
+        """
+        written = self._publish(tmp_path, [make_page(1, "", error="   ")])
+
+        callouts = [
+            block
+            for block in to_blocks(self._page_section(written, 1))
+            if block.kind is BlockKind.CALLOUT
+        ]
+
+        assert len(callouts) == 1
+        assert callouts[0].children == ()

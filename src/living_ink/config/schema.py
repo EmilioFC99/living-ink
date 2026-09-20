@@ -98,7 +98,7 @@ DEFAULT_MAX_NOTEBOOKS_PER_RUN = 1
 
 # Pages are transcribed by one network call each, so a handful in flight is a
 # large speedup. The ceiling is the provider's rate limit, not local CPU.
-DEFAULT_OCR_CONCURRENCY = 4
+DEFAULT_OCR_CONCURRENCY = 5
 
 # Low, because transcription is not a creative task: the same page should come
 # back the same way twice, and an invented word is worse than an illegible one.
