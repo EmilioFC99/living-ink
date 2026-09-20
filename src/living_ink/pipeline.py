@@ -2027,6 +2027,11 @@ class SyncPipeline:
                         job.notebook_id,
                         job.version,
                         recipe=self._recipe_for(job, dest),
+                        # Without this the gaps are permanent. A partial
+                        # publish writes a row whose version and recipe both
+                        # match, so `_owes_a_publish` has nothing else left to
+                        # notice it by, and the notebook is never retried.
+                        pages_failed=job.failed_pages,
                         run_id=self.run_id,
                         external_id=result.external_id,
                         target=result.target,
