@@ -16,7 +16,7 @@ from living_ink.core.selection import (
     EXCLUDED,
     NO_MATCHING_TAG,
     NOT_TARGETED,
-    OUTSIDE_FOLDER,
+    OUTSIDE_PATH,
     TRASHED,
     UNCHANGED,
     WRONG_TYPE,
@@ -420,7 +420,7 @@ class TestTheLimitDefersRatherThanLies:
         assert len(chosen.to_process) == 3
 
 
-class TestNarrowingByFolderTypeAndTag:
+class TestNarrowingByPathTypeAndTag:
     """Each filter reports its own reason, so the summary can explain itself."""
 
     def _listing(self):
@@ -431,27 +431,72 @@ class TestNarrowingByFolderTypeAndTag:
             doc("doc-2", "Recipes", parent="f-2"),
         ]
 
-    def test_a_folder_substring_narrows_the_run(self, store, settings):
+    def test_a_path_substring_narrows_the_run(self, store, settings):
         criteria = SelectionCriteria(source_path="work")
 
         chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
 
         assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
-        assert [reason for _, reason in chosen.skipped] == [OUTSIDE_FOLDER]
+        assert [reason for _, reason in chosen.skipped] == [OUTSIDE_PATH]
 
-    def test_a_folder_regex_narrows_the_run(self, store, settings):
+    def test_a_path_substring_matches_the_title_as_well_as_the_folder(self, store, settings):
+        """The flag is named for the path, and a title is part of a path.
+
+        Matching the folder alone made ``--source-path "recipes"`` find
+        nothing on a tablet whose notebook is called exactly that, which is
+        the worst possible answer to someone naming the thing they want.
+        """
+        criteria = SelectionCriteria(source_path="recipes")
+
+        chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-2"]
+
+    def test_the_path_is_slash_joined_so_a_trailing_slash_filters_a_folder(self, store, settings):
+        """``Work/`` is a folder filter for free — but only against ``Work/Standup``.
+
+        The summary table spaces its paths out as ``Work / Standup``; a user's
+        pattern does not, so the field these two filters match is joined the
+        way the flag's own documentation writes it.
+        """
+        criteria = SelectionCriteria(source_path="Work/")
+
+        chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
+
+    def test_a_path_regex_narrows_the_run(self, store, settings):
         criteria = SelectionCriteria(source_regex=r"^Person")
 
         chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
 
         assert [c.doc_id for c in chosen.to_process] == ["doc-2"]
 
+    def test_a_path_regex_is_case_sensitive(self, store, settings):
+        """A regex user who wants otherwise writes ``(?i)``.
+
+        Forcing a flag onto somebody's pattern is worse than making them state
+        it, and it is unsayable in the other direction.
+        """
+        criteria = SelectionCriteria(source_regex=r"^person")
+
+        chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
+
+        assert chosen.to_process == ()
+
+    def test_a_path_regex_can_anchor_on_the_title(self, store, settings):
+        criteria = SelectionCriteria(source_regex=r"/Stand.p$")
+
+        chosen = select(self._listing(), criteria, store, [Vault()], settings=settings)
+
+        assert [c.doc_id for c in chosen.to_process] == ["doc-1"]
+
     def test_a_path_and_a_regex_together_are_refused(self):
         with pytest.raises(ValueError, match="not both"):
             SelectionCriteria(source_path="Work", source_regex="Work")
 
     def test_a_broken_regex_is_refused_before_the_tablet_is_contacted(self):
-        with pytest.raises(ValueError, match="invalid folder regex"):
+        with pytest.raises(ValueError, match="invalid path regex"):
             SelectionCriteria(source_regex="Work(")
 
     def test_an_excluded_folder_is_never_synced(self, store, settings):

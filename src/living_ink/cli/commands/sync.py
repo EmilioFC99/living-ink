@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -21,6 +22,31 @@ from living_ink.config import ConfigurationMissing, get_config_path
 from living_ink.transport import TransportUnavailable
 
 logger = logging.getLogger(__name__)
+
+
+def _pattern(raw: str) -> str:
+    """Accept a regular expression, rejecting one that will not compile.
+
+    Checked at parse time rather than when the selection runs, so a typo costs
+    a usage error before a transport is opened, an inventory is read or a page
+    is rendered. The message is the position and the reason ``re`` reports,
+    never a traceback.
+
+    Args:
+        raw: The pattern as typed.
+
+    Returns:
+        The pattern, unchanged — it is compiled again where it is used, and
+        handing back the string keeps the namespace printable.
+
+    Raises:
+        argparse.ArgumentTypeError: If the pattern is not a valid regex.
+    """
+    try:
+        re.compile(raw)
+    except re.error as exc:
+        raise argparse.ArgumentTypeError(f"invalid pattern {raw!r}: {exc}") from exc
+    return raw
 
 
 def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
@@ -49,6 +75,9 @@ def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
     """
     return {
         "notebook": getattr(args, "notebook", None),
+        "source_path": getattr(args, "source_path", None),
+        "source_regex": getattr(args, "source_regex", None),
+        "force": getattr(args, "force", False),
         "keep_temp": getattr(args, "keep_temp", False),
         # The pipeline's own name for "do the work, publish nothing", which is
         # what ``--preview --transcribe`` asks for. ``--preview`` on its own
@@ -88,6 +117,29 @@ class SyncCommand(BaseCommand):
             "--notebook",
             default=None,
             help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
+        )
+        # One mutually exclusive group, so asking for both is a usage error the
+        # parser reports before the tablet is contacted. They filter the same
+        # field by different rules, and defining a precedence between them
+        # would only hide the mistake.
+        where = parser.add_mutually_exclusive_group()
+        where.add_argument(
+            "--source-path",
+            default=None,
+            metavar="TEXT",
+            help="Only documents whose full path contains this text (case-insensitive)",
+        )
+        where.add_argument(
+            "--source-regex",
+            default=None,
+            type=_pattern,
+            metavar="PATTERN",
+            help="Only documents whose full path matches this pattern (case-sensitive)",
+        )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Publish every selected document, even one the comparison calls unchanged",
         )
         parser.add_argument(
             "--keep-temp",

@@ -86,6 +86,7 @@ from living_ink.settings import Settings
 SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
     "--ssh": ("flags.preferred_connection", "ssh"),
     "--cloud": ("flags.preferred_connection", "cloud"),
+    "--force": ("force", True),
     "--keep-temp": ("keep_temp", True),
     "--prune": ("flags.prune", True),
     "--json": ("flags.output_json", True),
@@ -105,6 +106,9 @@ SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
 #: construction and prove nothing.
 BARE_SYNC: dict[str, Any] = {
     "notebook": None,
+    "source_path": None,
+    "source_regex": None,
+    "force": False,
     "keep_temp": False,
     "dry_run": False,
     "flags": {},
@@ -291,6 +295,9 @@ SYNC_SURFACE: set[str] = {
     "--quiet",
     # Hand-registered: one run's shape, with no persisted form.
     "--notebook",
+    "--source-path",
+    "--source-regex",
+    "--force",
     "--keep-temp",
     "--preview",
     "--transcribe",
@@ -1111,6 +1118,106 @@ class TestTheTypeFlagsReplaceRatherThanAdd:
 
         flags = intent(["sync", "--pdf"])["flags"]
         assert Settings.resolve(config, env={}, flags=flags).sync_types == ("pdf",)
+
+
+class TestNarrowingOneRunByPath:
+    """``--source-path`` and ``--source-regex`` filter, and refuse each other.
+
+    Neither has a config key, on purpose: a permanent substring filter is a
+    mistake waiting to be forgotten, and a permanent regex is the same with
+    sharper edges. So they travel as named keywords rather than through the
+    ``flags`` mapping, which is what stops a config file from being able to
+    set them at all.
+    """
+
+    def test_a_path_filter_reaches_the_pipeline(self):
+        assert intent(["sync", "--source-path", "Work/"])["source_path"] == "Work/"
+
+    def test_a_regex_filter_reaches_the_pipeline(self):
+        assert intent(["sync", "--source-regex", r"^Journal/"])["source_regex"] == r"^Journal/"
+
+    def test_neither_is_a_setting(self):
+        """They stay out of ``flags``, which is the layer a config can answer."""
+        given = intent(["sync", "--source-path", "Work/"])
+        assert "source_path" not in given["flags"]
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["sync", "--source-path", "a", "--source-regex", "b"], id="path-first"),
+            pytest.param(["sync", "--source-regex", "b", "--source-path", "a"], id="regex-first"),
+            pytest.param(["watch", "--source-path", "a", "--source-regex", "b"], id="watch"),
+        ],
+    )
+    def test_the_two_together_are_a_usage_error(self, argv):
+        """Same field, two rules: a precedence between them would hide a typo."""
+        with pytest.raises(SystemExit) as exit_info:
+            intent(argv)
+        assert exit_info.value.code == 2
+
+    def test_the_clash_names_both_flags(self, cli):
+        run = cli("sync", "--source-path", "a", "--source-regex", "b")
+        assert run.exit_code == 2
+        assert "--source-path" in run.stderr and "--source-regex" in run.stderr
+        assert run.calls == []
+
+    def test_a_pattern_that_will_not_compile_is_refused_at_the_parser(self, cli):
+        """Before the transport, before the listing, before a page is rendered.
+
+        A regex is checked by ``type=`` rather than when the selection runs,
+        so the cost of a typo is a usage error and not a traceback out of the
+        middle of a sync that has already downloaded something.
+        """
+        run = cli("sync", "--source-regex", "Work(")
+        assert run.exit_code == 2
+        assert "Work(" in run.stderr
+        assert run.calls == []
+
+    def test_a_valid_pattern_survives_unchanged(self, tmp_path):
+        """Handed on as typed — it is compiled again where it is used."""
+        from living_ink.pipeline import SyncPipeline
+
+        pipe = SyncPipeline(
+            **intent(["sync", "--source-regex", r"^Journal/diary-\d+"]),
+            data_dir=tmp_path,
+            destinations=[],
+        )
+        assert pipe._criteria().source_regex == r"^Journal/diary-\d+"
+
+
+class TestForcingARepublish:
+    """``--force`` is the non-destructive replacement for ``state --forget``.
+
+    Forcing a re-sync never needed to *delete* anything: ``--forget`` mutated
+    the database and hoped the next run repaired it, leaving a "forgot it but
+    then the sync failed" state that simply does not exist here.
+    """
+
+    def test_it_reaches_the_criteria(self, tmp_path):
+        from living_ink.pipeline import SyncPipeline
+
+        pipe = SyncPipeline(**intent(["sync", "--force"]), data_dir=tmp_path, destinations=[])
+        assert pipe._criteria().force is True
+
+    def test_an_ordinary_run_does_not_force(self, tmp_path):
+        from living_ink.pipeline import SyncPipeline
+
+        pipe = SyncPipeline(**intent(["sync"]), data_dir=tmp_path, destinations=[])
+        assert pipe._criteria().force is False
+
+    def test_naming_a_notebook_still_forces_without_the_flag(self, tmp_path):
+        """The one thing that behaved like ``--force`` before it existed.
+
+        Naming a document is asking for that document, whether or not the
+        comparison thinks it is current, and growing a real flag must not
+        quietly take that away.
+        """
+        from living_ink.pipeline import SyncPipeline
+
+        pipe = SyncPipeline(
+            **intent(["sync", "--notebook", "Standup"]), data_dir=tmp_path, destinations=[]
+        )
+        assert pipe._criteria().force is True
 
 
 class TestForcingBothTransports:

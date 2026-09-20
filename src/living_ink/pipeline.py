@@ -866,6 +866,9 @@ class SyncPipeline:
         self,
         *,
         notebook: Optional[str] = None,
+        source_path: Optional[str] = None,
+        source_regex: Optional[str] = None,
+        force: bool = False,
         limit: Optional[int] = None,
         ssh: bool = False,
         cloud: bool = False,
@@ -896,6 +899,17 @@ class SyncPipeline:
 
         Args:
             notebook: Target a single document by name, folder path, or id.
+            source_path: Case-insensitive substring of the document's full
+                path. Narrows a sweep; does not name one document.
+            source_regex: Case-sensitive pattern searched against that same
+                path. Giving both this and ``source_path`` is an error, raised
+                when the criteria are built rather than resolved by a
+                precedence rule that would only hide the mistake.
+            force: Publish every selected document, whatever the comparison
+                concluded. Overrides the verdict, it does not skip the
+                comparison — the recipe digest a run records has to describe
+                the inputs it actually used, and the report can still say how
+                many would have been picked up anyway.
             limit: Most documents to process. 0 or None defers to config.
             ssh: Force the USB transport for this run.
             cloud: Force the reMarkable Cloud transport for this run.
@@ -945,6 +959,12 @@ class SyncPipeline:
             )
 
         self.target_notebook = notebook.strip() if notebook else None
+        # No config key on purpose: a permanent substring filter is a mistake
+        # waiting to be forgotten, and a permanent regex is the same with
+        # sharper edges. Both shape one run and nothing else.
+        self.source_path = source_path.strip() if source_path else None
+        self.source_regex = source_regex or None
+        self.force = force
 
         # None means "this flag was not given", which is what lets config and
         # the environment be heard; a False here would be an explicit "off"
@@ -1108,6 +1128,8 @@ class SyncPipeline:
         """
         return SelectionCriteria(
             target=self.target_notebook,
+            source_path=self.source_path,
+            source_regex=self.source_regex,
             types=frozenset(self.sync_types),
             # Both come from the config file and had no reader at all, so
             # ``config`` and ``info`` reported Templates and Quick Sheets as
@@ -1120,9 +1142,9 @@ class SyncPipeline:
             # the user which one they meant can no longer see it.
             limit=None if self.target_notebook else self.limit,
             # Naming a notebook is asking for that notebook, whether or not the
-            # comparison thinks it is current. There is no --force flag yet;
-            # this is the one thing that already behaved like one.
-            force=bool(self.target_notebook),
+            # comparison thinks it is current — the one thing that behaved like
+            # --force before --force existed, and still does without it.
+            force=self.force or bool(self.target_notebook),
         )
 
     def select_documents(self, listing: Sequence[Any], client: Any) -> Optional[Selection]:

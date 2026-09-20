@@ -14,7 +14,7 @@ re-exports them, so the call sites that already name them are unchanged.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +72,21 @@ def document_name(item: Any) -> str:
     ).strip()
 
 
-def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
-    """Construct the folder path for an item using the ID lookup map."""
-    path = []
+def folder_parts(item: Any, id_map: Dict[str, Any]) -> List[str]:
+    """Return the names of the folders holding an item, outermost first.
+
+    The parts rather than a joined string, because the two callers join them
+    differently: the summary table spaces them out and a path filter does not.
+
+    Args:
+        item: A document or folder from the transport's listing.
+        id_map: Every listed item by id, for walking up to the root.
+
+    Returns:
+        The folder names, or a single :data:`TRASH_MARKER` for anything the
+        user has thrown away. Empty for an item sitting at the root.
+    """
+    path: List[str] = []
     current = item
     while get_val(current, "Parent"):
         parent_id = get_val(current, "Parent")
@@ -88,7 +100,31 @@ def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
             current = parent
         else:
             break
-    return " / ".join(path)
+    return path
+
+
+def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
+    """Construct the folder path for an item using the ID lookup map."""
+    return " / ".join(folder_parts(item, id_map))
+
+
+def document_path(item: Any, id_map: Dict[str, Any]) -> str:
+    """Return a document's full path, spelled the way a user would type it.
+
+    ``Journal/diary-2026``: the folders and the title, joined by a bare slash
+    rather than :func:`get_notebook_path`'s spaced one. This is the field
+    ``--source-path`` and ``--source-regex`` match against, so the separator
+    has to be the one that appears in the pattern a user writes — a filter for
+    ``Work/`` cannot be a folder filter for free against ``Work / Notes``.
+
+    Args:
+        item: A document from the transport's listing.
+        id_map: Every listed item by id, for resolving the folders above it.
+
+    Returns:
+        The path, title included. Just the title for a document at the root.
+    """
+    return "/".join([*folder_parts(item, id_map), document_name(item)])
 
 
 def is_trashed(item: Any, id_map: Dict[str, Any]) -> bool:
