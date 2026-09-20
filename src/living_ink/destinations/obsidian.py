@@ -50,6 +50,31 @@ logger = logging.getLogger(__name__)
 #: Block id for a PDF or EPUB's own text layer, which belongs to no one page.
 _BODY_BLOCK = "body"
 
+#: Title of the callout that stands in for a page that could not be read.
+_GAP_TITLE = "Page not transcribed"
+
+
+def _gap_marker(reason: str) -> str:
+    """Render the placeholder that stands in for a page OCR could not read.
+
+    A visible marker rather than the bare exception text, because the two
+    failures this has to separate look identical in a note otherwise: a page
+    that produced nothing because it is blank, and a page that produced nothing
+    because the API refused to serve it. The second is temporary, the reader
+    should know it will be retried, and §10.6's per-page merge needs somewhere
+    to put the real text next run.
+
+    Args:
+        reason: What went wrong, from :attr:`~living_ink.core.document.Page.error`.
+
+    Returns:
+        A callout in the canonical dialect. Every line is quoted — including
+        blank ones, which would otherwise close the blockquote and leave the
+        tail of a multi-line reason outside the marker.
+    """
+    body = "\n".join(f"> {line}".rstrip() for line in reason.strip().splitlines())
+    return f"> [!warning] {_GAP_TITLE}\n{body}" if body else f"> [!warning] {_GAP_TITLE}"
+
 
 def _iso_date(moment: Optional[datetime.datetime]) -> Optional[str]:
     """Render a timestamp as the ``YYYY-MM-DD`` a frontmatter date wants.
@@ -481,10 +506,16 @@ class ObsidianDestination(FileSystemDestination):
         )
         blocks: List[Block] = list(to_blocks(header))
         # A page that failed says so where its text would have been. Publishing
-        # the heading alone would be indistinguishable from a blank page.
-        body = page.error if page.error else page.text.strip()
-        if body:
-            blocks.extend(to_blocks(body))
+        # the heading alone would be indistinguishable from a blank page. The
+        # marker leads, so a reader who stops at the first line knows the page
+        # is incomplete before reading the part of it that did arrive — and the
+        # two are not exclusive, because discarding text a page salvaged on its
+        # way down would be paying for a transcription and throwing it away.
+        parts = [_gap_marker(page.error)] if page.error else []
+        if page.text.strip():
+            parts.append(page.text.strip())
+        for part in parts:
+            blocks.extend(to_blocks(part))
         return blocks
 
     # ------------------------------------------------------------------
