@@ -24,6 +24,10 @@ class CompletionsCommand(BaseCommand):
 
     name = "completions"
     help = "Print the tab-completion script for your shell"
+    #: Every other command acts on notebooks, settings or the tablet; this one
+    #: emits text for a shell to read, which is terminal plumbing rather than
+    #: something Living Ink does.
+    listed = False
     description = (
         "Print a tab-completion script for bash, zsh or fish. "
         "Generated from this version's own commands and flags, so it is never out of date. "

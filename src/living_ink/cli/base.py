@@ -26,6 +26,10 @@ class BaseCommand(ABC):
             command runs, so the terminal test happens in one place instead of
             inside every step that happens to prompt. A command that says yes
             may assume a terminal; one that says no must never prompt.
+        listed: Whether the top-level ``--help`` names this command. Unlisted
+            is not hidden — it parses, runs, answers its own ``--help`` and
+            appears in the generated completions; it is only kept out of the
+            summary a user reads to learn what Living Ink does.
         root: Optional repository root path.
     """
 
@@ -33,6 +37,7 @@ class BaseCommand(ABC):
     help: str = ""
     description: Optional[str] = None
     interactive: bool = False
+    listed: bool = True
 
     def __init__(self, root: Optional[Path] = None) -> None:
         """Initialize command with an optional project root path.

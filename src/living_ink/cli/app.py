@@ -199,13 +199,23 @@ class LivingInkCLI:
         # otherwise.
         add_verbosity_args(parser)
 
-        subparsers = parser.add_subparsers(dest="command", help="Available commands")
+        # Spelled out because argparse builds the metavar from every choice,
+        # which would name an unlisted command in the usage line anyway.
+        listed = [name for name, cmd in self.commands.items() if cmd.listed]
+        subparsers = parser.add_subparsers(
+            dest="command",
+            help="Available commands",
+            metavar="{" + ",".join(listed) + "}",
+        )
 
         for cmd_name, cmd_cls in self.commands.items():
+            # Omitting `help` is what hides a command: argparse only adds a row
+            # when the key is present, and `SUPPRESS` prints itself instead.
+            summary = {"help": cmd_cls.help} if cmd_cls.listed else {}
             subparser = subparsers.add_parser(
                 cmd_name,
-                help=cmd_cls.help,
                 description=cmd_cls.description or cmd_cls.help,
+                **summary,
             )
             add_verbosity_args(subparser)
             cmd_cls.register_args(subparser)
