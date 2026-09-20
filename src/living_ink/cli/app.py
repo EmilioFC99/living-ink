@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Type
 
 from living_ink.cli.base import BaseCommand
+from living_ink.cli.commands.config import ConfigCommand
 from living_ink.cli.commands.info import InfoCommand
 from living_ink.cli.commands.setup import SetupCommand
 from living_ink.cli.commands.sync import SyncCommand
@@ -109,15 +110,16 @@ class LivingInkCLI:
         commands: Dictionary mapping command names to BaseCommand classes.
     """
 
-    #: The commands 1.0 ships, in the order ``--help`` lists them. Four of the
-    #: six so far: ``config`` and ``uninstall`` are still unbuilt, and
-    #: ``tests/test_cli_behaviour.py`` pins their absence so it stays a stated
+    #: The commands 1.0 ships, in the order ``--help`` lists them. Five of the
+    #: six so far: ``uninstall`` is still unbuilt, and
+    #: ``tests/test_cli_behaviour.py`` pins its absence so it stays a stated
     #: fact rather than an oversight.
     DEFAULT_COMMANDS: list[Type[BaseCommand]] = [
         SyncCommand,
         WatchCommand,
         SetupCommand,
         InfoCommand,
+        ConfigCommand,
     ]
 
     def __init__(

@@ -351,12 +351,16 @@ COMMAND_SURFACE: dict[str, set[str]] = {
     # is either automatic, destructive and therefore ``config → Advanced``, or
     # ``sync --force``.
     "info": {"-h", "--help", "--verbose", "-q", "--quiet", "--json"},
+    # No flags of its own, deliberately. Every answer the menu takes is a
+    # question it asks, and a flag here would be a third way to set a setting
+    # that already has a config key and an environment variable.
+    "config": {"-h", "--help", "--verbose", "-q", "--quiet"},
 }
 
 #: Commands §7.1 of the 1.0 design specifies but that have not been built. They
 #: must still be rejected as usage errors rather than half-working, and this
 #: list is what makes their absence a stated fact instead of an oversight.
-UNBUILT_COMMANDS = ("config", "uninstall")
+UNBUILT_COMMANDS = ("uninstall",)
 
 #: Commands that shipped in 0.x and are gone. Listed rather than deleted,
 #: because a retired command has to fail the same clean way an unbuilt one
@@ -527,6 +531,9 @@ COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
     ("info",): {"collect_status"},
     ("info", "--json"): {"collect_status"},
     ("setup",): {"run_wizard"},
+    # The menu reads the config and the caches lazily, from inside the rows
+    # that need them — so opening it touches neither.
+    ("config",): {"run_config_menu"},
 }
 
 
@@ -628,6 +635,7 @@ def cli(monkeypatch, capsys, tmp_path):
     from living_ink.cli import caches as caches_module
     from living_ink.cli import inventory as inventory_module
     from living_ink.cli import status as status_module
+    from living_ink.cli.commands import config as config_module
     from living_ink.cli.commands import setup as setup_module
     from living_ink.cli.commands import watch as watch_module
 
@@ -684,6 +692,26 @@ def cli(monkeypatch, capsys, tmp_path):
             recorder.note("run_wizard")
             return setup_module.WizardResult(saved=True, run_sync_requested=False)
 
+    class _RecordingMenu:
+        """Stand in for the settings menu, without asking anything."""
+
+        def __init__(self, root=None):
+            """Accept the same construction the command performs.
+
+            Args:
+                root: Ignored.
+            """
+            self.edits = {}
+
+        def run(self):
+            """Report a session that changed nothing.
+
+            Returns:
+                False, the value a discarded menu returns.
+            """
+            recorder.note("run_config_menu")
+            return False
+
     def _collect_status(config_path):
         """Stand in for the probing status collector.
 
@@ -711,6 +739,7 @@ def cli(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(pipeline_module, "SyncPipeline", _RecordingPipeline)
     monkeypatch.setattr(setup_module, "Wizard", _RecordingWizard)
+    monkeypatch.setattr(config_module, "ConfigMenu", _RecordingMenu)
     # Every command in the matrix is asked to run as if a person were
     # watching; the refusal without a terminal is its own test, and leaving
     # it live here would silently turn every `setup` row into an exit 2.
