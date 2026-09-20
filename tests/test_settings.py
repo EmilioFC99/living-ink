@@ -7,7 +7,6 @@ import pytest
 from living_ink.config import credentials
 from living_ink.config.schema import SETTINGS, STORE_CONFIG, STORE_CREDENTIALS, STORE_ENV_ONLY
 from living_ink.settings import (
-    DEFAULT_APPLE_NOTES_FOLDER,
     DEFAULT_CACHE_MAX_AGE_DAYS,
     DEFAULT_OCR_CONCURRENCY,
     DEFAULT_SSH_HOST,
@@ -77,7 +76,6 @@ class TestDefaults:
         assert s.sync_pdfs is False
         assert s.sync_epubs is False
         assert s.max_notebooks_per_run == 1
-        assert s.apple_notes_folder == DEFAULT_APPLE_NOTES_FOLDER
         assert s.remarkable_token is None
 
     def test_settings_are_frozen(self):
@@ -100,8 +98,7 @@ class TestConfigValues:
             "ai": {"provider": "gemini", "model": "gemini-2.0-flash", "temperature": "0.7"},
             "ocr": {"concurrency": 6},
             "sync": {"sync_pdfs": True, "sync_epubs": "yes", "limit": 5, "tags": ["work"]},
-            "obsidian": {"enabled": True, "vault_path": "/tmp/vault"},
-            "apple_notes": {"folder_name": "Notebooks"},
+            "obsidian": {"enabled": True, "vault_path": "/tmp/vault", "root_folder": "Ink"},
             "cache": {"transcripts": False},
             "output": {"verbosity": "verbose"},
         }
@@ -121,7 +118,7 @@ class TestConfigValues:
         assert s.sync_tags == ("work",)
         assert s.obsidian_enabled is True
         assert s.obsidian_vault_path == "/tmp/vault"
-        assert s.apple_notes_folder == "Notebooks"
+        assert s.obsidian_root_folder == "Ink"
         assert s.transcript_cache is False
         assert s.verbosity == "verbose"
 
@@ -240,20 +237,20 @@ class TestPrecedence:
         config = {
             "remarkable": {"ssh_host": "config-host"},
             "sync": {"limit": 5, "sync_pdfs": False},
-            "apple_notes": {"folder_name": "ConfigFolder"},
+            "obsidian": {"root_folder": "ConfigFolder"},
         }
         env = {
             "REMARKABLE_SSH_HOST": "env-host",
             "SYNC_MAX_NOTEBOOKS": "9",
             "SYNC_PDFS": "true",
-            "APPLE_NOTES_FOLDER": "EnvFolder",
+            "LIVING_INK_OBSIDIAN_ROOT_FOLDER": "EnvFolder",
         }
         s = Settings.resolve(config=config, env=env)
 
         assert s.ssh_host == "env-host"
         assert s.max_notebooks_per_run == 9
         assert s.sync_pdfs is True
-        assert s.apple_notes_folder == "EnvFolder"
+        assert s.obsidian_root_folder == "EnvFolder"
 
     def test_a_flag_overrides_the_environment(self):
         s = Settings.resolve(
@@ -286,8 +283,8 @@ class TestPrecedence:
         assert s.use_ssh is False
 
     def test_from_env_defaults_to_os_environ(self, monkeypatch):
-        monkeypatch.setenv("APPLE_NOTES_FOLDER", "FromProcess")
-        assert Settings.from_env().apple_notes_folder == "FromProcess"
+        monkeypatch.setenv("LIVING_INK_OBSIDIAN_ROOT_FOLDER", "FromProcess")
+        assert Settings.from_env().obsidian_root_folder == "FromProcess"
 
 
 class TestOcrConcurrency:

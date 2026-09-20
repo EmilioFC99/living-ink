@@ -924,7 +924,6 @@ class SyncOptions:
     Attributes:
         notebook: Target a single notebook by name, folder path, or document ID.
         limit: Maximum number of notebooks to process. None or 0 means "use config".
-        folder: Apple Notes folder override.
         ssh: Force the USB SSH transport.
         cloud: Force the reMarkable Cloud transport.
         preferred_connection: Explicit transport preference ('ssh' or 'cloud'),
@@ -941,7 +940,6 @@ class SyncOptions:
 
     notebook: Optional[str] = None
     limit: Optional[int] = None
-    folder: Optional[str] = None
     ssh: bool = False
     cloud: bool = False
     preferred_connection: Optional[str] = None
@@ -974,7 +972,6 @@ class SyncOptions:
         return cls(
             notebook=getattr(args, "notebook", None),
             limit=getattr(args, "limit", None),
-            folder=getattr(args, "folder", None),
             ssh=getattr(args, "ssh", False),
             cloud=getattr(args, "cloud", False),
             sync_pdfs=getattr(args, "sync_pdfs", False) or None,
@@ -1217,7 +1214,6 @@ class SyncPipeline:
             sync_pdfs=sync_pdfs,
             sync_epubs=sync_epubs,
             max_notebooks_per_run=limit,
-            apple_notes_folder=opts.folder or base.apple_notes_folder,
         )
 
         # Opened by run(); every state row written during that run carries it,
@@ -1272,11 +1268,6 @@ class SyncPipeline:
     def limit(self) -> int:
         """Maximum number of documents to process in this run."""
         return self.settings.max_notebooks_per_run
-
-    @property
-    def folder(self) -> str:
-        """Destination folder name in Apple Notes."""
-        return self.settings.apple_notes_folder
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""

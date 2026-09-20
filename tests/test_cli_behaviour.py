@@ -178,7 +178,6 @@ COMMAND_SURFACE: dict[str, set[str]] = {
         "--quiet",
         "--notebook",
         "--limit",
-        "--folder",
         "--ssh",
         "--cloud",
         "--sync-pdfs",
@@ -199,7 +198,6 @@ COMMAND_SURFACE: dict[str, set[str]] = {
         "--quiet",
         "--notebook",
         "--limit",
-        "--folder",
         "--ssh",
         "--cloud",
         "--sync-pdfs",
@@ -257,17 +255,16 @@ CLOUD_WALKTHROUGH: tuple[tuple[str, str], ...] = (
     ("Select vault", "1"),
     ("Choose folder", "1"),
     ("Mirror complete nested", "y"),
-    ("Enable Apple Notes sync", "n"),
     ("Automatically sync notes in background", "n"),
     ("run your first sync now", "n"),
 )
 
 #: Steps the wizard only offers on macOS, because there is nothing behind them
-#: anywhere else: Apple Notes is driven through ``osascript`` and background
-#: sync installs a launchd plist. Linux therefore gets a walkthrough that is
-#: genuinely two questions shorter — which CI discovered, because the first
-#: version of this table assumed everyone was on a Mac.
-MACOS_ONLY_STEPS = frozenset({"Enable Apple Notes sync", "Automatically sync notes in background"})
+#: anywhere else: background sync installs a launchd plist. Linux therefore
+#: gets a walkthrough that is genuinely one question shorter — which CI
+#: discovered, because the first version of this table assumed everyone was on
+#: a Mac.
+MACOS_ONLY_STEPS = frozenset({"Automatically sync notes in background"})
 
 
 def walkthrough_for_this_platform() -> list[tuple[str, str]]:
@@ -696,9 +693,6 @@ class TestSyncFlagsMapExactly:
             ),
             pytest.param(["sync", "--limit", "5"], replace(BARE_SYNC, limit=5), id="limit"),
             pytest.param(["sync", "--limit", "0"], replace(BARE_SYNC, limit=0), id="limit-zero"),
-            pytest.param(
-                ["sync", "--folder", "Inbox"], replace(BARE_SYNC, folder="Inbox"), id="folder"
-            ),
             pytest.param(["sync", "--dry-run"], replace(BARE_SYNC, dry_run=True), id="dry-run"),
             pytest.param(["sync", "--prune"], replace(BARE_SYNC, prune=True), id="prune"),
             pytest.param(["sync", "--ssh"], replace(BARE_SYNC, ssh=True), id="ssh"),
@@ -1028,7 +1022,7 @@ class TestTheShortcutMatchesTheRealThing:
             ["sync", "--dry-run"],
             ["sync", "--notebook", "Work/Notes", "--limit", "2"],
             ["sync", "--all-types", "--keep-temp", "--json"],
-            ["sync", "--ssh", "--prune", "--folder", "Inbox"],
+            ["sync", "--ssh", "--prune"],
             ["sync", "--sync-pdfs", "--sync-epubs"],
         ],
     )
@@ -1295,11 +1289,11 @@ class TestStatusReportsWhatItWasGiven:
             "provider": "groq",
             "model": "a-very-specific-model",
             "ssh_host": "10.11.99.7",
-            "apple_notes_folder": "Scribbles",
+            "attachments_folder": "Scribbles",
         }
         # The section names are the ones the wizard writes and the schema
-        # declares: destinations are top-level keys, not nested under a
-        # ``destinations:`` map, and Apple Notes' key is ``folder_name``.
+        # declares: a destination is a top-level key, not nested under a
+        # ``destinations:`` map.
         config = tmp_path / "config.yml"
         config.write_text(
             "remarkable:\n"
@@ -1313,9 +1307,7 @@ class TestStatusReportsWhatItWasGiven:
             "  enabled: true\n"
             f"  vault_path: {values['vault']}\n"
             f"  root_folder: {values['root_folder']}\n"
-            "apple_notes:\n"
-            "  enabled: true\n"
-            f"  folder_name: {values['apple_notes_folder']}\n",
+            f"  attachments_folder: {values['attachments_folder']}\n",
             encoding="utf-8",
         )
 
@@ -1644,9 +1636,9 @@ class TestSetupWritesOnlyWhatItWasTold:
         for prompt, (fragment, _reply) in zip(asked, expected):
             assert fragment in prompt
 
-    @pytest.mark.skipif(platform.system() != "Darwin", reason="launchd and Apple Notes are macOS")
+    @pytest.mark.skipif(platform.system() != "Darwin", reason="launchd is macOS")
     def test_the_macos_only_steps_are_offered_on_macos(self, wizard):
-        """Both platform-specific questions are asked here."""
+        """Every platform-specific question is asked here."""
         _, asked, _ = wizard()
         for fragment in MACOS_ONLY_STEPS:
             assert any(fragment in prompt for prompt in asked), fragment
@@ -1664,7 +1656,7 @@ class TestSetupWritesOnlyWhatItWasTold:
             assert not any(fragment in prompt for prompt in asked), fragment
 
     def test_declining_every_extra_still_saves(self, wizard):
-        """Saying no to Apple Notes, background sync and the first sync works."""
+        """Saying no to background sync and to the first sync works."""
         result, _, _ = wizard()
         assert result.saved is True
         assert result.run_sync_requested is False
@@ -1688,12 +1680,24 @@ class TestSetupWritesOnlyWhatItWasTold:
         The difference matters on the next run: an absent section reads as "not
         configured yet" and a false one reads as "asked and answered", and only
         the second stops the tool nagging.
+
+        Obsidian is the destination 1.0 ships, so declining it is what this has
+        to drive: the follow-up questions about the vault are not asked, and
+        the section still has to appear.
         """
         import yaml
 
-        wizard()
+        #: The vault questions only follow a "yes".
+        skipped = {"Select vault", "Choose folder", "Mirror complete nested"}
+        declined = [
+            (fragment, "n" if fragment == "Enable Obsidian sync" else reply)
+            for fragment, reply in walkthrough_for_this_platform()
+            if fragment not in skipped
+        ]
+
+        wizard(declined)
         cfg = yaml.safe_load((tmp_path / "config" / "config.yml").read_text(encoding="utf-8"))
-        assert cfg["apple_notes"]["enabled"] is False
+        assert cfg["obsidian"]["enabled"] is False
 
     def test_what_the_wizard_writes_is_what_status_reads_back(self, wizard, tmp_path, monkeypatch):
         """The two halves of the round trip agree on the section names.

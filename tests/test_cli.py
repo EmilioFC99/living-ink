@@ -308,7 +308,6 @@ def test_sync_command_execution(tmp_path):
     args = argparse.Namespace(
         notebook="MyNotes",
         limit=5,
-        folder="TestFolder",
         ssh=True,
         cloud=False,
         sync_pdfs=True,
@@ -324,7 +323,6 @@ def test_sync_command_execution(tmp_path):
             opts = mock_init.call_args.kwargs["options"]
             assert opts.notebook == "MyNotes"
             assert opts.limit == 5
-            assert opts.folder == "TestFolder"
             assert opts.ssh is True
             assert opts.sync_pdfs is True
             # An unset store-true flag must defer to config, not force False.

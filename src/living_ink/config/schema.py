@@ -94,7 +94,6 @@ DEFAULT_SSH_USER = "root"
 DEFAULT_SSH_PORT = 22
 
 DEFAULT_PREFERRED_CONNECTION = "ssh"
-DEFAULT_APPLE_NOTES_FOLDER = "Living Ink"
 DEFAULT_MAX_NOTEBOOKS_PER_RUN = 1
 
 # Pages are transcribed by one network call each, so a handful in flight is a
@@ -261,7 +260,6 @@ SECTIONS: Dict[str, Section] = {
     "remarkable": Section("How to reach the tablet."),
     "sync": Section("What gets synced, and what gets skipped."),
     "obsidian": Section("Where notes are published."),
-    "apple_notes": Section("Where notes are published."),
     "watch": Section("The scheduled sync."),
     "cache": Section("What is reused between runs."),
     "paths": Section("Where runtime artifacts live."),
@@ -269,6 +267,13 @@ SECTIONS: Dict[str, Section] = {
     # The pre-``ai:`` spelling. Still read, and still the place a 0.1 install
     # keeps its key, so it maps forward rather than being refused.
     "openai": Section("", status=DEPRECATED, replacement="ai"),
+    # The second destination, deleted in 1.0. Kept here so a config that still
+    # names it loads with a warning instead of refusing to start.
+    "apple_notes": Section(
+        "",
+        status=REMOVED,
+        note="Apple Notes is no longer a destination; notes go to 'obsidian:'",
+    ),
     # There is one OCR backend, and it is the configured AI provider. This
     # section is kept only so the configs that still name it keep loading.
     "google_vision": Section(
@@ -583,23 +588,6 @@ SETTINGS: Tuple[Setting, ...] = (
         env="LIVING_INK_OBSIDIAN_EMBED_IMAGES",
         flag="--embed-images",
         negated="--no-embed-images",
-    ),
-    Setting(
-        field="apple_notes_enabled",
-        key="apple_notes.enabled",
-        kind=FLAG,
-        default=False,
-        help="Publish to Apple Notes.",
-        env="LIVING_INK_APPLE_NOTES_ENABLED",
-    ),
-    Setting(
-        field="apple_notes_folder",
-        key="apple_notes.folder_name",
-        kind=TEXT,
-        default=DEFAULT_APPLE_NOTES_FOLDER,
-        help="Destination folder name in Apple Notes.",
-        env="APPLE_NOTES_FOLDER",
-        legacy_keys=("destination.folder_name",),
     ),
     # ── Watch ──────────────────────────────────────────────────────────────
     #
