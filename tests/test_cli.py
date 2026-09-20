@@ -409,7 +409,9 @@ class TestWizardSyncHandoff:
             ):
                 with patch("sys.stdin.isatty", return_value=False):
                     assert cmd.run(args) == 1
-        assert "run: living-ink setup" in capsys.readouterr().out
+        # stderr: a `--json` run that never got as far as a report still has
+        # to say why, and stdout is reserved for the document.
+        assert "run: living-ink setup" in capsys.readouterr().err
 
     def test_sync_launched_by_the_wizard_does_not_reoffer_it(self, tmp_path, capsys):
         """A still-broken config after setup reports the problem, it does not loop."""
@@ -915,6 +917,132 @@ class TestVerbosityResolvesLikeEverySetting:
         """``output.json`` is a setting as well, and it is orthogonal to volume."""
         mode = self._configure(tmp_path, ["sync"], "output:\n  json: true\n")
         assert mode.name == "JSON"
+
+
+class TestJsonKeepsStdoutToOneDocument:
+    """``--json`` promises stdout holds one JSON value and nothing else.
+
+    It is a promise about the *stream*, not about the summary: the report was
+    always valid JSON, and the run still printed a deprecation warning, a
+    permissions repair and a failover notice around it with a bare ``print``.
+    Anything piping the output got a parse error on line one, which is the
+    single failure ``--json`` exists to prevent.
+    """
+
+    @pytest.fixture
+    def _sandbox(self, tmp_path, monkeypatch):
+        """Point every path this run would touch at a temp directory."""
+        from living_ink import pipeline as pipeline_module
+
+        monkeypatch.setattr(pipeline_module, "DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(pipeline_module, "ensure_runtime_dirs", lambda: None)
+        monkeypatch.setattr(pipeline_module, "validate_environment", lambda: None)
+        monkeypatch.setattr(pipeline_module, "cleanup_temp_artifacts", lambda **kw: None)
+        monkeypatch.setattr(pipeline_module, "register_temp_cleanup", lambda **kw: None)
+        # The config is read once per process, so a test that ran earlier has
+        # already spent the warnings this one is about.
+        pipeline_module.reset_caches()
+        yield
+        pipeline_module.reset_caches()
+
+    def _run(self, tmp_path, monkeypatch, argv, config_text):
+        """Run the real CLI over an empty tablet and return what it printed."""
+        from types import SimpleNamespace
+
+        from living_ink import logs
+        from living_ink.pipeline import SyncPipeline
+
+        config = tmp_path / "config.yml"
+        config.write_text(config_text, encoding="utf-8")
+        monkeypatch.setenv("LIVING_INK_CONFIG", str(config))
+        monkeypatch.setattr(logs, "LOG_PATH", tmp_path / "pipeline.log")
+        monkeypatch.setattr(
+            SyncPipeline, "connect", lambda self: SimpleNamespace(get_meta_items=lambda: [])
+        )
+        monkeypatch.setattr(SyncPipeline, "preflight_destinations", lambda self: None)
+        monkeypatch.setattr(SyncPipeline, "_learn_device", lambda self, client: None)
+        try:
+            LivingInkCLI().run(argv)
+        finally:
+            logs.reset_handlers()
+            logs._console_mode = logs.ConsoleMode.PLAIN
+
+    def test_a_deprecated_config_key_does_not_break_the_document(
+        self, tmp_path, monkeypatch, capsys, _sandbox
+    ):
+        """The exact leak: five ``⚠️ config.yml — …`` lines ahead of the JSON."""
+        self._run(
+            tmp_path,
+            monkeypatch,
+            ["sync", "--json", "--verbose"],
+            "use_ssh: true\nopenai:\n  model: gpt-4o\n",
+        )
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)
+        # Not merely absent from stdout — the user still has to be told.
+        assert "config.yml" in captured.err
+
+    def test_verbose_page_lines_go_to_stderr(self, tmp_path, monkeypatch, capsys, _sandbox):
+        """§15.4: verbosity picks the volume, ``--json`` picks the stream."""
+        self._run(tmp_path, monkeypatch, ["sync", "--json", "--verbose"], "sync: {}\n")
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)
+        assert "Pipeline started" in captured.err
+
+    def test_quiet_and_json_still_print_the_document(self, tmp_path, monkeypatch, capsys, _sandbox):
+        """``--quiet`` silences the human stream, never the report itself."""
+        self._run(tmp_path, monkeypatch, ["sync", "--json", "--quiet"], "sync: {}\n")
+        assert json.loads(capsys.readouterr().out)
+
+
+class TestNoticeIsNotProgress:
+    """A problem is not chatter, so no verbosity may swallow it."""
+
+    @pytest.fixture(autouse=True)
+    def _restore(self):
+        from living_ink import logs
+
+        yield
+        logs._console_mode = logs.ConsoleMode.PLAIN
+
+    @pytest.mark.parametrize("mode", ["PLAIN", "QUIET", "VERBOSE", "JSON"])
+    def test_every_mode_says_it_on_stderr(self, mode, capsys):
+        from living_ink import logs
+
+        logs._console_mode = logs.ConsoleMode[mode]
+        logs.notice("deprecated key")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "deprecated key" in captured.err
+
+    def test_a_secret_is_redacted_on_the_way_out(self, capsys):
+        from living_ink import logs
+        from living_ink.redact import register_secret
+
+        register_secret("AIzaSyTOPSECRETVALUE")
+        logs.notice("key AIzaSyTOPSECRETVALUE is deprecated")
+        assert "TOPSECRET" not in capsys.readouterr().err
+
+
+class TestReconfiguringKeepsTheMode:
+    """``ensure_configured`` carries every mode forward, JSON included."""
+
+    @pytest.mark.parametrize("mode", ["QUIET", "VERBOSE", "JSON"])
+    def test_a_moved_log_file_does_not_reset_the_console(self, mode, tmp_path):
+        from living_ink import logs
+
+        try:
+            logs.configure(
+                tmp_path / "first.log",
+                quiet=mode == "QUIET",
+                verbose=mode == "VERBOSE",
+                json_output=mode == "JSON",
+            )
+            logs.ensure_configured(tmp_path / "second.log")
+            assert logs.console_mode() is logs.ConsoleMode[mode]
+        finally:
+            logs.reset_handlers()
+            logs._console_mode = logs.ConsoleMode.PLAIN
 
 
 class TestDestinationLabels:

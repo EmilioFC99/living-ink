@@ -43,6 +43,7 @@ from living_ink.destinations.markup import (
     image_block,
     to_blocks,
 )
+from living_ink.logs import notice
 from living_ink.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ class ObsidianDestination(FileSystemDestination):
             is the one thing this destination cannot guess.
         """
         if not settings.obsidian_vault_path:
-            print("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
+            notice("⚠️ Obsidian enabled but 'vault_path' is missing. Skipping.")
             return None
         return cls(
             vault_path=settings.obsidian_vault_path,

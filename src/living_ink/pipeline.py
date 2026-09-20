@@ -54,7 +54,7 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.devices import default_reading
-from living_ink.logs import log
+from living_ink.logs import log, notice
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
     DEFERRED,
@@ -181,7 +181,7 @@ def check_config(config: Dict[str, Any], cfg_path: Path) -> None:
 
     for problem in warnings:
         message = f"config.yml — {problem.describe()}"
-        print(f"⚠️  {message}")
+        notice(f"⚠️  {message}")
         _logger.warning(message)
 
     if not errors:
@@ -255,17 +255,17 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         # umask, leaving the API key and device token readable by every account
         # on the machine. Repair on the way past rather than only warning.
         if restrict_permissions(cfg_path):
-            print(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
+            notice(f"⚠️  Tightened permissions on {cfg_path} — it was readable by other users.")
         try:
             try:
                 yaml_config = read_config_file(cfg_path)
             except (yaml.YAMLError, TypeError) as ye:
-                print("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
-                print("Please check your indentation. YAML is very sensitive to spaces.")
+                notice("\n❌ CONFIGURATION ERROR: Could not parse config.yml")
+                notice("Please check your indentation. YAML is very sensitive to spaces.")
                 if hasattr(ye, "problem_mark"):
                     mark = ye.problem_mark
-                    print(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
-                print(f"Details: {ye}\n")
+                    notice(f"Error position: line {mark.line + 1}, column {mark.column + 1}")
+                notice(f"Details: {ye}\n")
                 yaml_config = {}
 
             # Register credentials for masking as soon as they are read, not
@@ -295,7 +295,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             # whatever shape the user's YAML happens to have, and a config that
             # cannot be understood has to degrade to one printed line and an
             # empty dict rather than abort the run before it reports anything.
-            print(f"Critical error loading config.yml: {e}")
+            notice(f"Critical error loading config.yml: {e}")
             logging.debug("Loading %s failed", cfg_path, exc_info=True)
 
         # Outside the try above on purpose: that block exists to keep a

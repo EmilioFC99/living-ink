@@ -947,13 +947,13 @@ class TestConfigPermissionRepair:
         cfg = self._write_config(tmp_path, 0o644)
         pipeline.load_yaml_config(cfg)
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
-        assert "Tightened permissions" in capsys.readouterr().out
+        assert "Tightened permissions" in capsys.readouterr().err
 
     def test_an_already_private_config_is_left_alone(self, tmp_path, capsys):
         cfg = self._write_config(tmp_path, 0o600)
         pipeline.load_yaml_config(cfg)
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
-        assert "Tightened permissions" not in capsys.readouterr().out
+        assert "Tightened permissions" not in capsys.readouterr().err
 
     def test_the_config_is_still_read(self, tmp_path):
         cfg = self._write_config(tmp_path, 0o666)

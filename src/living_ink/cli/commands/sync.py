@@ -246,13 +246,22 @@ class SyncCommand(BaseCommand):
         Returns:
             0 if setup ran and the retried sync succeeded, 1 otherwise.
         """
-        print("\n" + "=" * 60)
-        print("CONFIGURATION ERROR")
-        print("=" * 60)
-        print(str(error))
-        print("-" * 60)
-        print(error.hint)
-        print("=" * 60 + "\n")
+        # stderr, like every other problem this command reports: ``--json``
+        # promises stdout holds one document and nothing else, and a run that
+        # never got as far as building the report still has to say why.
+        banner = "=" * 60
+        for line in (
+            "",
+            banner,
+            "CONFIGURATION ERROR",
+            banner,
+            str(error),
+            "-" * 60,
+            error.hint,
+            banner,
+            "",
+        ):
+            print(line, file=sys.stderr)
 
         if not self.offer_setup_on_missing_config or not sys.stdin.isatty():
             return 1

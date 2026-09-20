@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
+from living_ink.logs import console
 from living_ink.models import Document
 from living_ink.settings import Settings
 from living_ink.transport import (
@@ -78,7 +79,7 @@ class FallbackClient:
                 f"{self.primary_name} {method_name} failed ({e}). "
                 f"Falling back to {self.backup_name}..."
             )
-            print(
+            console(
                 f"ℹ️ {self.primary_name} {method_name} failed. Falling back to {self.backup_name}..."
             )
             self.active = self.backup
@@ -112,7 +113,7 @@ class FallbackClient:
             logger.warning(
                 f"{self.primary_name} download failed ({e}). Falling back to {self.backup_name}..."
             )
-            print(f"ℹ️ {self.primary_name} download failed. Falling back to {self.backup_name}...")
+            console(f"ℹ️ {self.primary_name} download failed. Falling back to {self.backup_name}...")
             self.active = self.backup
             backup_doc = self.active.get_doc(getattr(doc, "id", ""))
             return self.active.download(backup_doc or doc)
@@ -295,7 +296,7 @@ def get_rmapi(settings: Optional[Settings] = None):
             logger.info(
                 "USB SSH connection unavailable (tablet not connected). Using reMarkable Cloud..."
             )
-            print("ℹ️ USB SSH not connected. Falling back to reMarkable Cloud...")
+            console("ℹ️ USB SSH not connected. Falling back to reMarkable Cloud...")
             return FallbackClient(
                 primary_client=cloud_client,
                 backup_client=ssh_client,
@@ -323,7 +324,7 @@ def get_rmapi(settings: Optional[Settings] = None):
         # Cloud not configured, try SSH
         if ssh_client and ssh_client.check_connection():
             logger.info("reMarkable Cloud token not configured. Using USB SSH...")
-            print("ℹ️ reMarkable Cloud not configured. Falling back to USB SSH...")
+            console("ℹ️ reMarkable Cloud not configured. Falling back to USB SSH...")
             return ssh_client
 
         raise TransportUnavailable(

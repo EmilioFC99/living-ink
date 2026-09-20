@@ -5,6 +5,7 @@ import logging
 
 from living_ink.cli.base import BaseCommand
 from living_ink.cli.commands.sync import SyncCommand
+from living_ink.logs import console
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class SetupCommand(BaseCommand):
 
         result = run_wizard(repo_dir=self.root)
         if result.run_sync_requested:
-            print("\nStarting sync pipeline...\n")
+            console("\nStarting sync pipeline...\n")
             sync = SyncCommand(root=self.root)
             # Config was just written; if it is still unusable, reporting the
             # problem beats looping back into the wizard that produced it.

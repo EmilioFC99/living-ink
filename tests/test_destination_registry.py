@@ -85,7 +85,7 @@ class TestTheShippedDestination:
     def test_without_a_vault_it_is_skipped_not_fatal(self, capsys):
         built = build({"obsidian": {"enabled": True}})
         assert built == []
-        assert "vault_path" in capsys.readouterr().out
+        assert "vault_path" in capsys.readouterr().err
 
     def test_an_unusable_vault_is_built_anyway_and_fails_its_check(self):
         """Building it is what lets preflight say which vault is wrong."""

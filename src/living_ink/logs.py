@@ -156,6 +156,11 @@ def ensure_configured(log_path: Path) -> None:
         log_path,
         verbose=_console_mode is ConsoleMode.VERBOSE,
         quiet=_console_mode is ConsoleMode.QUIET,
+        # Carried like the other two, and forgetting it was a stdout leak
+        # rather than a cosmetic slip: a re-configure dropped JSON mode back
+        # to PLAIN, and the next progress line landed in the middle of the
+        # document ``--json`` exists to print.
+        json_output=_console_mode is ConsoleMode.JSON,
     )
 
 
@@ -221,6 +226,24 @@ def console(message: str) -> None:
         print(message)
     elif _console_mode is ConsoleMode.JSON:
         print(message, file=sys.stderr)
+
+
+def notice(message: str) -> None:
+    """Say something the user must see, whatever the verbosity, on stderr.
+
+    Progress and problems are different streams of speech, and :func:`console`
+    only knows how to carry the first. A deprecated key in ``config.yml`` is
+    not chatter that ``--quiet`` asked to be spared, and it is not part of the
+    document ``--json`` promises stdout will hold; it has to be said, and it
+    has to be said somewhere else. That is what stderr is for, and it is the
+    one answer that satisfies both flags at once.
+
+    Args:
+        message: The line to show. Redacted here, like every other line that
+            reaches a user, because the thing being complained about is
+            sometimes the key itself.
+    """
+    print(redact(str(message)), file=sys.stderr)
 
 
 def log(message: Any) -> None:

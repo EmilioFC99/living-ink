@@ -776,8 +776,10 @@ def render_rm_file_to_png(
             # Deliberately broad. rmc walks a binary format written by whatever
             # firmware drew the page and raises whatever its parser hits; one
             # unreadable page must not end the notebook.
-            print(f"Error converting .rm to .svg: {e}")
-            logger.debug("rm_to_svg failed for %s", rm_file_path, exc_info=True)
+            # Warned, not printed: the page comes back as an error page, so
+            # the run report is where the user hears about it. A bare print
+            # here also landed in the middle of a ``--json`` document.
+            logger.warning("rm_to_svg failed for %s: %s", rm_file_path, e, exc_info=True)
             return None
 
         # Check if the file was actually created and has content
@@ -856,7 +858,7 @@ def render_rm_file_to_png(
                 return f.read()
 
         except _DOC_ERRORS as e:
-            print(f"PyMuPDF rendering failed: {e}")
+            logger.warning("PyMuPDF rendering failed for %s: %s", tmp_svg_path, e)
             # Fall back to inkscape as last resort
             try:
                 result = subprocess.run(
