@@ -200,19 +200,29 @@ def test_sync_pipeline_run_targeted_not_found():
             assert result is False
 
 
-def test_sync_pipeline_run_targeted_user_cancelled():
-    """SyncPipeline.run returns True when user cancels interactive disambiguation."""
-    doc_item = make_item("doc-123", "Meeting Notes", content_hash="h1")
+def test_sync_pipeline_run_targeted_ambiguous_syncs_every_match():
+    """``--notebook`` matching several documents processes all of them.
+
+    It used to stop and offer a menu, which product §7 forbids a bare ``sync``
+    from doing — and which only ever appeared at a tty, so ``watch``, cron and
+    a piped run already behaved this way.
+    """
+    matches = [
+        make_item("doc-123", "Meeting Notes", content_hash="h1"),
+        make_item("doc-456", "Meeting Notes", content_hash="h2"),
+    ]
     pipeline = SyncPipeline(notebook="Meeting Notes", destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
-            mock_client.get_meta_items.return_value = [doc_item]
+            mock_client.get_meta_items.return_value = matches
             mock_connect.return_value = mock_client
-            with patch("living_ink.pipeline.select_notebook_interactive", return_value=[]):
-                result = pipeline.run()
-                assert result is True
+            with patch.object(pipeline, "process_notebook_item", return_value=True) as processed:
+                assert pipeline.run() is True
+
+    synced = {call.kwargs["candidate"].item.id for call in processed.call_args_list}
+    assert synced == {"doc-123", "doc-456"}
 
 
 def test_sync_pipeline_process_notebook_item():

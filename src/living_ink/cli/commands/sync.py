@@ -118,7 +118,10 @@ class SyncCommand(BaseCommand):
         parser.add_argument(
             "--notebook",
             default=None,
-            help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
+            help=(
+                "Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or "
+                "document ID. Several matches all sync; use --preview to see which"
+            ),
         )
         # One mutually exclusive group, so asking for both is a usage error the
         # parser reports before the tablet is contacted. They filter the same

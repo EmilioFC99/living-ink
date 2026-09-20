@@ -7,7 +7,6 @@ import hashlib
 import logging
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
@@ -602,100 +601,6 @@ def to_iso_date(value: Any) -> Optional[str]:
     return None if moment is None else moment.date().isoformat()
 
 
-def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any] = None) -> str:
-    """Format a notebook item description for display in selection prompts."""
-    name = document_name(item) or "Untitled"
-    folder = get_notebook_path(item, id_map)
-    title = f"{folder} / {name}" if folder else name
-    doc_id = document_id(item)
-    short_id = doc_id[:8] if len(doc_id) > 8 else doc_id
-
-    doc_type = get_document_type(item, client)
-    type_badge = f" [{doc_type.upper()}]" if doc_type in ("pdf", "epub") else ""
-
-    modified = to_datetime(document_modified(item))
-    mod_str = "" if modified is None else f" (modified: {modified.strftime('%Y-%m-%d %H:%M')})"
-
-    id_label = f" [ID: {short_id}]" if short_id else ""
-    return f"{title}{type_badge}{id_label}{mod_str}"
-
-
-def select_notebook_interactive(
-    matches: List[Any],
-    query: str,
-    id_map: Dict[str, Any],
-    input_func=input,
-    print_func=print,
-    is_interactive: Optional[bool] = None,
-) -> List[Any]:
-    """Prompt the user to choose from multiple matching notebooks.
-
-    Args:
-        matches: List of matching notebook items.
-        query: The user-supplied --notebook query.
-        id_map: Map of ID -> Document for path resolution.
-        input_func: Function for reading user input.
-        print_func: Function for printing messages.
-        is_interactive: Whether terminal is interactive (defaults to sys.stdin.isatty()).
-
-    Returns:
-        List of selected notebook items to process. Empty list if cancelled.
-    """
-    if len(matches) <= 1:
-        return matches
-
-    if is_interactive is None:
-        is_interactive = sys.stdin.isatty()
-
-    if not is_interactive:
-        print_func(
-            f"ℹ️ Multiple notebooks ({len(matches)}) match '{query}' in non-interactive mode. Processing all."
-        )
-        return matches
-
-    print_func("")
-    print_func(f"Found {len(matches)} notebooks matching '{query}':")
-    for idx, it in enumerate(matches, 1):
-        desc = format_notebook_item(it, id_map)
-        print_func(f"  [{idx}] {desc}")
-    print_func(f"  [a] Process all {len(matches)} matching notebooks")
-    print_func("  [q] Cancel / Quit")
-    print_func("")
-
-    while True:
-        try:
-            raw = (
-                input_func(f"Select a notebook [1-{len(matches)}, a, q] (default: a): ")
-                .strip()
-                .lower()
-            )
-        except EOFError:
-            # Stdin closed under a prompt we already decided was interactive:
-            # nothing left to ask, so select nothing rather than everything.
-            print_func("\nCancelled by user.")
-            return []
-        except KeyboardInterrupt:
-            # Ctrl+C is not "process no notebooks", it is "end this run", and
-            # only the entry point may decide what that exits with (130).
-            print_func("\nCancelled by user.")
-            raise
-
-        if raw in ("", "a", "all"):
-            return matches
-        if raw in ("q", "quit", "exit"):
-            print_func("Cancelled by user.")
-            return []
-        if raw.isdigit():
-            num = int(raw)
-            if 1 <= num <= len(matches):
-                selected = [matches[num - 1]]
-                sel_title = format_notebook_item(selected[0], id_map)
-                print_func(f"Selected: {sel_title}")
-                return selected
-
-        print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
-
-
 class _StopProcessing(Exception):
     """Raised by a stage when there is nothing left to do for a document.
 
@@ -1173,7 +1078,11 @@ class SyncPipeline:
         if not chosen.to_process:
             log(f"Notebook '{self.target_notebook}' not found in library. Exiting.")
             return None
-        return self._disambiguate(chosen, id_map)
+        if len(chosen.to_process) > 1:
+            log(
+                f"'{self.target_notebook}' matches {len(chosen.to_process)} documents; syncing all."
+            )
+        return chosen
 
     def _report_type_skips(self, chosen: Selection) -> None:
         """Say how many documents were passed over for their type alone.
@@ -1195,35 +1104,6 @@ class SyncPipeline:
                 f"Skipped {count} {source.upper()} document(s) "
                 f"(enable with --sync-{source}s or in config.yml)."
             )
-
-    def _disambiguate(self, chosen: Selection, id_map: Dict[str, Any]) -> Selection:
-        """Let the user pick when ``--notebook`` matched more than one document.
-
-        Args:
-            chosen: The selection, already narrowed to the matches.
-            id_map: Every listed item by id, for rendering the choices.
-
-        Returns:
-            The same selection when there is nothing to disambiguate, otherwise
-            one narrowed to what the user chose — empty if they cancelled.
-        """
-        if not self.target_notebook:
-            return chosen
-
-        keep = select_notebook_interactive(
-            matches=[candidate.item for candidate in chosen.to_process],
-            query=self.target_notebook,
-            id_map=id_map,
-        )
-        if not keep:
-            log("Sync cancelled by user. Exiting.")
-            return replace(chosen, to_process=())
-
-        chosen_items = {id(item) for item in keep}
-        return replace(
-            chosen,
-            to_process=tuple(c for c in chosen.to_process if id(c.item) in chosen_items),
-        )
 
     def _record_inventory(self, listing: Sequence[Any], id_map: Dict[str, Any]) -> None:
         """Note every document the tablet listed in the state database.
