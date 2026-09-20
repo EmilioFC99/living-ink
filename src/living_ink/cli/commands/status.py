@@ -147,8 +147,8 @@ class StatusCommand(BaseCommand):
 
         # No document tally here on purpose. This command reports the setup;
         # what is and is not synced is a live question about the tablet, and
-        # `living-ink sync --status` is the one that goes and asks it.
-        print(f"Documents:     {dim('→ Run: living-ink sync --status')}")
+        # `living-ink sync --preview` is the one that goes and asks it.
+        print(f"Documents:     {dim('→ Run: living-ink sync --preview')}")
 
         # Caches — how much of the next sync is already paid for.
         if report.cache_entries:

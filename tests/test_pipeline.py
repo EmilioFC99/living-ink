@@ -708,9 +708,15 @@ class TestDryRun:
         assert len(dest.published) == 1
         recorded.assert_called_once()
 
-    def test_dry_run_keeps_the_artifacts_it_points_at(self):
-        assert SyncPipeline(dry_run=True).keep_temp is True
-        assert SyncPipeline().keep_temp is False
+    def test_a_dry_run_does_not_secretly_keep_the_artifacts(self):
+        """It used to, and one flag turning on another is a third concept.
+
+        The transcripts a rehearsal leaves behind are a debugging artifact, so
+        a user who wants them asks for them; the implication meant a rehearsal
+        littered the temp directory that a real sync would have purged.
+        """
+        assert SyncPipeline(dry_run=True).keep_temp is False
+        assert SyncPipeline(dry_run=True, keep_temp=True).keep_temp is True
 
 
 class TestOrderedDurability:

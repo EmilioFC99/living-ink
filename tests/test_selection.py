@@ -710,7 +710,7 @@ class TestAPartialPublishIsNotADonePublish:
         assert [reason for _, reason in chosen.skipped] == [UNCHANGED]
 
     def test_the_predicate_owns_the_rule_with_gaps(self, store, settings):
-        """``sync --status`` and the run both reach this through one predicate.
+        """``sync --preview`` and the run both reach this through one predicate.
 
         Asserting it here as well as through :func:`select` is what stops the
         preview and the run disagreeing about whether a gapped note is done.

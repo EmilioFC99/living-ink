@@ -51,7 +51,10 @@ def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
         "notebook": getattr(args, "notebook", None),
         "all_types": getattr(args, "all_types", False),
         "keep_temp": getattr(args, "keep_temp", False),
-        "dry_run": getattr(args, "dry_run", False),
+        # The pipeline's own name for "do the work, publish nothing", which is
+        # what ``--preview --transcribe`` asks for. ``--preview`` on its own
+        # never builds a pipeline at all.
+        "dry_run": getattr(args, "preview", False) and getattr(args, "transcribe", False),
         "flags": flag_values(args, SyncCommand.name),
     }
 
@@ -98,19 +101,19 @@ class SyncCommand(BaseCommand):
             help="Preserve temporary rendered images, OCR transcripts, and downloaded documents after sync",
         )
         parser.add_argument(
-            "--dry-run",
+            "--preview",
             action="store_true",
-            help="Transcribe as usual but publish nothing; prints where each transcript was written",
+            help="Show what this exact command would do and exit; no download, no OCR, no API call",
         )
         parser.add_argument(
-            "--status",
+            "--transcribe",
             action="store_true",
-            help="Show what a sync would do — compare the tablet against your notes — and exit",
+            help="With --preview, also transcribe — the expensive rehearsal: real OCR, nothing published",
         )
         parser.add_argument(
             "--all",
             action="store_true",
-            help="With --status, list every document instead of the first ten",
+            help="With --preview, list every document instead of the first ten",
         )
 
     def run(self, args: argparse.Namespace) -> int:
@@ -122,9 +125,15 @@ class SyncCommand(BaseCommand):
         Returns:
             0 on success, or exits with 1 on failure.
         """
-        if getattr(args, "status", False):
+        if getattr(args, "transcribe", False) and not getattr(args, "preview", False):
+            # A rehearsal nobody asked to watch is just a sync that throws the
+            # work away, so refusing beats guessing which half was meant.
+            print("--transcribe only means something with --preview.", file=sys.stderr)
+            return 2
+
+        if getattr(args, "preview", False) and not getattr(args, "transcribe", False):
             try:
-                return self.show_status(args)
+                return self.show_preview(args)
             except ConfigurationMissing as e:
                 # Not routed through _handle_missing_config: that offers the
                 # wizard and then retries the *sync*, which is not what someone
@@ -166,7 +175,7 @@ class SyncCommand(BaseCommand):
         print(f"Cannot reach the reMarkable: {error}", file=sys.stderr)
         return 1
 
-    def show_status(self, args: argparse.Namespace) -> int:
+    def show_preview(self, args: argparse.Namespace) -> int:
         """Report what a sync would do, without doing any of it.
 
         Lists the tablet over whichever transport the settings resolve to and
@@ -174,8 +183,9 @@ class SyncCommand(BaseCommand):
         render, no OCR, no API call.
 
         Args:
-            args: Parsed arguments for sync; ``--ssh`` / ``--cloud``, ``--all``
-                and ``--json`` are honoured.
+            args: Parsed arguments for sync. Every flag ``sync`` takes is
+                honoured, because a flag that changed the selection but not
+                the preview would make the preview a lie.
 
         Returns:
             0 when the comparison succeeded, 1 when the tablet was unreachable.

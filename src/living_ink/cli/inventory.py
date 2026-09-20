@@ -8,7 +8,6 @@ import argparse
 import dataclasses
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -234,7 +233,9 @@ def inventory_as_json(inventory: list[dict[str, Any]]) -> dict[str, Any]:
     return {"documents": documents, "counts": counts}
 
 
-#: How many rows a page of the comparison shows.
+#: How many rows the comparison lists before saying how many it held back.
+#: The count above the list is never truncated — only the listing is cut, so a
+#: user who sees "34 documents" and ten rows has still been told the truth.
 PAGE_SIZE = 10
 
 #: Width of the truncated document name column.
@@ -275,8 +276,8 @@ def render_comparison(
         rows: Comparison rows, in listing order.
         orphans: Documents published but no longer on the tablet.
         device: What the transport is talking to, or None.
-        show_all: Whether to page through everything rather than show the
-            first :data:`PAGE_SIZE` rows.
+        show_all: Whether to print every row rather than the first
+            :data:`PAGE_SIZE`.
     """
     from living_ink.setup_wizard import bold, dim, green
     from living_ink.state import SYNC_STATUSES
@@ -312,15 +313,13 @@ def render_comparison(
         if not show_all:
             return
 
-    if show_all:
-        _print_paged(ordered)
-    else:
-        for row in ordered[:PAGE_SIZE]:
-            _print_comparison_row(row)
-        remaining = len(ordered) - PAGE_SIZE
-        if remaining > 0:
-            print()
-            print(dim(f"{PAGE_SIZE} of {len(ordered)} shown · {remaining} more — use --all"))
+    shown = ordered if show_all else ordered[:PAGE_SIZE]
+    for row in shown:
+        _print_comparison_row(row)
+    remaining = len(ordered) - len(shown)
+    if remaining > 0:
+        print()
+        print(dim(f"{len(shown)} of {len(ordered)} shown · {remaining} more — use --all"))
     print()
 
 
@@ -332,35 +331,6 @@ def _print_comparison_row(row: dict[str, Any]) -> None:
     """
     status = row["status"]
     print(f"  {format_comparison_row(row)}{tone_colour(status.tone)(status.label)}")
-
-
-def _print_paged(rows: list[dict[str, Any]]) -> None:
-    """Print every row, pausing each page when someone is watching.
-
-    Args:
-        rows: Comparison rows, already ordered.
-    """
-    from living_ink.setup_wizard import dim
-
-    interactive = sys.stdout.isatty() and sys.stdin.isatty()
-
-    for start in range(0, len(rows), PAGE_SIZE):
-        for row in rows[start : start + PAGE_SIZE]:
-            _print_comparison_row(row)
-
-        shown = min(start + PAGE_SIZE, len(rows))
-        if not interactive or shown >= len(rows):
-            continue
-
-        print()
-        try:
-            answer = input(dim(f"  {shown} of {len(rows)} — Enter for more, q to stop: "))
-        except (EOFError, KeyboardInterrupt):
-            # Piped into `head`, or the user gave up. Neither is an error.
-            print()
-            return
-        if answer.strip().lower().startswith("q"):
-            return
 
 
 def tone_colour(tone: str):

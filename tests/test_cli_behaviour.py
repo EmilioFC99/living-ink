@@ -79,9 +79,9 @@ from living_ink.config.schema import CHOICE, FLAG, LIST, NUMBER, WHOLE, Setting
 #: A path with a dot lands inside ``flags``, the mapping every schema-declared
 #: setting travels in, and a path without one is a named keyword. Which side a
 #: flag falls on is itself part of the contract: ``--prune`` names a setting a
-#: config file can also set, ``--dry-run`` shapes one run and has no persisted
-#: form, and a flag moving between the two changes whether the config file can
-#: override it.
+#: config file can also set, ``--keep-temp`` shapes one run and has no
+#: persisted form, and a flag moving between the two changes whether the config
+#: file can override it.
 SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
     "--ssh": ("flags.preferred_connection", "ssh"),
     "--cloud": ("flags.preferred_connection", "cloud"),
@@ -89,7 +89,6 @@ SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
     "--epub": ("flags.sync_epubs", True),
     "--all-types": ("all_types", True),
     "--keep-temp": ("keep_temp", True),
-    "--dry-run": ("dry_run", True),
     "--prune": ("flags.prune", True),
     "--json": ("flags.output_json", True),
 }
@@ -116,13 +115,23 @@ BARE_SYNC: dict[str, Any] = {
 
 #: Boolean flags that ``sync`` accepts but that never reach the pipeline.
 #:
-#: ``--status`` selects a different code path entirely and ``--all`` only
+#: ``--preview`` selects a different code path entirely and ``--all`` only
 #: qualifies it, so both are tested by
-#: :class:`TestStatusIsADifferentCommandInDisguise` instead. ``--verbose`` and
+#: :class:`TestPreviewIsADifferentCommandInDisguise` instead. ``--transcribe``
+#: is not in the table above either, because it is the one flag with no effect
+#: of its own — it needs ``--preview`` to mean anything, which is exactly what
+#: :class:`TestPreviewAndItsExpensiveVariant` is for. ``--verbose`` and
 #: ``--quiet`` are not sync flags at all — they are generated onto every parser
 #: from ``output.verbosity`` — and they are covered by
 #: :class:`TestVerbosityIsAcceptedOnBothSides`.
-SYNC_FLAGS_OUTSIDE_THE_OPTIONS = ("--status", "--all", "--verbose", "-q", "--quiet")
+SYNC_FLAGS_OUTSIDE_THE_OPTIONS = (
+    "--preview",
+    "--transcribe",
+    "--all",
+    "--verbose",
+    "-q",
+    "--quiet",
+)
 
 #: One representative command-line value per setting kind, and what parsing it
 #: must yield. Written out rather than taken from the generator's own ``_READERS``
@@ -282,8 +291,8 @@ SYNC_SURFACE: set[str] = {
     "--notebook",
     "--all-types",
     "--keep-temp",
-    "--dry-run",
-    "--status",
+    "--preview",
+    "--transcribe",
     "--all",
     # Generated from the settings schema, in schema order.
     "--ssh",
@@ -417,36 +426,41 @@ class Combination:
 #: Read the ``legal=False`` rows as the contract they are: argparse rejects
 #: these with exit code 2, and any change to that is a change users can see.
 #: Read the ``legal=True`` rows the same way in reverse — ``--notebook`` with
-#: ``--dry-run`` is a combination people rely on, and making it an error later
+#: ``--preview`` is a combination people rely on, and making it an error later
 #: would break scripts.
 #:
 FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     # sync — the transport pair is the only exclusion.
     Combination(("sync", "--notebook", "Work/Notes"), True, "scoping a sync to one notebook"),
-    Combination(("sync", "--notebook", "Foo", "--dry-run"), True, "preview one notebook"),
+    Combination(("sync", "--notebook", "Foo", "--preview"), True, "preview one notebook"),
     Combination(("sync", "--notebook", "Foo", "--limit", "3"), True, "both narrow the run"),
     Combination(("sync", "--ssh", "--cloud"), False, "a transport is a choice, not an order"),
     Combination(("sync", "--cloud", "--ssh"), False, "and the typing order does not rescue it"),
     Combination(("sync", "--ssh"), True, "one transport is the point of the flag"),
     Combination(("sync", "--cloud"), True, "and so is the other"),
-    Combination(("sync", "--ssh", "--dry-run"), True, "the exclusion is to --cloud alone"),
-    Combination(("sync", "--dry-run", "--prune"), True, "a preview of what pruning would remove"),
+    Combination(("sync", "--ssh", "--preview"), True, "the exclusion is to --cloud alone"),
+    Combination(("sync", "--preview", "--prune"), True, "a preview of what pruning would remove"),
     Combination(("sync", "--all-types", "--pdf"), True, "--all-types simply subsumes it"),
-    Combination(("sync", "--status", "--all"), True, "--all qualifies --status"),
-    Combination(("sync", "--status", "--json"), True, "the comparison has a JSON form"),
-    Combination(("sync", "--all"), True, "accepted, but inert without --status"),
-    Combination(("sync", "--dry-run", "--json"), True, "a machine-readable preview"),
+    Combination(("sync", "--preview", "--all"), True, "--all qualifies --preview"),
+    Combination(("sync", "--preview", "--json"), True, "the comparison has a JSON form"),
+    Combination(("sync", "--all"), True, "accepted, but inert without --preview"),
+    Combination(("sync", "--preview", "--transcribe"), True, "the expensive rehearsal"),
+    # Parsed, then refused at dispatch with exit code 2 rather than by
+    # argparse: "B requires A" is not something a parser can express, and
+    # guessing which half was meant is worse than saying so.
+    Combination(("sync", "--transcribe"), True, "the parser takes it; run() refuses it"),
+    Combination(("sync", "--preview", "--json"), True, "a machine-readable preview"),
     Combination(("sync", "--limit", "0"), True, "0 is a real limit, and the parser takes it"),
     Combination(("sync", "--limit", "-1"), True, "negative is accepted; the pipeline ignores it"),
     # sync — malformed input.
     Combination(("sync", "--limit", "many"), False, "--limit is typed int"),
     Combination(("sync", "--notebook"), False, "--notebook needs a value"),
     Combination(("sync", "--nonsense"), False, "unknown flags are a usage error"),
-    Combination(("sync", "--dry"), True, "argparse accepts unambiguous abbreviations"),
-    Combination(("sync", "--s"), False, "--ssh, --ssh-host, --skip-empty, --status all match"),
+    Combination(("sync", "--prev"), True, "argparse accepts unambiguous abbreviations"),
+    Combination(("sync", "--s"), False, "--ssh, --ssh-host and --skip-empty all match"),
     # watch — every sync flag, plus its own.
     Combination(("watch", "--interval", "600"), True, "the documented usage"),
-    Combination(("watch", "--notebook", "Foo", "--dry-run"), True, "watch takes every sync option"),
+    Combination(("watch", "--notebook", "Foo", "--preview"), True, "watch takes every sync option"),
     Combination(("watch", "--ssh", "--cloud"), False, "including sync's exclusions"),
     Combination(("watch", "--interval", "fast"), False, "--interval is typed int"),
     # state — the three actions genuinely exclude one another.
@@ -466,7 +480,7 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     Combination(("cache", "--clear", "--prune", "7"), False, "two actions at once"),
     # status and setup take almost nothing, and that is the point.
     Combination(("status", "--json"), True, "the only flag status has"),
-    Combination(("status", "--dry-run"), False, "a sync flag on a read-only command"),
+    Combination(("status", "--preview"), False, "a sync flag on a read-only command"),
     Combination(("setup",), True, "the wizard takes no behaviour flags"),
     Combination(("setup", "--json"), False, "the wizard has no machine-readable mode"),
     # Verbosity is accepted on both sides of the subcommand, everywhere.
@@ -487,17 +501,17 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
 #: This is the "nothing else" half of the matrix, and it is the half that
 #: cannot be written as a normal assertion: the interesting fact is which of
 #: these did *not* happen. ``status`` must not sync. ``cache`` must not open
-#: the state database. ``sync --status`` must not download anything. Each of
+#: the state database. ``sync --preview`` must not download anything. Each of
 #: those is one missing label here, and the test fails on any label that fires
 #: and is not listed.
 #:
 #: Labels are the recorded names in :class:`_Recorder`.
 COMMAND_REACH: dict[tuple[str, ...], set[str]] = {
     ("sync",): {"pipeline.construct", "pipeline.run"},
-    ("sync", "--dry-run"): {"pipeline.construct", "pipeline.run"},
+    ("sync", "--preview", "--transcribe"): {"pipeline.construct", "pipeline.run"},
     ("sync", "--notebook", "Foo"): {"pipeline.construct", "pipeline.run"},
-    ("sync", "--status"): {"compare_with_device"},
-    ("sync", "--status", "--json"): {"compare_with_device"},
+    ("sync", "--preview"): {"compare_with_device"},
+    ("sync", "--preview", "--json"): {"compare_with_device"},
     ("watch", "--interval", "60"): {"pipeline.construct", "pipeline.run"},
     ("status",): {"collect_status"},
     ("status", "--json"): {"collect_status"},
@@ -817,7 +831,12 @@ class TestSyncFlagsMapExactly:
             pytest.param(
                 ["sync", "--limit", "0"], with_flags(max_notebooks_per_run=0), id="limit-zero"
             ),
-            pytest.param(["sync", "--dry-run"], {**BARE_SYNC, "dry_run": True}, id="dry-run"),
+            pytest.param(
+                ["sync", "--preview", "--transcribe"],
+                {**BARE_SYNC, "dry_run": True},
+                id="the-expensive-rehearsal",
+            ),
+            pytest.param(["sync", "--preview"], BARE_SYNC, id="a-bare-preview-builds-nothing"),
             pytest.param(["sync", "--prune"], with_flags(prune=True), id="prune"),
             pytest.param(["sync", "--ssh"], with_flags(preferred_connection="ssh"), id="ssh"),
             pytest.param(["sync", "--cloud"], with_flags(preferred_connection="cloud"), id="cloud"),
@@ -827,9 +846,9 @@ class TestSyncFlagsMapExactly:
             pytest.param(["sync", "--pdf"], with_flags(sync_pdfs=True), id="pdf"),
             pytest.param(["sync", "--epub"], with_flags(sync_epubs=True), id="epub"),
             pytest.param(
-                ["sync", "--notebook", "Foo", "--dry-run", "--keep-temp"],
+                ["sync", "--notebook", "Foo", "--preview", "--transcribe", "--keep-temp"],
                 {**BARE_SYNC, "notebook": "Foo", "dry_run": True, "keep_temp": True},
-                id="scoped-preview",
+                id="scoped-rehearsal",
             ),
             pytest.param(
                 ["sync", "--all-types", "--limit", "2", "--json"],
@@ -876,7 +895,7 @@ class TestSyncFlagsMapExactly:
         degrades to "not given" rather than crashing the run.
         """
         assert sync_arguments(argparse.Namespace()) == BARE_SYNC
-        assert sync_arguments(argparse.Namespace(dry_run=True))["dry_run"] is True
+        assert sync_arguments(argparse.Namespace(preview=True, transcribe=True))["dry_run"] is True
 
     def test_a_transport_flag_arrives_as_the_setting_it_sets(self):
         """``--ssh`` travels as ``preferred_connection``, and only as that.
@@ -960,8 +979,8 @@ class TestFlagOrderIsIrrelevant:
         "first,second",
         [
             (
-                ["sync", "--dry-run", "--notebook", "Foo"],
-                ["sync", "--notebook", "Foo", "--dry-run"],
+                ["sync", "--preview", "--transcribe", "--notebook", "Foo"],
+                ["sync", "--notebook", "Foo", "--transcribe", "--preview"],
             ),
             (["sync", "--ssh", "--json"], ["sync", "--json", "--ssh"]),
             (
@@ -1072,7 +1091,7 @@ class TestForcingBothTransports:
             pytest.param(["sync", "--ssh", "--cloud"], id="ssh-first"),
             pytest.param(["sync", "--cloud", "--ssh"], id="cloud-first"),
             pytest.param(["watch", "--ssh", "--cloud"], id="watch"),
-            pytest.param(["sync", "--ssh", "--dry-run", "--cloud"], id="separated"),
+            pytest.param(["sync", "--ssh", "--keep-temp", "--cloud"], id="separated"),
         ],
     )
     def test_the_parser_refuses_both(self, argv):
@@ -1174,14 +1193,14 @@ class TestAnUnreachableTabletIsReportedNotRaised:
         assert "pipeline.run" in run.calls
 
 
-class TestStatusIsADifferentCommandInDisguise:
-    """``sync --status`` answers a question instead of doing the work."""
+class TestPreviewIsADifferentCommandInDisguise:
+    """``sync --preview`` answers a question instead of doing the work."""
 
-    def test_the_status_flag_is_not_part_of_the_instruction(self):
+    def test_the_preview_flag_is_not_part_of_the_instruction(self):
         """It never reaches the pipeline, because no sync is run."""
-        assert not hasattr(intent(["sync", "--status"]), "status")
+        assert not hasattr(intent(["sync", "--preview"]), "preview")
 
-    def test_all_without_status_is_accepted_and_inert(self, cli):
+    def test_all_without_preview_is_accepted_and_inert(self, cli):
         """``sync --all`` parses, and runs an ordinary sync.
 
         ``--all`` is only read by the comparison renderer, so on its own it
@@ -1191,6 +1210,62 @@ class TestStatusIsADifferentCommandInDisguise:
         run = cli("sync", "--all")
         assert run.options == [BARE_SYNC]
         assert "compare_with_device" not in run.calls
+
+
+class TestPreviewAndItsExpensiveVariant:
+    """Two flags, three instructions, and only one of them costs money.
+
+    ``--preview`` used to be two flags: ``--status`` asked the cheap question
+    and ``--dry-run`` did the whole run and threw the publish away. Naming them
+    as unrelated things hid that they answer the same question at two prices,
+    so they are one flag and a modifier now. What that costs is a rule argparse
+    cannot express — ``--transcribe`` means nothing alone — which is why the
+    refusal is tested here rather than assumed from the parser.
+    """
+
+    def test_a_bare_preview_never_builds_a_pipeline(self, cli):
+        """The cheap question: metadata only, no download, no OCR, no API call.
+
+        Asserted as the *whole* call list, because the failure this guards
+        against is a preview that quietly grew a pipeline and started paying
+        for the answer it promised was free.
+        """
+        run = cli("sync", "--preview")
+        assert run.exit_code == 0
+        assert run.calls == ["compare_with_device"]
+
+    def test_the_expensive_variant_runs_the_pipeline_with_publishing_off(self, cli):
+        """``--preview --transcribe`` is the old ``--dry-run``, spelled out."""
+        run = cli("sync", "--preview", "--transcribe")
+        assert run.exit_code == 0
+        assert run.calls == ["pipeline.construct", "pipeline.run"]
+        assert run.options[0]["dry_run"] is True
+
+    def test_transcribe_alone_is_refused_before_anything_connects(self, cli):
+        """A rehearsal nobody asked to watch is a sync that wastes its work.
+
+        Exit 2 rather than 1: it is a usage error, the same class of mistake as
+        a misspelled flag, and the parser cannot state "B requires A" itself.
+        """
+        run = cli("sync", "--transcribe")
+        assert run.exit_code == 2
+        assert run.calls == []
+        assert "--transcribe only means something with --preview." in run.stderr
+
+    def test_a_rehearsal_no_longer_implies_keeping_the_temp_files(self, cli):
+        """One flag turning on another is a third concept nobody asked for.
+
+        ``--dry-run`` used to set ``keep_temp`` behind the user's back, so a
+        rehearsal left artifacts a real sync would have purged. Wanting them is
+        a separate request with a flag of its own.
+        """
+        run = cli("sync", "--preview", "--transcribe")
+        assert run.options[0]["keep_temp"] is False
+
+    def test_the_temp_files_are_kept_when_they_are_asked_for(self, cli):
+        """The other half of the pair: explicit still works."""
+        run = cli("sync", "--preview", "--transcribe", "--keep-temp")
+        assert run.options[0]["keep_temp"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1211,7 +1286,7 @@ class TestTheShortcutMatchesTheRealThing:
         "argv",
         [
             ["sync"],
-            ["sync", "--dry-run"],
+            ["sync", "--preview", "--transcribe"],
             ["sync", "--notebook", "Work/Notes", "--limit", "2"],
             ["sync", "--all-types", "--keep-temp", "--json"],
             ["sync", "--ssh", "--prune"],
@@ -1282,7 +1357,7 @@ class TestAbbreviationsAreAccepted:
     it is pinned here because it is a compatibility surface with teeth. Every
     accepted abbreviation is a spelling some script now depends on, and adding
     a flag that shares a prefix silently turns that script's argument into an
-    "ambiguous option" error. ``--dry`` breaks the day ``--dry-clean`` ships.
+    "ambiguous option" error. ``--prev`` breaks the day ``--preview-only`` ships.
 
     Turning ``allow_abbrev`` off is a defensible fix; doing it by accident is
     not, which is what this test prevents.
@@ -1291,7 +1366,7 @@ class TestAbbreviationsAreAccepted:
     @pytest.mark.parametrize(
         "abbreviated,full",
         [
-            (["sync", "--dry"], ["sync", "--dry-run"]),
+            (["sync", "--prev"], ["sync", "--preview"]),
             (["sync", "--keep"], ["sync", "--keep-temp"]),
             (["sync", "--pru"], ["sync", "--prune"]),
             (["sync", "--note", "Foo"], ["sync", "--notebook", "Foo"]),
@@ -1352,7 +1427,7 @@ class TestCommandsDoOnlyTheirOwnWork:
     """Each command sets in motion exactly the subsystems it needs.
 
     The interesting half of every row is what is *missing* from it. ``status``
-    has no pipeline, ``cache`` has no state store, ``sync --status`` has no
+    has no pipeline, ``cache`` has no state store, ``sync --preview`` has no
     pipeline either. A command that grows an extra step fails here even if the
     step works perfectly, which is the point.
     """
@@ -1366,13 +1441,14 @@ class TestCommandsDoOnlyTheirOwnWork:
         run = cli(*argv)
         assert set(run.calls) == allowed, f"{argv} reached {sorted(set(run.calls))}"
 
-    def test_a_dry_run_still_builds_the_pipeline_and_nothing_more(self, cli):
-        """``--dry-run`` is a pipeline mode, not a separate code path.
+    def test_the_rehearsal_still_builds_the_pipeline_and_nothing_more(self, cli):
+        """``--preview --transcribe`` is a pipeline mode, not a second path.
 
-        If it were handled by short-circuiting in the CLI, the transcripts a
-        dry run exists to produce would never be written.
+        A bare ``--preview`` short-circuits in the CLI and never connects; the
+        expensive variant is the opposite, and if it were short-circuited too
+        the transcripts it exists to produce would never be written.
         """
-        run = cli("sync", "--dry-run")
+        run = cli("sync", "--preview", "--transcribe")
         assert run.calls == ["pipeline.construct", "pipeline.run"]
         assert run.options[0]["dry_run"] is True
 

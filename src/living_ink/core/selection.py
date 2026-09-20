@@ -3,7 +3,7 @@
 Everything that narrows a sync used to be spread across three places that were
 free to disagree — a discovery filter in the pipeline, a comparison in
 :mod:`living_ink.state`, and a second listing pass in the CLI that answered
-``sync --status``. A preview that predicts something other than what the run
+``sync --preview``. A preview that predicts something other than what the run
 does is worse than no preview at all, in a feature whose entire purpose is
 "tell me what will happen". So :func:`select` is the only function that
 decides, and the preview and the run call it with the same arguments.

@@ -907,7 +907,8 @@ class SyncPipeline:
             all_types: Include every registered source type, whatever the
                 config and the two flags above say.
             keep_temp: Preserve rendered PNGs and transcripts for debugging.
-            dry_run: Do everything except publish.
+            dry_run: Do everything except publish — what the front end
+                spells ``--preview --transcribe``.
             prune: Delete notes whose document is gone from the tablet.
             json_output: Print the run report as JSON instead of a table.
             flags: Further settings overrides for this run, keyed by
@@ -931,9 +932,11 @@ class SyncPipeline:
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = dry_run
-        # A dry run's whole output is the transcripts it leaves behind, so it
-        # implies --keep-temp; purging them would delete what it points at.
-        self.keep_temp = keep_temp or dry_run
+        # Not implied by dry_run any more. One flag quietly turning on another
+        # is a third concept where the product needs one, and the transcripts
+        # a rehearsal leaves behind are a debugging artifact: anyone who wants
+        # them asks for them, which is what CLAUDE.md already tells them to do.
+        self.keep_temp = keep_temp
 
         if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)

@@ -178,7 +178,7 @@ class StateCommand(BaseCommand):
         matches = store.find_documents(query)
 
         if not matches:
-            print(f"No document matches {query!r}. Try 'living-ink sync --status --all'.")
+            print(f"No document matches {query!r}. Try 'living-ink sync --preview --all'.")
             return 1
         if len(matches) > 1:
             print(f"{query!r} matches {len(matches)} documents. Use an id:")

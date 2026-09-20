@@ -16,7 +16,7 @@ and the order is a dependency order rather than an obvious one:
 
 **Stages 1 and 2 must be safe to run against a read-only vault.** That is the
 invariant the split exists to protect: everything before stage 3 only reads, so
-``--dry-run`` cuts cleanly between 2 and 3 and can still report the exact path
+``--preview --transcribe`` cuts cleanly between 2 and 3 and can still report the exact path
 it would have written. Before the split, the first thing publish did was
 ``mkdir``, so a dry run left empty folders across the vault. **Both ``mkdir``
 calls belong in ``prepare``** — putting one in ``resolve_location`` puts it back

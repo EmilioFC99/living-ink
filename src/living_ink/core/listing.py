@@ -37,7 +37,7 @@ def document_version(item: Any) -> str:
 
     The content hash when the transport offers one, the version counter
     otherwise. Lives here rather than inline in the selection pass because
-    ``sync --status`` predicts that decision, and a preview that disagrees with
+    ``sync --preview`` predicts that decision, and a preview that disagrees with
     the run it predicts is worse than no preview.
 
     Args:

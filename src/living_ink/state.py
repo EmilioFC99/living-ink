@@ -766,7 +766,7 @@ class StateStore:
         A deleted destination leaves its rows behind, and every later run reads
         them as real: the selection pass reports the document as still
         published somewhere, ``_prune_orphan`` declines to prune because the
-        destination "is not configured", and ``sync --status`` prints a dead
+        destination "is not configured", and ``sync --preview`` prints a dead
         key in each row's published map. None of that is recoverable by the
         user, because there is no longer any code that could unpublish.
 

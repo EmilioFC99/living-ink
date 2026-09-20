@@ -73,7 +73,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 **A command owns its loop, not its exit code.** `SyncCommand.execute_sync()` returns whether one sync worked; `run()` turns that into an exit code and `WatchCommand` re-runs it on a timer instead. `watch` registers every sync option by delegating to `SyncCommand.register_args`, rides out failed cycles, and stops only on a configuration error or Ctrl+C — the compose daemon service runs it directly rather than wrapping `sync` in a shell loop.
 
-**Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry. `_ocr_pages` transcribes `settings.ocr_concurrency` pages at a time and reassembles them in page order; `--dry-run` short-circuits `_publish` so nothing is sent and nothing is recorded as synced.
+**Processing is a fixed sequence of stages.** `SyncPipeline.run()` does `connect()` → `discover_documents()` → `filter_pending_documents()` → `process_notebook_item()` per document. `process_notebook_item()` runs `_describe_job` → `_acquire_pages` → `_collect_tags` → `_preprocess_images` → `_ocr_pages` → `_write_transcripts` → `_publish`, passing a mutable `DocumentJob` between them; a stage with nothing left to do raises `_StopProcessing(success, reason)`. Rendering dispatches through `SyncPipeline._RENDERERS`, so a new document type is one renderer method plus one table entry. `_ocr_pages` transcribes `settings.ocr_concurrency` pages at a time and reassembles them in page order; `--preview --transcribe` short-circuits `_publish` so nothing is sent and nothing is recorded as synced.
 
 ## Things that will bite you
 
@@ -84,7 +84,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 - **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink cache` shows/prunes/clears it. It is also what makes a run resumable: a page is banked as soon as it comes back, so an interrupt costs the page in flight and nothing else. An interrupted run is recorded as `outcome="interrupted"` with the counts it actually reached, and exits 130 instead of printing a traceback.
 - **The `pages` table is what detects a broken renderer.** Each page's `.rm` source hash and rendered PNG hash are stored together; a page whose source is unchanged but whose render is not means the renderer moved (the documented symptom of an `rmc`/`rmscene` upgrade), and a notebook whose pages nearly all render to identical bytes rendered blank. Both surface as `RunReport` warnings at the end of the run, not as log lines that scroll away.
 - **Rendered pages are cached under `DATA_DIR/renders/`**, keyed by the page's `.rm` source plus `extract.renderer_fingerprint()` (the `RENDER_FORMAT_VERSION` constant, the installed `rmc` and `rmscene`) and the background colour. An unchanged page skips the `.rm` → SVG → PNG step entirely. Bump `RENDER_FORMAT_VERSION` whenever `extract.py`'s own rendering behaviour changes.
-- **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; `--dry-run` implies it.
+- **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; nothing else turns it on for you.
 - **`extract.py` monkey-patches `rmc`** to control SVG background and bounds. Upgrading `rmc`/`rmscene` is the likely cause of blank or clipped renders.
 
 ## Configuration
@@ -120,12 +120,12 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 uv sync --all-extras                                  # install deps (incl. dev)
 uv run living-ink --help                              # CLI: sync | watch | setup | status
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
-uv run living-ink sync --dry-run                      # transcribe, publish nothing
+uv run living-ink sync --preview --transcribe         # transcribe, publish nothing
 uv run living-ink sync --json                         # run summary as JSON
 uv run living-ink watch --interval 600                # sync every 10 minutes
 uv run living-ink status                              # health check + effective settings
 uv run living-ink status --json                       # machine-readable health check
-uv run living-ink sync --status                      # what is new, changed, or up to date
+uv run living-ink sync --preview                     # what is new, changed, or up to date
 uv run living-ink state                               # what is remembered between runs
 uv run living-ink sync --prune                        # also delete notes whose notebook is gone
 uv run living-ink cache                               # transcription and render cache sizes

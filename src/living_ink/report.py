@@ -26,7 +26,7 @@ PUBLISHED = "published"
 SKIPPED = "skipped"
 #: A document that was attempted and did not make it.
 FAILED = "failed"
-#: A document a real run would have published: transcribed under ``--dry-run``.
+#: A document a real run would have published: transcribed under ``--preview --transcribe``.
 WOULD_PUBLISH = "would_publish"
 #: A document that needs work but fell outside ``--limit``. Distinct from
 #: :data:`SKIPPED` because it is not up to date: reporting it as unchanged is
@@ -155,7 +155,7 @@ class RunReport:
 
     @property
     def would_publish(self) -> int:
-        """Documents a real run would have published, under ``--dry-run``."""
+        """Documents a real run would have published, under ``--preview --transcribe``."""
         return len(self._of(WOULD_PUBLISH))
 
     @property

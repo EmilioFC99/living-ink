@@ -903,7 +903,7 @@ class TestForgettingADestinationThatIsGone:
 
     Apple Notes was deleted in 1.0 and its rows were not. Every later run read
     them as real: the document looked published somewhere, ``--prune`` declined
-    because the destination "is not configured", and ``sync --status`` printed
+    because the destination "is not configured", and ``sync --preview`` printed
     a key no code could act on. Nothing the user could type would clear it.
     """
 

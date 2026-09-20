@@ -480,8 +480,12 @@ def test_cli_default_routing_to_setup(tmp_path):
         mock_setup_run.assert_called_once()
 
 
-def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
-    """--dry-run is an option on the run, not a setting on disk."""
+def test_cmd_sync_the_rehearsal_reaches_the_pipeline(tmp_path):
+    """Publishing nothing is an option on the run, not a setting on disk.
+
+    ``--keep-temp`` is asserted off on purpose: the rehearsal used to turn it
+    on behind the user's back, which left artifacts a real sync would purge.
+    """
     args = argparse.Namespace(
         notebook=None,
         limit=0,
@@ -492,12 +496,13 @@ def test_cmd_sync_dry_run_flag_reaches_the_pipeline(tmp_path):
         sync_epubs=False,
         all_types=False,
         keep_temp=False,
-        dry_run=True,
+        preview=True,
+        transcribe=True,
     )
     pipeline_obj = _run_sync_capturing_pipeline(args, tmp_path)
 
     assert pipeline_obj.dry_run is True
-    assert pipeline_obj.keep_temp is True
+    assert pipeline_obj.keep_temp is False
 
 
 def test_cmd_sync_prune_flag_reaches_the_pipeline(tmp_path):
@@ -1084,14 +1089,19 @@ class TestStatusDefersTheDocumentQuestion:
 
     def test_the_console_points_at_the_live_comparison(self, capsys):
         StatusCommand._render_console(self._report())
-        assert "living-ink sync --status" in capsys.readouterr().out
+        assert "living-ink sync --preview" in capsys.readouterr().out
 
     def test_list_is_gone(self):
         assert "list" not in LivingInkCLI().commands
 
-    def test_the_status_flags_parse(self):
-        args = LivingInkCLI().build_parser().parse_args(["sync", "--status", "--all", "--json"])
-        assert (args.command, args.status, args.all, args.output_json) == ("sync", True, True, True)
+    def test_the_preview_flags_parse(self):
+        args = LivingInkCLI().build_parser().parse_args(["sync", "--preview", "--all", "--json"])
+        assert (args.command, args.preview, args.all, args.output_json) == (
+            "sync",
+            True,
+            True,
+            True,
+        )
 
 
 class TestStateCommand:
@@ -1403,8 +1413,8 @@ class TestDeviceLineInStatus:
         assert "assumed" in out
 
 
-class TestSyncStatusFlag:
-    """`sync --status` previews a sync instead of running one."""
+class TestSyncPreviewFlag:
+    """`sync --preview` previews a sync instead of running one."""
 
     def _rows(self, count, status=None):
         """Build `count` comparison rows, all in the same state."""
@@ -1427,7 +1437,7 @@ class TestSyncStatusFlag:
         """Run the command against a stubbed comparison and return its output."""
         from living_ink.cli import SyncCommand
 
-        defaults = {"status": True, "all": False, "output_json": False}
+        defaults = {"preview": True, "all": False, "output_json": False}
         args = argparse.Namespace(**{**defaults, **flags})
         with patch(
             "living_ink.cli.inventory.compare_with_device", return_value=(rows, orphans or [], None)
@@ -1469,8 +1479,13 @@ class TestSyncStatusFlag:
         assert "10 of 12 shown · 2 more — use --all" in out
 
     def test_all_shows_every_row(self, capsys):
-        with patch("sys.stdout.isatty", return_value=False):
-            _, out = self._show(capsys, self._rows(12), all=True)
+        """And it prints them straight through — there is no pager to stop at.
+
+        ``--all`` used to pause every ten rows on a terminal and wait for a
+        keypress, which made a read-only question something a script could
+        hang on.
+        """
+        _, out = self._show(capsys, self._rows(12), all=True)
         assert "Note 11" in out
         assert "use --all" not in out
 
@@ -1496,10 +1511,10 @@ class TestSyncStatusFlag:
         assert payload["documents"][0]["status"] == "new"
         assert payload["orphans"] == ["doc-old"]
 
-    def test_the_status_flag_never_runs_a_sync(self, capsys):
+    def test_the_preview_flag_never_runs_a_sync(self, capsys):
         from living_ink.cli import SyncCommand
 
-        args = argparse.Namespace(status=True, all=False, json=False)
+        args = argparse.Namespace(preview=True, all=False, json=False)
         with patch("living_ink.cli.inventory.compare_with_device", return_value=([], [], None)):
             with patch.object(SyncCommand, "execute_sync") as mock_sync:
                 SyncCommand().run(args)
@@ -1509,7 +1524,7 @@ class TestSyncStatusFlag:
         from living_ink.cli import SyncCommand
         from living_ink.config import ConfigurationMissing
 
-        args = argparse.Namespace(status=True, all=False, json=False)
+        args = argparse.Namespace(preview=True, all=False, json=False)
         with patch(
             "living_ink.cli.inventory.compare_with_device",
             side_effect=ConfigurationMissing("no config"),
@@ -1520,53 +1535,3 @@ class TestSyncStatusFlag:
         mock_wizard.assert_not_called()
         assert code == 1
         assert "living-ink setup" in capsys.readouterr().err
-
-
-class TestComparisonPaging:
-    """`--all` on a terminal stops every ten rows instead of scrolling away."""
-
-    def _rows(self, count):
-        """`count` rows, enough to span more than one page."""
-
-        return [
-            {
-                "id": f"doc-{n:04d}",
-                "name": f"Note {n}",
-                "doc_type": "notebook",
-                "status": STATUS_NEW,
-                "last_error": None,
-            }
-            for n in range(count)
-        ]
-
-    def _page(self, capsys, rows, answers, interactive=True):
-        """Page through `rows`, feeding `answers` to each prompt."""
-        from living_ink.cli.inventory import _print_paged
-
-        with patch("sys.stdout.isatty", return_value=interactive):
-            with patch("sys.stdin.isatty", return_value=interactive):
-                with patch("builtins.input", side_effect=answers) as mock_input:
-                    _print_paged(rows)
-        return capsys.readouterr().out, mock_input
-
-    def test_a_pipe_prints_everything_without_pausing(self, capsys):
-        out, mock_input = self._page(capsys, self._rows(25), [], interactive=False)
-        assert "Note 24" in out
-        mock_input.assert_not_called()
-
-    def test_a_terminal_pauses_between_pages(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), ["", ""])
-        assert "Note 24" in out
-
-    def test_q_stops_early(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), ["q"])
-        assert "Note 9" in out
-        assert "Note 10" not in out
-
-    def test_the_last_page_does_not_ask_for_more(self, capsys):
-        _, mock_input = self._page(capsys, self._rows(20), [""])
-        assert mock_input.call_count == 1
-
-    def test_giving_up_at_the_prompt_is_not_an_error(self, capsys):
-        out, _ = self._page(capsys, self._rows(25), KeyboardInterrupt())
-        assert "Note 9" in out
