@@ -8,16 +8,18 @@ services:
     volumes:
       # Persistent configuration (stores config.yml)
       - ${LIVING_INK_CONFIG_DIR:-~/.config/living-ink}:/app/config:ro
-      # Persistent cache & sync state (stores processed_notebooks_*.json)
+      # Persistent cache & sync state (renders, transcripts, state.db)
       - ${LIVING_INK_DATA_DIR:-~/.local/share/living-ink}:/app/data
       # Obsidian vault destination on host
       - ${OBSIDIAN_VAULT_PATH:-./vault}:/vault
     environment:
       - PYTHONUNBUFFERED=1
-      # Optional environment variable overrides
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - REMARKABLE_DEVICE_TOKEN=${REMARKABLE_DEVICE_TOKEN:-}
+      # Spelled the way the schema declares them. GEMINI_API_KEY,
+      # OPENAI_API_KEY and REMARKABLE_DEVICE_TOKEN used to sit here and named
+      # no setting at all, so a container handed a key ran with none.
+      - LIVING_INK_AI_PROVIDER=${AI_PROVIDER:-}
+      - LIVING_INK_AI_API_KEY=${AI_API_KEY:-}
+      - REMARKABLE_TOKEN=${REMARKABLE_TOKEN:-}
     command: ["sync"]
 
   # 24/7 background sync service (run with: docker compose --profile daemon up -d)
@@ -43,9 +45,9 @@ services:
       - LIVING_INK_WATCH_ENABLED=${WATCH_ENABLED:-true}
       - "LIVING_INK_WATCH_SCHEDULE=${WATCH_SCHEDULE:-*/30 * * * *}"
       - LIVING_INK_WATCH_TIMEZONE=${WATCH_TIMEZONE:-UTC}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - REMARKABLE_DEVICE_TOKEN=${REMARKABLE_DEVICE_TOKEN:-}
+      - LIVING_INK_AI_PROVIDER=${AI_PROVIDER:-}
+      - LIVING_INK_AI_API_KEY=${AI_API_KEY:-}
+      - REMARKABLE_TOKEN=${REMARKABLE_TOKEN:-}
     # `watch` owns the loop, so a failed cycle is logged and retried rather
     # than ending the container, and Ctrl+C / SIGINT stops it cleanly. It takes
     # no behaviour flags: a restarted container comes back without them.

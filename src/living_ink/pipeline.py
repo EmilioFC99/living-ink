@@ -7,7 +7,6 @@ import hashlib
 import logging
 import os
 import sqlite3
-import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
@@ -21,7 +20,6 @@ from living_ink.clean import vision_ocr_available
 from living_ink.config import (
     ConfigurationMissing,
     apply_status,
-    find_repo_root,
     get_config_path,
     get_data_dir,
     get_logs_dir,
@@ -31,10 +29,13 @@ from living_ink.config import (
 )
 from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.core.listing import (
+    document_id,
+    document_modified,
+    document_name,
     document_version,
     get_document_type,
     get_notebook_path,
-    get_val,
+    is_document,
 )
 from living_ink.core.selection import (
     NOT_TARGETED,
@@ -75,8 +76,6 @@ if TYPE_CHECKING:  # pragma: no cover - names for annotations only
     # pipeline's neighbours without a cycle.
     from living_ink.sources import PageRef, RenderContext, SourceBundle, SourceType
 
-
-ROOT = find_repo_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
@@ -198,12 +197,14 @@ def _migrate_config_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
 
 
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load configuration from YAML and export the credentials third parties read.
+    """Load configuration from YAML and configure the AI provider from it.
 
-    Only settings that another library picks up from the environment on its own
-    are exported (``OPENAI_API_KEY``). Living Ink's own settings are not: they
-    are resolved from this dictionary by :class:`living_ink.settings.Settings`
-    and passed explicitly.
+    Nothing is exported to the environment. This used to copy a legacy
+    ``openai.api_key`` into ``OPENAI_API_KEY`` for a third-party SDK to find,
+    but no SDK here reads it — every provider is handed its key explicitly —
+    so all the export achieved was putting a plaintext credential into the
+    environment that the SSH transport's subprocesses and the wizard's
+    ``$EDITOR`` inherit.
 
     Args:
         config_path: Path to YAML config file. Defaults to get_config_path().
@@ -242,14 +243,10 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             if isinstance(rm_section, dict):
                 register_secret(str(rm_section.get("device_token", "")).strip())
 
-            # 1. OpenAI
-            if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
-                os.environ.setdefault(
-                    "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
-                )
-
-            # 2. AI Provider — configured from the settings this config
-            #    resolves to, which is where the stored key is read from.
+            # The AI provider, configured from the settings this config
+            # resolves to, which is where the stored key is read from. A legacy
+            # ``openai.api_key`` reaches it as a ``legacy_keys`` layer of
+            # ``ai_api_key``, not through the environment.
             _migrate_config_ai_key(yaml_config, cfg_path)
             configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
 
@@ -267,14 +264,6 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         # and swallowing the validation result would defeat the point of
         # validating.
         check_config(yaml_config, cfg_path)
-
-    # Legacy Fallback
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass
 
     # Last, so that everything above sees the file as the user wrote it and
     # everything downstream sees only spellings this build still knows: dead
@@ -360,30 +349,19 @@ def get_state_store() -> "state.StateStore":
     """Return the shared state store, opening it on first use.
 
     Cached rather than built at import time, so importing this module still
-    touches no disk. The one-time import of the old per-destination JSON files
-    happens here, on the first open after an upgrade.
+    touches no disk.
 
-    So does the sweep of publication rows belonging to a destination this build
-    no longer ships. This is the layer that can do it: ``state`` must not know
-    what a destination is, and the registry only exists once ``destinations``
-    has been imported. It runs after the legacy import, so a row that arrives
-    from an old JSON file naming a deleted destination is swept in the same
-    pass rather than surviving until the next run.
+    The sweep of publication rows belonging to a destination this build no
+    longer ships happens here, on the first open. This is the layer that can do
+    it: ``state`` must not know what a destination is, and the registry only
+    exists once ``destinations`` has been imported.
 
     Returns:
         The process-wide open StateStore.
     """
     global _state_store
     if _state_store is None:
-        # Legacy state lived beside the checkout before it moved under the
-        # data directory; sweep both so an upgrade from either layout keeps
-        # its history instead of re-OCRing every notebook.
-        db_path = get_state_db_path()
-        store = state.StateStore(db_path)
-        for source in (DATA_DIR, ROOT):
-            imported = state.import_legacy_json(store, source)
-            if imported:
-                log(f"📦 Imported {imported} sync records from {source} into {db_path.name}.")
+        store = state.StateStore(get_state_db_path())
         for name, count in store.forget_unknown_destinations(registered_state_keys()).items():
             log(f"🧹 Forgot {count} publication record(s) for {name}, which no longer exists.")
         _state_store = store
@@ -419,8 +397,8 @@ def reset_caches(*, keep_state_store: bool = False) -> None:
         keep_state_store: Leave the open database alone. The scheduler passes
             True: a config change can move a destination or a model, but never
             the database, and reopening it per tick would pay the
-            ``_ADDED_COLUMNS`` probe and the legacy-import sweep every night
-            for nothing. Everything else that resets caches — a test, a wizard
+            ``_ADDED_COLUMNS`` probe and the dead-destination sweep every
+            night for nothing. Everything else that resets caches — a test, a wizard
             that moved the data directory — does want the handle dropped, so
             the default is the thorough one.
     """
@@ -430,18 +408,6 @@ def reset_caches(*, keep_state_store: bool = False) -> None:
     _default_destinations = None
     if not keep_state_store:
         reset_state_store()
-
-
-def load_processed_log(dest_name: str):
-    """Return the published version of every document for one destination.
-
-    Args:
-        dest_name: Destination class name, e.g. ``ObsidianDestination``.
-
-    Returns:
-        Mapping of document id to the version last published there.
-    """
-    return get_state_store().published_versions(dest_name)
 
 
 def add_to_processed_log(
@@ -635,105 +601,6 @@ def to_iso_date(value: Any) -> Optional[str]:
     return None if moment is None else moment.date().isoformat()
 
 
-def format_notebook_item(item: Any, id_map: Dict[str, Any], client: Optional[Any] = None) -> str:
-    """Format a notebook item description for display in selection prompts."""
-    name = str(
-        get_val(item, "VissibleName")
-        or get_val(item, "VisibleName")
-        or getattr(item, "name", "")
-        or "Untitled"
-    )
-    folder = get_notebook_path(item, id_map)
-    title = f"{folder} / {name}" if folder else name
-    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "")
-    short_id = doc_id[:8] if len(doc_id) > 8 else doc_id
-
-    doc_type = get_document_type(item, client)
-    type_badge = f" [{doc_type.upper()}]" if doc_type in ("pdf", "epub") else ""
-
-    modified = to_datetime(get_val(item, "ModifiedClient") or getattr(item, "last_modified", None))
-    mod_str = "" if modified is None else f" (modified: {modified.strftime('%Y-%m-%d %H:%M')})"
-
-    id_label = f" [ID: {short_id}]" if short_id else ""
-    return f"{title}{type_badge}{id_label}{mod_str}"
-
-
-def select_notebook_interactive(
-    matches: List[Any],
-    query: str,
-    id_map: Dict[str, Any],
-    input_func=input,
-    print_func=print,
-    is_interactive: Optional[bool] = None,
-) -> List[Any]:
-    """Prompt the user to choose from multiple matching notebooks.
-
-    Args:
-        matches: List of matching notebook items.
-        query: The user-supplied --notebook query.
-        id_map: Map of ID -> Document for path resolution.
-        input_func: Function for reading user input.
-        print_func: Function for printing messages.
-        is_interactive: Whether terminal is interactive (defaults to sys.stdin.isatty()).
-
-    Returns:
-        List of selected notebook items to process. Empty list if cancelled.
-    """
-    if len(matches) <= 1:
-        return matches
-
-    if is_interactive is None:
-        is_interactive = sys.stdin.isatty()
-
-    if not is_interactive:
-        print_func(
-            f"ℹ️ Multiple notebooks ({len(matches)}) match '{query}' in non-interactive mode. Processing all."
-        )
-        return matches
-
-    print_func("")
-    print_func(f"Found {len(matches)} notebooks matching '{query}':")
-    for idx, it in enumerate(matches, 1):
-        desc = format_notebook_item(it, id_map)
-        print_func(f"  [{idx}] {desc}")
-    print_func(f"  [a] Process all {len(matches)} matching notebooks")
-    print_func("  [q] Cancel / Quit")
-    print_func("")
-
-    while True:
-        try:
-            raw = (
-                input_func(f"Select a notebook [1-{len(matches)}, a, q] (default: a): ")
-                .strip()
-                .lower()
-            )
-        except EOFError:
-            # Stdin closed under a prompt we already decided was interactive:
-            # nothing left to ask, so select nothing rather than everything.
-            print_func("\nCancelled by user.")
-            return []
-        except KeyboardInterrupt:
-            # Ctrl+C is not "process no notebooks", it is "end this run", and
-            # only the entry point may decide what that exits with (130).
-            print_func("\nCancelled by user.")
-            raise
-
-        if raw in ("", "a", "all"):
-            return matches
-        if raw in ("q", "quit", "exit"):
-            print_func("Cancelled by user.")
-            return []
-        if raw.isdigit():
-            num = int(raw)
-            if 1 <= num <= len(matches):
-                selected = [matches[num - 1]]
-                sel_title = format_notebook_item(selected[0], id_map)
-                print_func(f"Selected: {sel_title}")
-                return selected
-
-        print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
-
-
 class _StopProcessing(Exception):
     """Raised by a stage when there is nothing left to do for a document.
 
@@ -761,11 +628,11 @@ def _item_version(item: Any) -> Any:
     Returns:
         The item's hash, else its integer version, else 1.
     """
-    item_hash = get_val(item, "hash")
+    item_hash = getattr(item, "hash", None)
     if item_hash:
         return item_hash
     try:
-        return int(get_val(item, "Version"))
+        return int(getattr(item, "version", None))
     except (ValueError, TypeError):
         return 1
 
@@ -833,9 +700,7 @@ class DocumentJob:
             never substituted, because "the tablet did not say" and "the tablet
             said today" are different facts.
         """
-        return to_datetime(
-            get_val(self.item, "ModifiedClient") or getattr(self.item, "last_modified", None)
-        )
+        return to_datetime(document_modified(self.item))
 
     def page_number(self, index: int) -> int:
         """Return the document page number for the given transcript index.
@@ -898,7 +763,6 @@ class SyncPipeline:
         scheduled_fire_time: Optional[str] = None,
         flags: Optional[Dict[str, Any]] = None,
         config_path: Optional[Path] = None,
-        data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
     ):
         """Initialize the SyncPipeline by resolving this run's choices once.
@@ -955,7 +819,6 @@ class SyncPipeline:
                 library caller's explicit argument is never quietly overruled
                 by a mapping it did not build.
             config_path: Path to YAML config file. Defaults to standard config path.
-            data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
         ensure_runtime_dirs()
@@ -965,7 +828,6 @@ class SyncPipeline:
         self.device = default_reading()
 
         self.config_path = config_path or get_config_path()
-        self.data_dir = data_dir or DATA_DIR
         self.dry_run = dry_run
         # Not implied by dry_run any more. One flag quietly turning on another
         # is a third concept where the product needs one, and the transcripts
@@ -1196,7 +1058,7 @@ class SyncPipeline:
             ``--notebook`` named something the library does not contain, which
             is a failed run rather than an empty one.
         """
-        id_map = {get_val(item, "ID"): item for item in listing}
+        id_map = {document_id(item): item for item in listing}
         self._record_inventory(listing, id_map)
 
         chosen = select(
@@ -1216,7 +1078,11 @@ class SyncPipeline:
         if not chosen.to_process:
             log(f"Notebook '{self.target_notebook}' not found in library. Exiting.")
             return None
-        return self._disambiguate(chosen, id_map)
+        if len(chosen.to_process) > 1:
+            log(
+                f"'{self.target_notebook}' matches {len(chosen.to_process)} documents; syncing all."
+            )
+        return chosen
 
     def _report_type_skips(self, chosen: Selection) -> None:
         """Say how many documents were passed over for their type alone.
@@ -1239,35 +1105,6 @@ class SyncPipeline:
                 f"(enable with --sync-{source}s or in config.yml)."
             )
 
-    def _disambiguate(self, chosen: Selection, id_map: Dict[str, Any]) -> Selection:
-        """Let the user pick when ``--notebook`` matched more than one document.
-
-        Args:
-            chosen: The selection, already narrowed to the matches.
-            id_map: Every listed item by id, for rendering the choices.
-
-        Returns:
-            The same selection when there is nothing to disambiguate, otherwise
-            one narrowed to what the user chose — empty if they cancelled.
-        """
-        if not self.target_notebook:
-            return chosen
-
-        keep = select_notebook_interactive(
-            matches=[candidate.item for candidate in chosen.to_process],
-            query=self.target_notebook,
-            id_map=id_map,
-        )
-        if not keep:
-            log("Sync cancelled by user. Exiting.")
-            return replace(chosen, to_process=())
-
-        chosen_items = {id(item) for item in keep}
-        return replace(
-            chosen,
-            to_process=tuple(c for c in chosen.to_process if id(c.item) in chosen_items),
-        )
-
     def _record_inventory(self, listing: Sequence[Any], id_map: Dict[str, Any]) -> None:
         """Note every document the tablet listed in the state database.
 
@@ -1276,9 +1113,9 @@ class SyncPipeline:
             id_map: Every listed item by id, for resolving folder paths.
         """
         for item in listing:
-            if get_val(item, "Type") != "DocumentType":
+            if not is_document(item):
                 continue
-            self._record_seen_document(item, get_val(item, "ID"), document_version(item), id_map)
+            self._record_seen_document(item, document_id(item), document_version(item), id_map)
 
     def _record_seen_document(
         self, item: Any, doc_id: str, version: Any, id_map: Dict[str, Any]
@@ -1296,8 +1133,8 @@ class SyncPipeline:
             id_map: Map of id to document, for resolving the folder path.
         """
         try:
-            name = str(get_val(item, "VissibleName") or get_val(item, "VisibleName") or "").strip()
-            mod = get_val(item, "ModifiedClient") or getattr(item, "last_modified", None)
+            name = document_name(item)
+            mod = document_modified(item)
             get_state_store().record_document(
                 doc_id,
                 name=name or None,
@@ -2647,7 +2484,7 @@ class SyncPipeline:
         self._learn_device(client)
 
         listing = list(client.get_meta_items())
-        id_map = {get_val(item, "ID"): item for item in listing}
+        id_map = {document_id(item): item for item in listing}
         chosen = self.select_documents(listing, client)
         if chosen is None:
             return False
@@ -2711,7 +2548,7 @@ class SyncPipeline:
             self.report.add(
                 DocumentOutcome(
                     name=self._selection_label(item),
-                    doc_id=getattr(item, "doc_id", None) or get_val(item, "ID"),
+                    doc_id=getattr(item, "doc_id", None) or document_id(item),
                     status=SKIPPED,
                     reason=reason,
                 )
@@ -2741,12 +2578,7 @@ class SyncPipeline:
         """
         if isinstance(item, Candidate):
             return item.name or item.doc_id
-        return str(
-            get_val(item, "VissibleName")
-            or get_val(item, "VisibleName")
-            or get_val(item, "ID")
-            or "(unnamed)"
-        )
+        return document_name(item) or document_id(item) or "(unnamed)"
 
     def _print_summary(self) -> None:
         """Print the run summary, as a table or as JSON.

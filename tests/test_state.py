@@ -1,6 +1,5 @@
 """Tests for the SQLite sync-state store."""
 
-import json
 import sqlite3
 import threading
 
@@ -16,7 +15,6 @@ from living_ink.state import (
     SYNC_STATUSES,
     StateStore,
     classify,
-    import_legacy_json,
 )
 from living_ink.transport import DeviceInfo
 
@@ -414,69 +412,6 @@ class TestConcurrency:
                 conn.execute("SELECT * FROM no_such_table")
 
         assert store.published_versions("Obsidian") == {"doc-1": "v1"}
-
-
-class TestLegacyImport:
-    """Upgrading must not re-OCR every notebook the user already paid for."""
-
-    def _write(self, tmp_path, name, payload):
-        path = tmp_path / name
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        return path
-
-    def test_a_version_map_is_imported(self, store, tmp_path):
-        self._write(tmp_path, "processed_notebooks_ObsidianDestination.json", {"doc-1": 4})
-
-        assert import_legacy_json(store, tmp_path) == 1
-        assert store.published_versions("ObsidianDestination") == {"doc-1": "4"}
-
-    def test_the_oldest_bare_list_format_is_imported(self, store, tmp_path):
-        self._write(tmp_path, "processed_notebooks_Obsidian.json", ["doc-1", "doc-2"])
-
-        import_legacy_json(store, tmp_path)
-        assert store.published_versions("Obsidian") == {"doc-1": "0", "doc-2": "0"}
-
-    def test_each_file_becomes_its_own_destination(self, store, tmp_path):
-        self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
-        self._write(tmp_path, "processed_notebooks_Notion.json", {"doc-2": 2})
-
-        assert import_legacy_json(store, tmp_path) == 2
-        assert store.published_versions("Obsidian") == {"doc-1": "1"}
-        assert store.published_versions("Notion") == {"doc-2": "2"}
-
-    def test_the_source_file_is_renamed_not_deleted(self, store, tmp_path):
-        path = self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
-
-        import_legacy_json(store, tmp_path)
-        assert not path.exists()
-        assert (tmp_path / "processed_notebooks_Obsidian.json.migrated").exists()
-
-    def test_importing_twice_is_a_no_op(self, store, tmp_path):
-        self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
-
-        import_legacy_json(store, tmp_path)
-        assert import_legacy_json(store, tmp_path) == 0
-
-    def test_a_corrupt_file_is_left_alone(self, store, tmp_path):
-        """Renaming it away would hide the evidence from the user."""
-        path = tmp_path / "processed_notebooks_Obsidian.json"
-        path.write_text("{not json", encoding="utf-8")
-
-        assert import_legacy_json(store, tmp_path) == 0
-        assert path.exists()
-
-    def test_the_import_timestamp_is_the_file_mtime(self, store, tmp_path):
-        """Better than claiming everything was first published during the upgrade."""
-        import os
-
-        path = self._write(tmp_path, "processed_notebooks_Obsidian.json", {"doc-1": 1})
-        os.utime(path, (1_600_000_000, 1_600_000_000))
-
-        import_legacy_json(store, tmp_path)
-        assert store.get_publication("doc-1", "Obsidian")["first_published_at"].startswith("2020-")
-
-    def test_a_missing_directory_is_harmless(self, store, tmp_path):
-        assert import_legacy_json(store, tmp_path / "nope") == 0
 
 
 class TestUpgradingAnOlderDatabase:

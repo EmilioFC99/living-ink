@@ -19,7 +19,12 @@ from living_ink import logs, pipeline, state
 from living_ink.config import ConfigurationMissing, credentials
 from living_ink.core import selection
 from living_ink.core.document import Document, PublishContext, PublishResult
-from living_ink.core.listing import document_name, document_version, get_notebook_path, get_val
+from living_ink.core.listing import (
+    document_id,
+    document_name,
+    document_version,
+    get_notebook_path,
+)
 from living_ink.core.selection import Candidate, Selection, SelectionCriteria, select
 from living_ink.core.temp import DocumentWorkspace
 from living_ink.destinations import (
@@ -46,6 +51,7 @@ from living_ink.report import (
 )
 from living_ink.settings import Settings
 from tests.builders import make_page
+from tests.fixtures.listing import make_item
 
 
 def make_candidate(item, *, pending=(), source="notebook", id_map=None, recipes=None):
@@ -64,10 +70,10 @@ def make_candidate(item, *, pending=(), source="notebook", id_map=None, recipes=
     Returns:
         The candidate.
     """
-    id_map = id_map if id_map is not None else {get_val(item, "ID"): item}
+    id_map = id_map if id_map is not None else {document_id(item): item}
     return Candidate(
         item=item,
-        doc_id=get_val(item, "ID"),
+        doc_id=document_id(item),
         name=document_name(item),
         folder=get_notebook_path(item, id_map),
         source=source,
@@ -125,7 +131,6 @@ def test_sync_pipeline_init_defaults():
     pipeline = SyncPipeline(keep_temp=True)
     assert pipeline.keep_temp is True
     assert pipeline.config_path.name == "config.yml"
-    assert pipeline.data_dir.exists()
 
 
 def test_sync_pipeline_custom_destinations():
@@ -195,24 +200,29 @@ def test_sync_pipeline_run_targeted_not_found():
             assert result is False
 
 
-def test_sync_pipeline_run_targeted_user_cancelled():
-    """SyncPipeline.run returns True when user cancels interactive disambiguation."""
-    doc_item = {
-        "ID": "doc-123",
-        "Type": "DocumentType",
-        "VissibleName": "Meeting Notes",
-        "hash": "h1",
-    }
+def test_sync_pipeline_run_targeted_ambiguous_syncs_every_match():
+    """``--notebook`` matching several documents processes all of them.
+
+    It used to stop and offer a menu, which product §7 forbids a bare ``sync``
+    from doing — and which only ever appeared at a tty, so ``watch``, cron and
+    a piped run already behaved this way.
+    """
+    matches = [
+        make_item("doc-123", "Meeting Notes", content_hash="h1"),
+        make_item("doc-456", "Meeting Notes", content_hash="h2"),
+    ]
     pipeline = SyncPipeline(notebook="Meeting Notes", destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
-            mock_client.get_meta_items.return_value = [doc_item]
+            mock_client.get_meta_items.return_value = matches
             mock_connect.return_value = mock_client
-            with patch("living_ink.pipeline.select_notebook_interactive", return_value=[]):
-                result = pipeline.run()
-                assert result is True
+            with patch.object(pipeline, "process_notebook_item", return_value=True) as processed:
+                assert pipeline.run() is True
+
+    synced = {call.kwargs["candidate"].item.id for call in processed.call_args_list}
+    assert synced == {"doc-123", "doc-456"}
 
 
 def test_sync_pipeline_process_notebook_item():
@@ -220,12 +230,7 @@ def test_sync_pipeline_process_notebook_item():
     mock_dest = MockDestination("MockDest")
     pipeline = SyncPipeline(destinations=[mock_dest])
 
-    nb_item = {
-        "ID": "nb-001",
-        "Type": "DocumentType",
-        "VissibleName": "Test Notebook",
-        "hash": "hash-abc",
-    }
+    nb_item = make_item("nb-001", "Test Notebook", content_hash="hash-abc")
     mock_client = MagicMock()
     mock_client.download.return_value = b""
 
@@ -494,13 +499,22 @@ class TestJobHelpers:
     """Small pure helpers the stages rely on."""
 
     def test_version_prefers_the_content_hash(self):
-        assert pipeline._item_version({"hash": "abc", "Version": "3"}) == "abc"
+        item = make_item(content_hash="abc")
+        item.version = "3"
+
+        assert pipeline._item_version(item) == "abc"
 
     def test_version_falls_back_to_the_integer_version(self):
-        assert pipeline._item_version({"Version": "7"}) == 7
+        item = make_item()
+        item.version = "7"
+
+        assert pipeline._item_version(item) == 7
 
     def test_version_defaults_to_one_when_unusable(self):
-        assert pipeline._item_version({"Version": "not-a-number"}) == 1
+        item = make_item()
+        item.version = "not-a-number"
+
+        assert pipeline._item_version(item) == 1
 
 
 class TestRendererDispatch:
@@ -720,7 +734,6 @@ class TestOrderedDurability:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory, and drop it afterwards."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -927,7 +940,7 @@ class TestEveryRunReadsItsPages:
         os.utime(transcript, (page.stat().st_mtime + 10, page.stat().st_mtime + 10))
 
         pipeline_obj = SyncPipeline(destinations=[MockDestination()])
-        nb_item = {"ID": "nb-1", "VissibleName": "Notes", "hash": "h"}
+        nb_item = make_item("nb-1", "Notes", content_hash="h")
 
         with (
             patch("living_ink.pipeline.get_document_type", return_value="notebook"),
@@ -1179,7 +1192,6 @@ class TestProcessedLog:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         return tmp_path
@@ -1194,25 +1206,32 @@ class TestProcessedLog:
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.add_to_processed_log("ObsidianDestination", "doc-2", "v9", recipe="")
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v9"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1",
+            "doc-2": "v9",
+        }
 
     def test_republishing_updates_rather_than_duplicating(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v2", recipe="")
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v2"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v2"
+        }
 
     def test_destinations_do_not_share_state(self, tmp_path, monkeypatch):
         """A notebook can be published to one destination and pending for another."""
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
-        assert pipeline.load_processed_log("NotionDestination") == {}
+        assert pipeline.get_state_store().published_versions("NotionDestination") == {}
 
     def test_state_survives_a_restart(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
         pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.reset_state_store()
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1"}
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1"
+        }
 
     def test_a_second_process_sees_the_write(self, tmp_path, monkeypatch):
         """`watch` and a manual sync used to overwrite each other's progress."""
@@ -1224,17 +1243,10 @@ class TestProcessedLog:
         with state.StateStore(pipeline.get_state_db_path()) as other:
             other.record_publication("doc-2", "ObsidianDestination", "v2", recipe="")
 
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v2"}
-
-    def test_legacy_json_state_is_imported_once(self, tmp_path, monkeypatch):
-        self._state_dir(tmp_path, monkeypatch)
-        legacy = tmp_path / "processed_notebooks_ObsidianDestination.json"
-        legacy.write_text('{"doc-1": 7}', encoding="utf-8")
-
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "7"}
-        # Renamed rather than deleted, so a downgrade still has the state.
-        assert not legacy.exists()
-        assert (tmp_path / "processed_notebooks_ObsidianDestination.json.migrated").exists()
+        assert pipeline.get_state_store().published_versions("ObsidianDestination") == {
+            "doc-1": "v1",
+            "doc-2": "v2",
+        }
 
 
 class TestOpeningTheStoreSweepsDeadDestinations:
@@ -1250,7 +1262,6 @@ class TestOpeningTheStoreSweepsDeadDestinations:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory, before and after."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -1341,7 +1352,6 @@ class TestExternalIdRoundTrip:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -1372,7 +1382,6 @@ class TestOutcomeRecording:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -2199,7 +2208,7 @@ class TestPublicationIdentity:
         """It used to be fetched for one log line and then thrown away."""
         dest = MockDestination("MockDest")
         job = self._job(tmp_path)
-        job.item = {"ID": "nb-1", "ModifiedClient": "2026-03-04T09:30:00"}
+        job.item = make_item("nb-1", modified="2026-03-04T09:30:00")
         pipe = SyncPipeline(destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log"):
@@ -2362,16 +2371,16 @@ class TestJobModifiedDate:
             keep_temp=False,
         )
 
-    def test_reads_the_cloud_metadata_field(self):
-        moment = self._job({"ModifiedClient": "2026-03-04T09:30:00"}).modified_at()
+    def test_reads_the_field_the_transports_fill_in(self):
+        moment = self._job(make_item(modified="2026-03-04T09:30:00")).modified_at()
         assert moment == datetime.datetime(2026, 3, 4, 9, 30)
 
-    def test_falls_back_to_the_document_attribute(self):
-        item = SimpleNamespace(last_modified=datetime.datetime(2026, 3, 4, 9, 30))
+    def test_a_transport_that_already_parsed_it_is_passed_through(self):
+        item = make_item(modified=datetime.datetime(2026, 3, 4, 9, 30))
         assert self._job(item).modified_at() == datetime.datetime(2026, 3, 4, 9, 30)
 
     def test_an_item_with_no_date_reports_none(self):
-        assert self._job({}).modified_at() is None
+        assert self._job(make_item()).modified_at() is None
 
 
 class FakeCache:
@@ -2477,7 +2486,7 @@ class TestOneDocumentCannotEndTheRun:
         return pipe
 
     def _candidate(self, doc_id, name):
-        return make_candidate({"ID": doc_id, "VissibleName": name, "hash": "h"})
+        return make_candidate(make_item(doc_id, name, content_hash="h"))
 
     def test_a_document_that_raises_is_a_failure_not_a_crash(self, monkeypatch):
         pipe = self._pipeline()
@@ -3028,9 +3037,7 @@ class TestProgressIsRecordedPerNotebook:
             return candidate.name != "bad"
 
         chosen = Selection(
-            to_process=tuple(
-                make_candidate({"ID": name, "VissibleName": name}) for name in ("a", "bad", "c")
-            )
+            to_process=tuple(make_candidate(make_item(name, name)) for name in ("a", "bad", "c"))
         )
 
         monkeypatch.setattr(pipe, "process_notebook_item", process)
@@ -3190,8 +3197,8 @@ class TestRunSummary:
 
     def test_documents_never_processed_are_listed_as_unchanged(self):
         pipe = self._pipeline()
-        stale = make_candidate({"ID": "nb-2", "VissibleName": "Journal"})
-        fresh = make_candidate({"ID": "nb-1", "VissibleName": "Notes"})
+        stale = make_candidate(make_item("nb-2", "Journal"))
+        fresh = make_candidate(make_item("nb-1", "Notes"))
 
         pipe._report_selection(
             Selection(to_process=(fresh,), skipped=((stale, selection.UNCHANGED),))
@@ -3204,7 +3211,7 @@ class TestRunSummary:
     def test_a_skip_carries_the_real_reason(self):
         """Every one of these used to read "unchanged", whatever had happened."""
         pipe = self._pipeline()
-        trashed = {"ID": "nb-3", "VissibleName": "Deleted"}
+        trashed = make_item("nb-3", "Deleted")
 
         pipe._report_selection(Selection(skipped=((trashed, selection.TRASHED),)))
 
@@ -3213,9 +3220,7 @@ class TestRunSummary:
     def test_a_pending_document_past_the_limit_is_deferred_not_unchanged(self):
         """With the default limit of one, this used to call nine notebooks fine."""
         pipe = self._pipeline()
-        waiting = make_candidate(
-            {"ID": "nb-9", "VissibleName": "Later"}, pending=(MockDestination(),)
-        )
+        waiting = make_candidate(make_item("nb-9", "Later"), pending=(MockDestination(),))
 
         pipe._report_selection(Selection(deferred=(waiting,)))
 
@@ -3284,7 +3289,7 @@ class TestDryRunReporting:
     def test_a_targeted_run_does_not_call_the_rest_unchanged(self):
         """It never looked at them, so it cannot vouch for them."""
         pipe = self._pipeline(target="Test")
-        other = {"ID": "nb-2", "VissibleName": "Other"}
+        other = make_item("nb-2", "Other")
 
         pipe._report_selection(Selection(skipped=((other, selection.NOT_TARGETED),)))
 
@@ -3292,7 +3297,7 @@ class TestDryRunReporting:
 
     def test_an_untargeted_run_still_lists_them(self):
         pipe = self._pipeline()
-        other = make_candidate({"ID": "nb-2", "VissibleName": "Other"})
+        other = make_candidate(make_item("nb-2", "Other"))
 
         pipe._report_selection(Selection(skipped=((other, selection.UNCHANGED),)))
 
@@ -3349,16 +3354,15 @@ class TestThePreviewAndTheRunAgree:
     def store(self, tmp_path, monkeypatch):
         """A real state store on a throwaway database."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield pipeline.get_state_store()
         pipeline.reset_state_store()
 
     ITEMS = [
-        {"ID": "doc-new", "Type": "DocumentType", "VissibleName": "New", "hash": "h1"},
-        {"ID": "doc-changed", "Type": "DocumentType", "VissibleName": "Changed", "hash": "h2"},
-        {"ID": "doc-settled", "Type": "DocumentType", "VissibleName": "Settled", "hash": "h3"},
+        make_item("doc-new", "New", content_hash="h1"),
+        make_item("doc-changed", "Changed", content_hash="h2"),
+        make_item("doc-settled", "Settled", content_hash="h3"),
     ]
 
     def _client(self):
@@ -3416,7 +3420,7 @@ class TestThePreviewAndTheRunAgree:
         dest = MockDestination()
         pipe = self._pipeline(dest)
         for item in self.ITEMS:
-            self._settle(store, pipe, dest, item["ID"], item["hash"])
+            self._settle(store, pipe, dest, item.id, item.hash)
 
         chosen = pipe.select_documents(list(self.ITEMS), self._client())
 
@@ -3658,7 +3662,7 @@ class TestTheVerdictStageIsWiredIntoTheSequence:
                 on_judge(job)
             return real_judge(job)
 
-        item = {"ID": "nb-1", "VissibleName": "Notes", "hash": "h"}
+        item = make_item("nb-1", "Notes", content_hash="h")
         with (
             patch.object(
                 pipe,

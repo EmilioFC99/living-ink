@@ -19,10 +19,6 @@ from living_ink.transport import (
 
 logger = logging.getLogger(__name__)
 
-REMARKABLE_CONFIG_DIR = Path.home() / ".remarkable"
-REMARKABLE_TOKEN_FILE = REMARKABLE_CONFIG_DIR / "token"
-CACHE_DIR = REMARKABLE_CONFIG_DIR / "cache"
-
 
 class FallbackClient:
     """A resilient transport wrapping a primary and a backup reMarkable client.
@@ -399,7 +395,7 @@ def get_file_type(client: RemarkableTransport, doc: Document) -> str:
     except UnsupportedOperation:
         pass
 
-    name = doc.VissibleName.lower()
+    name = doc.name.lower()
     if name.endswith(".pdf"):
         return "pdf"
     elif name.endswith(".epub"):

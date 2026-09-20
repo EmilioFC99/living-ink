@@ -13,8 +13,6 @@ Vision OCR:
 Backward compatibility:
     - ``repair_text_with_openai()`` still works as the public API entry point.
     - If no provider is configured, falls back to ``NoneProvider`` (raw text).
-    - Legacy ``OPENAI_API_KEY`` env var is respected if ``ai`` config section
-      is absent.
 
 Example:
     >>> from living_ink.clean import configure, repair_text_with_openai, ocr_and_repair
@@ -25,7 +23,6 @@ Example:
 
 import hashlib
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -53,24 +50,44 @@ _provider: Optional[TextRepairProvider] = None
 _repair_enabled: Optional[bool] = None
 
 
+def _read_prompt(path: Path) -> str:
+    """Read one of the two packaged prompt files.
+
+    A missing file is an error rather than a fallback to a terser prompt
+    written inline. Both files ship inside the package, so the only way one
+    goes missing is a broken installation — and the silent substitute was worse
+    than a crash twice over: the run pays for a page of OCR done against a
+    prompt nobody wrote down, and
+    :func:`transcription_fingerprint` hashes the substitute, so the cache fills
+    up with transcriptions that look reusable and are not.
+
+    Args:
+        path: :data:`PROMPT_FILE` or :data:`OCR_PROMPT_FILE`.
+
+    Returns:
+        The prompt text, stripped.
+
+    Raises:
+        OSError: If the file cannot be read.
+    """
+    return path.read_text(encoding="utf-8").strip()
+
+
 def _read_prompt_instructions() -> str:
     """Read the cleanup prompt instructions from the prompt file.
 
     Returns:
-        The prompt text from ``cleanup_prompt.txt``, or a minimal
-        fallback string if the file is missing.
+        The prompt text from ``cleanup_prompt.txt``.
     """
-    if PROMPT_FILE.exists():
-        return PROMPT_FILE.read_text(encoding="utf-8").strip()
-    return "Clean this OCR text."
+    return _read_prompt(PROMPT_FILE)
 
 
 def configure(settings: Settings) -> None:
     """Initialize the AI provider from the run's resolved settings.
 
-    Should be called once at startup (from ``living_ink.pipeline`` or ``SyncPipeline``).
-    If not called, ``repair_text_with_openai()`` will attempt to
-    auto-configure from legacy env vars.
+    Should be called once at startup (from ``living_ink.pipeline`` or
+    ``SyncPipeline``). If not called, there is no AI pass at all —
+    ``repair_text_with_openai()`` returns its input unchanged.
 
     Args:
         settings: The run's settings. Carries both the provider configuration
@@ -99,27 +116,22 @@ def repair_enabled() -> bool:
 
 
 def _get_provider() -> TextRepairProvider:
-    """Get the configured provider, with lazy initialization fallback.
-
-    If ``configure()`` was never called (e.g., direct script usage),
-    attempts to build a provider from legacy environment variables.
+    """Get the configured provider, defaulting to no AI at all.
 
     Returns:
-        The active ``TextRepairProvider`` instance.
+        The active ``TextRepairProvider`` instance, or :class:`NoneProvider`
+        if ``configure()`` was never called.
     """
     global _provider
     if _provider is not None:
         return _provider
 
-    # Lazy fallback: try legacy env var configuration
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if api_key:
-        logger.info("Auto-configuring from OPENAI_API_KEY env var (legacy mode).")
-        _provider = get_provider(Settings(ai_provider="openai", ai_api_key=api_key))
-    else:
-        logger.info("No AI provider configured. Text cleanup disabled.")
-        _provider = NoneProvider()
-
+    # No environment fallback. A caller that never ran ``configure()`` has no
+    # settings, and guessing OpenAI from a stray ``OPENAI_API_KEY`` sends
+    # handwriting to a provider nobody chose. ``Settings.from_env()`` is the
+    # supported way to configure without a config file.
+    logger.info("No AI provider configured. Text cleanup disabled.")
+    _provider = NoneProvider()
     return _provider
 
 
@@ -257,12 +269,9 @@ def _read_ocr_instructions() -> str:
     """Read the OCR prompt instructions from the prompt file.
 
     Returns:
-        The prompt text from ``ocr_prompt.txt``, or a minimal
-        fallback string if the file is missing.
+        The prompt text from ``ocr_prompt.txt``.
     """
-    if OCR_PROMPT_FILE.exists():
-        return OCR_PROMPT_FILE.read_text(encoding="utf-8").strip()
-    return "Transcribe the handwritten text from this notebook page image."
+    return _read_prompt(OCR_PROMPT_FILE)
 
 
 def transcription_fingerprint(settings: Settings) -> str:

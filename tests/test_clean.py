@@ -119,19 +119,15 @@ class TestGetProviderLazy:
     """Tests for lazy provider initialization via _get_provider()."""
 
     def test_returns_none_provider_when_unconfigured(self):
-        """Without configure() or env vars, returns NoneProvider."""
+        """Without configure(), returns NoneProvider."""
         with patch.dict(os.environ, {}, clear=True):
-            # Remove OPENAI_API_KEY if present
-            os.environ.pop("OPENAI_API_KEY", None)
             provider = clean._get_provider()
             assert isinstance(provider, NoneProvider)
 
-    def test_lazy_init_from_openai_env_var(self):
-        """Falls back to OPENAI_API_KEY env var when not configured."""
+    def test_a_stray_openai_key_in_the_environment_configures_nothing(self):
+        """Guessing a provider from an env var sends handwriting nobody chose."""
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-from-env"}):
-            provider = clean._get_provider()
-            assert isinstance(provider, UniversalChatProvider)
-            assert provider.api_key == "sk-from-env"
+            assert isinstance(clean._get_provider(), NoneProvider)
 
     def test_caches_provider_after_first_call(self):
         """Provider is cached after first lazy initialization."""
@@ -232,12 +228,12 @@ class TestReadPromptInstructions:
         result = clean._read_prompt_instructions()
         assert "Test instructions" in result
 
-    def test_fallback_when_file_missing(self, tmp_path):
-        """Returns fallback text when prompt file doesn't exist."""
+    def test_a_missing_file_raises(self, tmp_path):
+        """Substituting a terser prompt would poison the transcript cache."""
         missing = tmp_path / "nonexistent.txt"
         with patch.object(clean, "PROMPT_FILE", missing):
-            result = clean._read_prompt_instructions()
-            assert "Clean this OCR text" in result
+            with pytest.raises(OSError):
+                clean._read_prompt_instructions()
 
     def test_strips_whitespace(self, tmp_path):
         """Result is stripped of leading/trailing whitespace."""
@@ -329,12 +325,12 @@ class TestReadOcrInstructions:
         result = clean._read_ocr_instructions()
         assert "Test OCR instructions" in result
 
-    def test_fallback_when_file_missing(self, tmp_path):
-        """Returns fallback text when prompt file doesn't exist."""
+    def test_a_missing_file_raises(self, tmp_path):
+        """A broken install must not quietly transcribe against a stub prompt."""
         missing = tmp_path / "nonexistent.txt"
         with patch.object(clean, "OCR_PROMPT_FILE", missing):
-            result = clean._read_ocr_instructions()
-            assert "Transcribe the handwritten text" in result
+            with pytest.raises(OSError):
+                clean._read_ocr_instructions()
 
 
 class TestTranscriptionFingerprint:

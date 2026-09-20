@@ -1,10 +1,17 @@
 """Reading the tablet's listing: the few facts every stage needs up front.
 
-A transport hands back either a :class:`~living_ink.models.Document` or a raw
-dict, spelled in rmapy's names (``VissibleName``, ``Parent``, ``ModifiedClient``).
-Everything that has to answer "what is this document called, where does it sit,
+A transport hands back :class:`~living_ink.models.Document` objects, and
+everything that has to answer "what is this document called, where does it sit,
 has it changed, what type is it" before anything is downloaded reads it through
 these functions.
+
+They read the model's own field names. There used to be a ``get_val(item, key)``
+here that took the key as a *string* — spelled in rmapy's names
+(``VissibleName``, ``Parent``, ``ModifiedClient``), which the model carried as
+read-only aliases purely so the getter would find them — and fell back to a dict
+lookup for a shape no transport has produced since both clients started
+returning models. A misspelled key was not an error there, it was a ``None``: a
+document with no title, no parent, no type, silently.
 
 They live here rather than in :mod:`living_ink.pipeline` because
 :mod:`living_ink.core.selection` is the one place that decides what a run will
@@ -24,12 +31,53 @@ TRASH_PARENT = "trash"
 #: What :func:`get_notebook_path` puts at the head of a trashed document's path.
 TRASH_MARKER = "[TRASH]"
 
+#: The ``doc_type`` the device gives an actual document rather than a folder.
+DOCUMENT_TYPE = "DocumentType"
 
-def get_val(item: Any, key: str) -> Any:
-    """Safely get a property or dictionary key from a document item."""
-    if isinstance(item, dict):
-        return item.get(key)
-    return getattr(item, key, getattr(item, key.lower(), None))
+
+def document_id(item: Any) -> str:
+    """Return a listed item's reMarkable UUID.
+
+    Args:
+        item: A document or folder from the transport's listing.
+
+    Returns:
+        The id, or an empty string when the item has none.
+    """
+    return str(getattr(item, "id", "") or "").strip()
+
+
+def is_document(item: Any) -> bool:
+    """Report whether a listed item is a document rather than a folder.
+
+    Asked positively, not as ``not is_folder``: the device has exactly two
+    types today, but an item of some third type is not a document and must not
+    be treated as one on the strength of not being a folder.
+
+    Args:
+        item: A document or folder from the transport's listing.
+
+    Returns:
+        True only for :data:`DOCUMENT_TYPE`.
+    """
+    return getattr(item, "doc_type", "") == DOCUMENT_TYPE
+
+
+def document_modified(item: Any) -> Any:
+    """Return when the tablet says a document was last written on.
+
+    Returns the transport's value as-is — a ``datetime``, an ISO string or an
+    epoch number, depending on which one answered. Feed it to
+    :func:`living_ink.pipeline.to_datetime`, which is the one place that
+    reconciles them.
+
+    Args:
+        item: A document from the transport's listing.
+
+    Returns:
+        The timestamp, or None when the transport reported none.
+    """
+    return getattr(item, "last_modified", None)
 
 
 def document_version(item: Any) -> str:
@@ -46,17 +94,17 @@ def document_version(item: Any) -> str:
     Returns:
         The content hash, or the version number as a string, or ``"1"``.
     """
-    value = get_val(item, "hash")
+    value = getattr(item, "hash", None)
     if value:
         return str(value)
     try:
-        return str(int(get_val(item, "Version")))
+        return str(int(getattr(item, "version", None)))
     except (ValueError, TypeError):
         return "1"
 
 
 def document_name(item: Any) -> str:
-    """Return a document's display title, however the transport spells it.
+    """Return a document's display title.
 
     Args:
         item: A document from the transport's listing.
@@ -64,12 +112,7 @@ def document_name(item: Any) -> str:
     Returns:
         The title, or an empty string when the item has none.
     """
-    return str(
-        get_val(item, "VissibleName")
-        or get_val(item, "VisibleName")
-        or getattr(item, "name", "")
-        or ""
-    ).strip()
+    return str(getattr(item, "name", "") or "").strip()
 
 
 def folder_parts(item: Any, id_map: Dict[str, Any]) -> List[str]:
@@ -88,15 +131,14 @@ def folder_parts(item: Any, id_map: Dict[str, Any]) -> List[str]:
     """
     path: List[str] = []
     current = item
-    while get_val(current, "Parent"):
-        parent_id = get_val(current, "Parent")
+    while getattr(current, "parent", ""):
+        parent_id = getattr(current, "parent", "")
         if parent_id == TRASH_PARENT:
             path.insert(0, TRASH_MARKER)
             break
         parent = id_map.get(parent_id)
         if parent:
-            parent_name = get_val(parent, "VissibleName") or get_val(parent, "VisibleName")
-            path.insert(0, parent_name)
+            path.insert(0, document_name(parent))
             current = parent
         else:
             break
@@ -144,7 +186,7 @@ def is_trashed(item: Any, id_map: Dict[str, Any]) -> bool:
     Returns:
         True if the document or any folder containing it is in the trash.
     """
-    if bool(get_val(item, "deleted")):
+    if bool(getattr(item, "deleted", False)):
         return True
     return get_notebook_path(item, id_map).startswith(TRASH_MARKER)
 
@@ -171,7 +213,7 @@ def matches_notebook_target(item: Any, target_str: str, id_map: Dict[str, Any]) 
         return False
 
     # 1. Exact ID match (case-insensitive)
-    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "").strip()
+    doc_id = document_id(item)
     if doc_id.lower() == t.lower():
         return True
 
@@ -229,7 +271,7 @@ def get_document_type(item: Any, client: Optional[Any] = None) -> str:
             # a document drops out of discovery.
             logger.debug("get_file_type probe failed", exc_info=True)
 
-    files = get_val(item, "files") or []
+    files = getattr(item, "files", None) or []
     for f in files:
         fid = str(f.get("id") if isinstance(f, dict) else getattr(f, "id", ""))
         source = source_for_filename(fid)

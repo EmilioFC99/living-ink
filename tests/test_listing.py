@@ -7,37 +7,33 @@ reads False and the notebook the user threw away gets published.
 """
 
 from living_ink.core.listing import (
+    document_id,
     document_name,
     document_path,
     document_version,
     get_notebook_path,
-    get_val,
+    is_document,
     is_trashed,
 )
-
-
-def doc(**fields):
-    """Build a listing entry, spelled the way a transport spells one."""
-    entry = {"ID": "doc-1", "Type": "DocumentType", "VissibleName": "Notes", "Parent": ""}
-    entry.update(fields)
-    return entry
+from tests.fixtures.listing import make_folder as folder
+from tests.fixtures.listing import make_item as doc
 
 
 class TestATrashedDocumentIsNotACandidate:
     """D-a: the device signals the trash through the parent, not a flag."""
 
     def test_a_document_in_the_trash_is_trashed_without_the_flag(self):
-        """The whole defect in one assertion: no ``deleted`` key anywhere."""
-        item = doc(Parent="trash")
+        """The whole defect in one assertion: the flag says nothing."""
+        item = doc(parent="trash")
 
-        assert "deleted" not in item
+        assert item.deleted is False
         assert is_trashed(item, {"doc-1": item}) is True
 
     def test_a_document_inside_a_trashed_folder_is_trashed(self):
-        folder = {"ID": "f-1", "Type": "CollectionType", "VissibleName": "Old", "Parent": "trash"}
-        item = doc(Parent="f-1")
+        folder_ = folder("f-1", "Old", parent="trash")
+        item = doc(parent="f-1")
 
-        assert is_trashed(item, {"f-1": folder, "doc-1": item}) is True
+        assert is_trashed(item, {"f-1": folder_, "doc-1": item}) is True
 
     def test_the_documented_flag_still_counts(self):
         """Cloud sets it; SSH does not. Either one is enough."""
@@ -46,10 +42,10 @@ class TestATrashedDocumentIsNotACandidate:
         assert is_trashed(item, {"doc-1": item}) is True
 
     def test_a_live_document_is_not_trashed(self):
-        folder = {"ID": "f-1", "Type": "CollectionType", "VissibleName": "Work", "Parent": ""}
-        item = doc(Parent="f-1")
+        folder_ = folder("f-1", "Work")
+        item = doc(parent="f-1")
 
-        assert is_trashed(item, {"f-1": folder, "doc-1": item}) is False
+        assert is_trashed(item, {"f-1": folder_, "doc-1": item}) is False
 
     def test_a_root_document_is_not_trashed(self):
         item = doc()
@@ -58,11 +54,11 @@ class TestATrashedDocumentIsNotACandidate:
 
     def test_a_folder_the_user_named_trash_is_not_the_trash(self):
         """``[TRASH]`` is this module's marker, not a name the device uses."""
-        folder = {"ID": "f-1", "Type": "CollectionType", "VissibleName": "[TRASH]", "Parent": ""}
-        item = doc(Parent="f-1")
+        folder_ = folder("f-1", "[TRASH]")
+        item = doc(parent="f-1")
 
-        assert get_notebook_path(item, {"f-1": folder, "doc-1": item}) == "[TRASH]"
-        assert is_trashed(item, {"f-1": folder, "doc-1": item}) is True
+        assert get_notebook_path(item, {"f-1": folder_, "doc-1": item}) == "[TRASH]"
+        assert is_trashed(item, {"f-1": folder_, "doc-1": item}) is True
 
 
 class TestTheTwoWaysAPathIsWritten:
@@ -75,9 +71,9 @@ class TestTheTwoWaysAPathIsWritten:
     """
 
     def _tree(self):
-        outer = {"ID": "f-1", "Type": "CollectionType", "VissibleName": "Journal", "Parent": ""}
-        inner = {"ID": "f-2", "Type": "CollectionType", "VissibleName": "2026", "Parent": "f-1"}
-        item = doc(VissibleName="diary", Parent="f-2")
+        outer = folder("f-1", "Journal")
+        inner = folder("f-2", "2026", parent="f-1")
+        item = doc(name="diary", parent="f-2")
         return {"f-1": outer, "f-2": inner, "doc-1": item}, item
 
     def test_the_full_path_carries_the_title(self):
@@ -96,31 +92,44 @@ class TestTheTwoWaysAPathIsWritten:
         assert document_path(item, {"doc-1": item}) == "Notes"
 
 
-class TestReadingTheFieldsATransportSpellsTwoWays:
-    """``get_val`` speaks rmapy; the models expose aliases for it."""
+class TestReadingTheFieldsTheModelDeclares:
+    """The readers name the model's own fields, and nothing else.
 
-    def test_a_dict_and_an_object_read_the_same(self):
-        class Item:
-            ID = "doc-9"
+    They used to go through a ``get_val(item, key)`` that took the key as a
+    string, tried rmapy's spelling, then the lower-cased one, then a dict
+    lookup — so a key naming nothing returned ``None`` and a document arrived
+    with no title, no parent or no type rather than an error.
+    """
 
-        assert get_val({"ID": "doc-9"}, "ID") == get_val(Item(), "ID")
+    def test_the_id_is_read_off_the_model(self):
+        assert document_id(doc("doc-9")) == "doc-9"
 
-    def test_a_missing_key_is_none(self):
-        assert get_val({}, "ID") is None
-
-    def test_the_name_falls_back_through_every_spelling(self):
-        assert document_name({"VissibleName": "A"}) == "A"
-        assert document_name({"VisibleName": "B"}) == "B"
-        assert document_name({}) == ""
+    def test_the_name_answers_empty_when_there_is_none(self):
+        assert document_name(doc(name="A")) == "A"
+        assert document_name(doc(name="")) == ""
 
     def test_the_name_is_stripped(self):
-        assert document_name({"VissibleName": "  Notes  "}) == "Notes"
+        assert document_name(doc(name="  Notes  ")) == "Notes"
+
+    def test_a_folder_is_not_a_document(self):
+        assert is_document(doc()) is True
+        assert is_document(folder()) is False
+
+    def test_an_unknown_type_is_not_a_document_either(self):
+        """Asked positively: a third type is not a document by default."""
+        assert is_document(doc(doc_type="TemplateType")) is False
 
     def test_the_content_hash_wins_over_the_counter(self):
-        assert document_version({"hash": "abc", "Version": 3}) == "abc"
+        item = doc(content_hash="abc")
+        item.version = 3
+
+        assert document_version(item) == "abc"
 
     def test_the_counter_answers_when_there_is_no_hash(self):
-        assert document_version({"Version": 3}) == "3"
+        item = doc()
+        item.version = 3
+
+        assert document_version(item) == "3"
 
     def test_a_document_with_neither_still_answers(self):
-        assert document_version({}) == "1"
+        assert document_version(doc()) == "1"

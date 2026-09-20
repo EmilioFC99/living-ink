@@ -37,12 +37,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from living_ink.core.listing import (
+    document_id,
     document_name,
     document_path,
     document_version,
     get_document_type,
     get_notebook_path,
-    get_val,
+    is_document,
     is_trashed,
     matches_notebook_target,
 )
@@ -277,14 +278,14 @@ def select(
     Returns:
         The selection, with every excluded document accounted for.
     """
-    id_map = {get_val(item, "ID"): item for item in listing}
+    id_map = {document_id(item): item for item in listing}
     recipes = _RecipeCache(destinations, settings)
 
     candidates: List[Candidate] = []
     skipped: List[Tuple[Any, str]] = []
 
     for item in listing:
-        if get_val(item, "Type") != "DocumentType" or not document_name(item):
+        if not is_document(item) or not document_name(item):
             # A folder is not a document that was skipped; it is not a
             # document. Reporting it would bury the real skips.
             continue
@@ -416,7 +417,7 @@ def _classify(
         The candidate, whose ``pending`` is empty when nothing owes it a
         publish.
     """
-    doc_id = get_val(item, "ID")
+    doc_id = document_id(item)
     version = document_version(item)
     source = get_document_type(item, client)
 

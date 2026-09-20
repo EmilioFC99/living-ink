@@ -678,7 +678,6 @@ def cli(monkeypatch, capsys, tmp_path):
             self,
             *,
             config_path=None,
-            data_dir=None,
             destinations=None,
             trigger="manual",
             scheduled_fire_time=None,
@@ -686,7 +685,7 @@ def cli(monkeypatch, capsys, tmp_path):
         ):
             """Record the instruction without acting on it.
 
-            The five the front end supplies itself are named so that the rest
+            The four the front end supplies itself are named so that the rest
             can be collected: what a test asserts on is the instruction the
             flags encode, not where the config happened to live or who asked.
             Who asked is recorded separately — it is the scheduler's whole
@@ -1278,7 +1277,6 @@ class TestNarrowingOneRunByPath:
 
         pipe = SyncPipeline(
             **intent(["sync", "--source-regex", r"^Journal/diary-\d+"]),
-            data_dir=tmp_path,
             destinations=[],
         )
         assert pipe._criteria().source_regex == r"^Journal/diary-\d+"
@@ -1295,13 +1293,13 @@ class TestForcingARepublish:
     def test_it_reaches_the_criteria(self, tmp_path):
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(**intent(["sync", "--force"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync", "--force"]), destinations=[])
         assert pipe._criteria().force is True
 
     def test_an_ordinary_run_does_not_force(self, tmp_path):
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(**intent(["sync"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync"]), destinations=[])
         assert pipe._criteria().force is False
 
     def test_naming_a_notebook_still_forces_without_the_flag(self, tmp_path):
@@ -1313,9 +1311,7 @@ class TestForcingARepublish:
         """
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(
-            **intent(["sync", "--notebook", "Standup"]), data_dir=tmp_path, destinations=[]
-        )
+        pipe = SyncPipeline(**intent(["sync", "--notebook", "Standup"]), destinations=[])
         assert pipe._criteria().force is True
 
 
@@ -1359,7 +1355,7 @@ class TestForcingBothTransports:
         """One flag, one transport, read back from the resolved settings."""
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(**intent(["sync", "--ssh"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync", "--ssh"]), destinations=[])
         assert pipe.settings.preferred_connection == "ssh"
         assert pipe.settings.use_ssh is True
 
@@ -1367,7 +1363,7 @@ class TestForcingBothTransports:
         """And the other one, so the exclusion did not disable a flag."""
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(**intent(["sync", "--cloud"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync", "--cloud"]), destinations=[])
         assert pipe.settings.preferred_connection == "cloud"
         assert pipe.settings.use_ssh is False
 

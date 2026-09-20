@@ -99,9 +99,6 @@ def test_sync_command_forwards_keep_temp():
         folder=None,
         ssh=False,
         cloud=False,
-        sync_pdfs=False,
-        sync_epubs=False,
-        all_types=False,
     )
     with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None) as mock_init:
         with patch("living_ink.pipeline.SyncPipeline.run", return_value=True) as mock_run:

@@ -23,10 +23,11 @@ variable and default comes from :data:`living_ink.config.schema.LIVE_SETTINGS`, 
 came to be blind to two settings that shape every run; the parity test in
 ``tests/test_settings.py`` is what keeps the two from drifting again.
 
-Environment variables stay meaningful for third-party SDKs that read them
-directly (``OPENAI_API_KEY``); those are still exported by
-:func:`living_ink.pipeline.load_yaml_config`. What no longer happens is Living
-Ink talking to *itself* through the environment.
+Nothing here is exported back to the environment. Living Ink never talks to
+*itself* through ``os.environ``, and it no longer copies a legacy
+``openai.api_key`` into ``OPENAI_API_KEY`` on a third-party SDK's behalf —
+every provider is handed its key explicitly, so the export only widened who
+could read the credential.
 """
 
 import os

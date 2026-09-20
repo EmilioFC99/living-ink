@@ -178,7 +178,6 @@ def e2e(tmp_path, corpus_root, monkeypatch):
             destination = ObsidianDestination(vault_path=str(vault))
             pipe = SyncPipeline(
                 **options,
-                data_dir=data_dir,
                 destinations=[destination],
             )
             pipe.connect = lambda: transport

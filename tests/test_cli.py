@@ -542,9 +542,6 @@ def test_cmd_sync_the_rehearsal_reaches_the_pipeline(tmp_path):
         folder=None,
         ssh=False,
         cloud=False,
-        sync_pdfs=False,
-        sync_epubs=False,
-        all_types=False,
         keep_temp=False,
         preview=True,
         transcribe=True,
@@ -563,9 +560,6 @@ def test_cmd_sync_prune_flag_reaches_the_pipeline(tmp_path):
         folder=None,
         ssh=False,
         cloud=False,
-        sync_pdfs=False,
-        sync_epubs=False,
-        all_types=False,
         keep_temp=False,
         dry_run=False,
         prune=True,
@@ -580,9 +574,6 @@ def test_cmd_sync_does_not_prune_by_default(tmp_path):
         folder=None,
         ssh=False,
         cloud=False,
-        sync_pdfs=False,
-        sync_epubs=False,
-        all_types=False,
         keep_temp=False,
         dry_run=False,
     )
@@ -1403,7 +1394,6 @@ class TestInfoReportsTheStores:
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         opened = pipeline.get_state_store()
@@ -1554,7 +1544,6 @@ class TestInfoWatchPanel:
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield pipeline.get_state_store()
@@ -2090,7 +2079,7 @@ class TestThePreviewNarrowsExactlyLikeTheRun:
         from living_ink.pipeline import SyncPipeline
 
         args = LivingInkCLI().build_parser().parse_args(argv)
-        pipe = SyncPipeline(**sync_arguments(args), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**sync_arguments(args), destinations=[])
         return pipe._criteria()
 
     @pytest.mark.parametrize(
