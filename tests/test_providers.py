@@ -449,6 +449,127 @@ class TestUniversalChatProviderChat:
 
 
 # =========================================================================
+# Why an empty reply was empty
+# =========================================================================
+
+
+class TestTheReasonForAnEmptyReply:
+    """Every way of returning nothing also records why.
+
+    A failed request and a model with nothing to say are the same empty string
+    to a caller, and the sync wants it that way — one page degrades rather
+    than the run aborting. Verification is the caller that has to explain
+    itself, so the cause is kept on the provider instead of only in a log.
+    """
+
+    def _responds(self, mock_urlopen, body: dict):
+        """Point the patched urlopen at one JSON body.
+
+        Args:
+            mock_urlopen: The patched ``urlopen``.
+            body: The decoded response to serve.
+        """
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(body).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+    def test_a_fresh_provider_has_no_failure_to_report(self):
+        """Nothing has failed yet, so there is nothing to say."""
+        assert UniversalChatProvider(base_url="https://api.test.com/v1").last_failure is None
+        assert NoneProvider().last_failure is None
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_a_rejected_key_is_reported_as_the_status_it_returned(self, mock_urlopen):
+        """The 401 the user needs to see survives the empty string."""
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="https://x.com",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=MagicMock(read=MagicMock(return_value=b"bad key")),
+        )
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1", api_key="bad-key")
+        assert p._chat("test") == ""
+        assert p.last_failure == "HTTP 401 Unauthorized"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_an_unreachable_endpoint_does_not_read_as_a_bad_key(self, mock_urlopen):
+        """A refused connection says so, so nobody re-types a working key."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+
+        p = UniversalChatProvider(base_url="http://localhost:9999/v1")
+        assert p._chat("test") == ""
+        assert "could not be reached" in p.last_failure
+        assert "Connection refused" in p.last_failure
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_an_unclassifiable_error_is_reported_by_type_and_message(self, mock_urlopen):
+        """The catch-all branch still has something to say."""
+        mock_urlopen.side_effect = RuntimeError("Something broke")
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
+        assert p.last_failure == "RuntimeError: Something broke"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_a_response_with_no_completion_is_distinguishable(self, mock_urlopen):
+        """A well-formed reply carrying no choices is not a transport failure."""
+        self._responds(mock_urlopen, {"choices": []})
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
+        assert p.last_failure == "the response carried no completion"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_a_filtered_completion_names_the_filter(self, mock_urlopen):
+        """A safety filter is the one empty reply that is working as designed."""
+        self._responds(
+            mock_urlopen,
+            {"choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}]},
+        )
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
+        assert "content filter" in p.last_failure
+        assert "content_filter" in p.last_failure
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_an_empty_reply_that_is_merely_empty_says_so(self, mock_urlopen):
+        """No filter, no error — the model simply answered with nothing."""
+        self._responds(mock_urlopen, {"choices": [{"message": {"role": "assistant"}}]})
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        assert p._chat("test") == ""
+        assert p.last_failure == "the reply was empty"
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_a_success_clears_the_previous_failure(self, mock_urlopen):
+        """A stale reason is worse than none: it accuses a working provider."""
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        p = UniversalChatProvider(base_url="https://api.test.com/v1")
+        p._chat("test")
+        assert p.last_failure is not None
+
+        mock_urlopen.side_effect = None
+        self._responds(mock_urlopen, {"choices": [{"message": {"content": "ok"}}]})
+        assert p._chat("test") == "ok"
+        assert p.last_failure is None
+
+    @patch("living_ink.providers.urllib.request.urlopen")
+    def test_the_reason_is_redacted(self, mock_urlopen):
+        """This line is printed, and a base URL may carry its key in a query."""
+        key = "sk-not-a-real-key-000000"
+        mock_urlopen.side_effect = RuntimeError(f"refused https://api.test.com/v1?key={key}")
+
+        p = UniversalChatProvider(base_url="https://api.test.com/v1", api_key=key)
+        assert p._chat("test") == ""
+        assert key not in p.last_failure
+
+
+# =========================================================================
 # UniversalChatProvider — vision OCR capabilities
 # =========================================================================
 

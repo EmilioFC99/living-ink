@@ -324,6 +324,14 @@ def verify_ai_provider(
 
         if response and response.strip():
             return True, f"Verified {provider.name} — connection successful!"
+        # The provider reports a failed request by returning nothing, so the
+        # cause is on the provider rather than in the reply. Say it: a rejected
+        # key and an unreachable host both look like silence from here, and
+        # only one of them is fixed by checking the key.
+        if provider.last_failure:
+            return False, (
+                f"Provider {provider.name} could not read a page image — {provider.last_failure}."
+            )
         return False, (
             f"Provider {provider.name} returned nothing for a page image. Check the "
             "API key, and that the model can read images."

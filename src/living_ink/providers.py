@@ -159,6 +159,16 @@ class TextRepairProvider(abc.ABC):
     :meth:`from_config` and is decorated with :func:`register_provider`.
     """
 
+    #: Why the last request came back empty, in one line, or ``None`` if the
+    #: last one succeeded. Every path here reports a failure by returning an
+    #: empty string — a sync degrades one page rather than aborting the run
+    #: over one unreachable API — which leaves the *cause* in a log nobody is
+    #: reading. Verification is the one caller that has to put a cause on
+    #: screen, and "returned nothing" sends a user to check a key that was
+    #: never the problem. Written from the OCR threads and read only by the
+    #: single-request verification path, so concurrent writes have no reader.
+    last_failure: Optional[str] = None
+
     @classmethod
     def from_config(cls, settings: "Settings") -> "TextRepairProvider":
         """Build this provider from the resolved settings.
@@ -405,12 +415,14 @@ class UniversalChatProvider(TextRepairProvider):
             value = f"{self.auth_prefix} {self.api_key}" if self.auth_prefix else self.api_key
             req.add_header(self.auth_header, value)
 
+        self.last_failure = None
         body = self._send_with_retries(req, purpose)
         if body is None:
             return ""
 
         choices: list = body.get("choices", [])
         if not choices:
+            self.last_failure = "the response carried no completion"
             return ""
 
         choice = choices[0]
@@ -426,6 +438,9 @@ class UniversalChatProvider(TextRepairProvider):
                     self.name,
                     finish_reason,
                 )
+                self.last_failure = f"a content filter blocked the reply ({finish_reason})"
+            else:
+                self.last_failure = "the reply was empty"
             return ""
 
         return content.strip()
@@ -454,6 +469,7 @@ class UniversalChatProvider(TextRepairProvider):
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 logger.error("%s HTTP Error (%s): %s %s", purpose, self.name, e.code, e.reason)
+                self.last_failure = redact(f"HTTP {e.code} {e.reason}")
                 try:
                     # Several providers echo the failing request back in the
                     # body of a 400, headers included, so this is the most
@@ -467,12 +483,17 @@ class UniversalChatProvider(TextRepairProvider):
                 retryable = e.code in RETRYABLE_STATUS
             except urllib.error.URLError as e:
                 logger.error("%s Connection Error (%s): %s", purpose, self.name, e.reason)
+                self.last_failure = redact(f"the endpoint could not be reached ({e.reason})")
                 retryable = True
             except Exception as e:
                 # Broad because this is the outer edge of a network call into
                 # nine different providers; retrying an error we cannot
                 # classify would be guessing, so it is reported and dropped.
                 logger.error("%s Unexpected Error (%s): %s", purpose, self.name, e, exc_info=True)
+                # Redacted like every other reason here: a custom base URL is
+                # free to carry its key as a query parameter, and this line is
+                # printed rather than logged.
+                self.last_failure = redact(f"{type(e).__name__}: {e}")
                 retryable = False
 
             if not retryable or attempt == MAX_ATTEMPTS:

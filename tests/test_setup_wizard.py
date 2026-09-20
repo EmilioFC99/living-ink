@@ -230,11 +230,31 @@ class TestAiVerification:
         mock_p = MagicMock()
         mock_p.name = "gemini"
         mock_p.probe_vision.return_value = ""
+        mock_p.last_failure = None
         mock_get_provider.return_value = mock_p
 
         ok, msg = verify_ai_provider("gemini", api_key="bad-key")
         assert ok is False
         assert "read images" in msg.lower()
+
+    @patch("living_ink.providers.get_provider")
+    def test_the_reason_the_probe_came_back_empty_is_reported(self, mock_get_provider):
+        """Telling the user to check the API key is bad advice on a timeout.
+
+        The provider reports a failed request by returning nothing, so a
+        rejected key, an unreachable host and a content filter all arrive here
+        as the same empty string. Only the provider knows which it was.
+        """
+        mock_p = MagicMock()
+        mock_p.name = "gemini"
+        mock_p.probe_vision.return_value = ""
+        mock_p.last_failure = "HTTP 401 Unauthorized"
+        mock_get_provider.return_value = mock_p
+
+        ok, msg = verify_ai_provider("gemini", api_key="bad-key")
+
+        assert ok is False
+        assert "HTTP 401 Unauthorized" in msg
 
     @patch("living_ink.providers.get_provider")
     def test_the_probe_is_the_call_a_sync_makes(self, mock_get_provider):
