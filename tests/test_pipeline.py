@@ -2112,10 +2112,11 @@ class TestOrphanedNotebooks:
     def _pipeline(self, dest, prune=False, dry_run=False):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.dry_run = dry_run
-        pipe.prune = prune
         pipe.destinations = [dest]
         pipe.report = None
-        pipe.settings = None
+        # ``prune`` is a view onto the resolved settings, not an attribute, so
+        # a bare pipeline is given the settings that say it.
+        pipe.settings = Settings.resolve({}, flags={"prune": prune or None})
         return pipe
 
     def test_a_missing_notebook_is_reported(self, capsys):
@@ -2701,7 +2702,7 @@ class TestProgressIsRecordedPerNotebook:
         pipe._counts = (0, 0, 0)
         pipe.dry_run = False
         pipe.keep_temp = True
-        pipe.json_output = False
+        pipe.settings = Settings.resolve({})
         pipe.target_notebook = None
         seen_counts = []
 
@@ -2829,6 +2830,7 @@ class TestRunSummary:
     def _pipeline(self):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.report = RunReport()
+        pipe.settings = Settings.resolve({})
         pipe.target_notebook = None
         return pipe
 
@@ -2906,7 +2908,6 @@ class TestRunSummary:
 
     def test_the_summary_is_printed_at_the_end(self, capsys):
         pipe = self._pipeline()
-        pipe.json_output = False
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
 
         pipe._print_summary()
@@ -2915,7 +2916,7 @@ class TestRunSummary:
 
     def test_json_output_is_machine_readable(self, capsys):
         pipe = self._pipeline()
-        pipe.json_output = True
+        pipe.settings = Settings.resolve({}, flags={"output_json": True})
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
 
         pipe._print_summary()
@@ -2987,7 +2988,7 @@ class TestJsonSummaryReachesStdout:
     def _pipeline(self, json_output):
         pipe = SyncPipeline.__new__(SyncPipeline)
         pipe.report = RunReport()
-        pipe.json_output = json_output
+        pipe.settings = Settings.resolve({}, flags={"output_json": json_output or None})
         pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED, reason="unchanged"))
         return pipe
 

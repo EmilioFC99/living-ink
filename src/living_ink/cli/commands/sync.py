@@ -16,6 +16,7 @@ from typing import Any
 # silently, with the test still passing against the real thing.
 from living_ink.cli import inventory as inventory_api
 from living_ink.cli.base import BaseCommand
+from living_ink.cli.flags import flag_values, register_settings_flags
 from living_ink.config import ConfigurationMissing, get_config_path
 from living_ink.transport import TransportUnavailable
 
@@ -29,12 +30,14 @@ def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
     touching the parser and this function — never the pipeline internals. It
     lives in the front end rather than on the pipeline because ``dest=`` names
     are an argparse fact: a library caller constructs the pipeline directly and
-    should not have to know that ``--json`` arrives as ``args.json``.
+    should not have to know that ``--json`` arrives as ``args.output_json``.
 
     Note:
-        ``--pdf`` / ``--epub`` are store-true flags, so an unset flag maps to
-        None ("defer to config") rather than to False ("explicitly disable"),
-        which would silently override the config file.
+        Everything the settings schema declares travels in one ``flags``
+        mapping rather than as a keyword each, so registering a new flag never
+        means widening the pipeline's signature. What is left as a named
+        keyword is the handful of choices that shape one run and have no
+        persisted form to be resolved against.
 
     Args:
         args: Namespace produced by the sync subparser. Read with ``getattr``
@@ -46,16 +49,10 @@ def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
     """
     return {
         "notebook": getattr(args, "notebook", None),
-        "limit": getattr(args, "limit", None),
-        "ssh": getattr(args, "ssh", False),
-        "cloud": getattr(args, "cloud", False),
-        "sync_pdfs": getattr(args, "sync_pdfs", False) or None,
-        "sync_epubs": getattr(args, "sync_epubs", False) or None,
         "all_types": getattr(args, "all_types", False),
         "keep_temp": getattr(args, "keep_temp", False),
         "dry_run": getattr(args, "dry_run", False),
-        "prune": getattr(args, "prune", False),
-        "json_output": getattr(args, "json", False),
+        "flags": flag_values(args, SyncCommand.name),
     }
 
 
@@ -81,27 +78,14 @@ class SyncCommand(BaseCommand):
         Args:
             parser: Subparser to attach arguments to.
         """
+        # Everything the schema declares a flag for, registered from the
+        # declaration. Only the switches below are hand-written, because they
+        # shape one run and have no persisted form to declare.
+        register_settings_flags(parser, cls.name)
         parser.add_argument(
             "--notebook",
+            default=None,
             help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
-        )
-        parser.add_argument("--limit", type=int, default=0, help="Max notebooks to process")
-        # A transport is a choice, not a preference order: asking for both
-        # says nothing about which one was meant, so argparse rejects the
-        # pair rather than silently picking SSH and syncing from a source
-        # the user may not have intended.
-        transport = parser.add_mutually_exclusive_group()
-        transport.add_argument(
-            "--ssh", action="store_true", help="Force sync via USB SSH instead of Cloud"
-        )
-        transport.add_argument(
-            "--cloud", action="store_true", help="Force sync via reMarkable Cloud instead of SSH"
-        )
-        parser.add_argument(
-            "--sync-pdfs", action="store_true", help="Sync PDF documents and annotations"
-        )
-        parser.add_argument(
-            "--sync-epubs", action="store_true", help="Sync EPUB ebooks and annotations"
         )
         parser.add_argument(
             "--all-types",
@@ -119,11 +103,6 @@ class SyncCommand(BaseCommand):
             help="Transcribe as usual but publish nothing; prints where each transcript was written",
         )
         parser.add_argument(
-            "--prune",
-            action="store_true",
-            help="Delete notes whose notebook is gone from the tablet (reported, not deleted, by default)",
-        )
-        parser.add_argument(
             "--status",
             action="store_true",
             help="Show what a sync would do — compare the tablet against your notes — and exit",
@@ -132,11 +111,6 @@ class SyncCommand(BaseCommand):
             "--all",
             action="store_true",
             help="With --status, list every document instead of the first ten",
-        )
-        parser.add_argument(
-            "--json",
-            action="store_true",
-            help="Print the run summary as JSON instead of a table",
         )
 
     def run(self, args: argparse.Namespace) -> int:
@@ -211,7 +185,7 @@ class SyncCommand(BaseCommand):
         """
         rows, orphans, device = inventory_api.compare_with_device(args, root=self.root)
 
-        if getattr(args, "json", False):
+        if getattr(args, "output_json", False):
             payload = inventory_api.inventory_as_json(rows)
             payload["orphans"] = [row["id"] for row in orphans]
             payload["device"] = device.describe() if device else None

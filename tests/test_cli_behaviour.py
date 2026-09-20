@@ -63,48 +63,55 @@ from typing import Any
 import pytest
 
 from living_ink.cli import LivingInkCLI, sync_arguments
+from living_ink.cli.flags import flaggable
+from living_ink.config.schema import CHOICE, FLAG, LIST, NUMBER, WHOLE, Setting
 
 # ---------------------------------------------------------------------------
 # Table 1 — what each sync flag means
 # ---------------------------------------------------------------------------
 
-#: Every boolean flag on ``sync``, and the single pipeline argument it is
-#: allowed to change. One flag, one argument: the exhaustive pass below turns
-#: that into a property — the arguments for any set of flags must be exactly
-#: the union of their individual effects, with no interaction between them.
+#: Every boolean flag on ``sync``, and the single thing it is allowed to
+#: change, written as a dotted path into the pipeline's keyword arguments. One
+#: flag, one effect: the exhaustive pass below turns that into a property — the
+#: arguments for any set of flags must be exactly the union of their individual
+#: effects, with no interaction between them.
+#:
+#: A path with a dot lands inside ``flags``, the mapping every schema-declared
+#: setting travels in, and a path without one is a named keyword. Which side a
+#: flag falls on is itself part of the contract: ``--prune`` names a setting a
+#: config file can also set, ``--dry-run`` shapes one run and has no persisted
+#: form, and a flag moving between the two changes whether the config file can
+#: override it.
 SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
-    "--ssh": ("ssh", True),
-    "--cloud": ("cloud", True),
-    "--sync-pdfs": ("sync_pdfs", True),
-    "--sync-epubs": ("sync_epubs", True),
+    "--ssh": ("flags.preferred_connection", "ssh"),
+    "--cloud": ("flags.preferred_connection", "cloud"),
+    "--pdf": ("flags.sync_pdfs", True),
+    "--epub": ("flags.sync_epubs", True),
     "--all-types": ("all_types", True),
     "--keep-temp": ("keep_temp", True),
     "--dry-run": ("dry_run", True),
-    "--prune": ("prune", True),
-    "--json": ("json_output", True),
+    "--prune": ("flags.prune", True),
+    "--json": ("flags.output_json", True),
 }
 
 #: What ``living-ink sync`` with no flags at all resolves to.
 #:
-#: ``limit`` is 0 rather than None because the parser declares ``default=0``,
-#: and the pipeline reads 0 as "no override, use the configured maximum". The
-#: distinction matters: a real 0 here would mean "process no notebooks".
+#: ``flags`` is empty, and that emptiness is the whole point of generating the
+#: parser from the schema: every generated flag defaults to None and
+#: :func:`~living_ink.cli.flags.flag_values` drops a None, so a setting the user
+#: did not mention never reaches :meth:`Settings.resolve` and therefore cannot
+#: overrule the config file or the environment. A ``"prune": False`` in here
+#: would mean "the user explicitly said no", which is a different instruction.
+#:
 #: Spelled out rather than derived from the function under test, because a
 #: mapping built by calling ``sync_arguments([])`` would agree with it by
 #: construction and prove nothing.
 BARE_SYNC: dict[str, Any] = {
     "notebook": None,
-    "limit": 0,
-    "ssh": False,
-    "cloud": False,
-    # None, not False: an unset store-true flag means "defer to config".
-    "sync_pdfs": None,
-    "sync_epubs": None,
     "all_types": False,
     "keep_temp": False,
     "dry_run": False,
-    "prune": False,
-    "json_output": False,
+    "flags": {},
 }
 
 #: Boolean flags that ``sync`` accepts but that never reach the pipeline.
@@ -112,10 +119,62 @@ BARE_SYNC: dict[str, Any] = {
 #: ``--status`` selects a different code path entirely and ``--all`` only
 #: qualifies it, so both are tested by
 #: :class:`TestStatusIsADifferentCommandInDisguise` instead. ``--verbose`` and
-#: ``--quiet`` are not sync flags at all — ``add_verbosity_args`` puts them on
-#: every parser — and they are covered by
+#: ``--quiet`` are not sync flags at all — they are generated onto every parser
+#: from ``output.verbosity`` — and they are covered by
 #: :class:`TestVerbosityIsAcceptedOnBothSides`.
 SYNC_FLAGS_OUTSIDE_THE_OPTIONS = ("--status", "--all", "--verbose", "-q", "--quiet")
+
+#: One representative command-line value per setting kind, and what parsing it
+#: must yield. Written out rather than taken from the generator's own ``_READERS``
+#: table, so that a type reader silently changing — ``--limit`` starting to
+#: arrive as the string ``"7"`` — fails here instead of agreeing by construction.
+SAMPLE_VALUES: dict[str, tuple[str, Any]] = {
+    WHOLE: ("7", 7),
+    NUMBER: ("0.25", 0.25),
+    LIST: ("one,two", ("one", "two")),
+}
+
+#: What a setting with no entry in :data:`SAMPLE_VALUES` is given: text and path
+#: settings both carry the word through untouched.
+DEFAULT_SAMPLE: tuple[str, Any] = ("sample", "sample")
+
+
+def spellings_of(setting: Setting) -> list[tuple[list[str], Any]]:
+    """Return every way one setting can be given on the command line.
+
+    Args:
+        setting: A schema entry that :func:`flaggable` returned.
+
+    Returns:
+        ``(words, value)`` pairs — the argv fragment to type, and the value the
+        setting must end up holding. A switch with a negated form yields two
+        pairs, and a choice with per-value flags yields one pair per flag.
+    """
+    if setting.kind == FLAG:
+        pairs: list[tuple[list[str], Any]] = []
+        if setting.flag:
+            pairs.append(([setting.flag], True))
+        if setting.negated:
+            pairs.append(([setting.negated], False))
+        return pairs
+    if setting.kind == CHOICE:
+        dedicated = [choice for choice in setting.choices if choice.flag]
+        if dedicated:
+            return [([choice.flag], choice.value) for choice in dedicated]
+        first = setting.choices[0].value
+        return [([setting.flag, first], first)]
+    raw, parsed = SAMPLE_VALUES.get(setting.kind, DEFAULT_SAMPLE)
+    return [([setting.flag, raw], parsed)]
+
+
+#: Every option string ``sync`` gets from the settings schema rather than by
+#: hand, in all its spellings.
+GENERATED_SYNC_FLAGS: set[str] = {
+    spelling
+    for setting in flaggable("sync")
+    for spelling in [setting.flag, setting.negated, *(c.flag for c in setting.choices)]
+    if spelling
+}
 
 #: Sets of sync flags the parser refuses to see together.
 #:
@@ -157,6 +216,19 @@ def intent(argv: list[str]) -> dict[str, Any]:
     return sync_arguments(args)
 
 
+def with_flags(**settings: Any) -> dict[str, Any]:
+    """Return the bare sync arguments carrying some settings overrides.
+
+    Args:
+        **settings: Entries for the ``flags`` mapping, keyed by
+            :class:`~living_ink.settings.Settings` field name.
+
+    Returns:
+        :data:`BARE_SYNC` with ``flags`` replaced, leaving the original intact.
+    """
+    return {**BARE_SYNC, "flags": {**BARE_SYNC["flags"], **settings}}
+
+
 def expected_for(flags: tuple[str, ...]) -> dict[str, Any]:
     """Predict the pipeline arguments for a set of boolean flags.
 
@@ -165,8 +237,18 @@ def expected_for(flags: tuple[str, ...]) -> dict[str, Any]:
 
     Returns:
         :data:`BARE_SYNC` with one entry changed per flag, and nothing else.
+        A flag whose declared path is dotted changes an entry inside ``flags``;
+        the rest change a top-level keyword.
     """
-    return {**BARE_SYNC, **{SYNC_BOOLEAN_FLAGS[f][0]: SYNC_BOOLEAN_FLAGS[f][1] for f in flags}}
+    expected = with_flags()
+    for flag in flags:
+        path, value = SYNC_BOOLEAN_FLAGS[flag]
+        head, dot, leaf = path.partition(".")
+        if dot:
+            expected[head][leaf] = value
+        else:
+            expected[head] = value
+    return expected
 
 
 # ---------------------------------------------------------------------------
@@ -180,52 +262,68 @@ def expected_for(flags: tuple[str, ...]) -> dict[str, Any]:
 #: still be green while no longer being a matrix. Adding a flag must break this
 #: table, which forces whoever adds it to say what it does.
 #:
-#: ``--verbose`` / ``-q`` are on every parser because ``add_verbosity_args`` is
-#: applied to the top level and to each subparser, so that both
-#: ``living-ink --verbose sync`` and ``living-ink sync --verbose`` work.
+#: ``--verbose`` / ``-q`` are on every parser because ``output.verbosity`` is a
+#: program-wide setting, registered at the top level and on each subparser, so
+#: that both ``living-ink --verbose sync`` and ``living-ink sync --verbose``
+#: work.
+#:
+#: Most of ``sync``'s list is generated from the settings schema rather than
+#: hand-registered, which makes this table more valuable, not less: the schema
+#: declares what a setting is *called*, and this says what the program
+#: *accepts*. Adding a ``flag=`` to a setting now changes the command line, and
+#: it has to break something visible when it does.
+SYNC_SURFACE: set[str] = {
+    "-h",
+    "--help",
+    "--verbose",
+    "-q",
+    "--quiet",
+    # Hand-registered: one run's shape, with no persisted form.
+    "--notebook",
+    "--all-types",
+    "--keep-temp",
+    "--dry-run",
+    "--status",
+    "--all",
+    # Generated from the settings schema, in schema order.
+    "--ssh",
+    "--cloud",
+    "--ssh-host",
+    "--ssh-user",
+    "--ssh-port",
+    "--ai-provider",
+    "--ai-model",
+    "--ai-base-url",
+    "--ai-temperature",
+    "--ai-language",
+    "--ai-prompt-dir",
+    "--ocr-concurrency",
+    "--pdf",
+    "--epub",
+    "--tag",
+    "--exclude",
+    "--skip-empty",
+    "--limit",
+    "--prune",
+    "--destination",
+    "--destination-folder",
+    "--mirror-folders",
+    "--no-mirror-folders",
+    "--attachments-folder",
+    "--embed-images",
+    "--no-embed-images",
+    "--no-transcript-cache",
+    "--no-render-cache",
+    "--data-dir",
+    "--json",
+}
+
 COMMAND_SURFACE: dict[str, set[str]] = {
     "": {"-h", "--help", "-v", "--version", "-c", "--config", "--verbose", "-q", "--quiet"},
-    "sync": {
-        "-h",
-        "--help",
-        "--verbose",
-        "-q",
-        "--quiet",
-        "--notebook",
-        "--limit",
-        "--ssh",
-        "--cloud",
-        "--sync-pdfs",
-        "--sync-epubs",
-        "--all-types",
-        "--keep-temp",
-        "--dry-run",
-        "--prune",
-        "--status",
-        "--all",
-        "--json",
-    },
-    "watch": {
-        "-h",
-        "--help",
-        "--verbose",
-        "-q",
-        "--quiet",
-        "--notebook",
-        "--limit",
-        "--ssh",
-        "--cloud",
-        "--sync-pdfs",
-        "--sync-epubs",
-        "--all-types",
-        "--keep-temp",
-        "--dry-run",
-        "--prune",
-        "--status",
-        "--all",
-        "--json",
-        "--interval",
-    },
+    "sync": SYNC_SURFACE,
+    # Watch delegates ``register_args`` to sync, so the two lists can only ever
+    # differ by watch's own flag — which is the point of spelling it this way.
+    "watch": SYNC_SURFACE | {"--interval"},
     "setup": {"-h", "--help", "--verbose", "-q", "--quiet"},
     "status": {"-h", "--help", "--verbose", "-q", "--quiet", "--json"},
     "state": {
@@ -333,19 +431,19 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     Combination(("sync", "--cloud"), True, "and so is the other"),
     Combination(("sync", "--ssh", "--dry-run"), True, "the exclusion is to --cloud alone"),
     Combination(("sync", "--dry-run", "--prune"), True, "a preview of what pruning would remove"),
-    Combination(("sync", "--all-types", "--sync-pdfs"), True, "--all-types simply subsumes it"),
+    Combination(("sync", "--all-types", "--pdf"), True, "--all-types simply subsumes it"),
     Combination(("sync", "--status", "--all"), True, "--all qualifies --status"),
     Combination(("sync", "--status", "--json"), True, "the comparison has a JSON form"),
     Combination(("sync", "--all"), True, "accepted, but inert without --status"),
     Combination(("sync", "--dry-run", "--json"), True, "a machine-readable preview"),
-    Combination(("sync", "--limit", "0"), True, "0 means 'use the configured maximum'"),
+    Combination(("sync", "--limit", "0"), True, "0 is a real limit, and the parser takes it"),
     Combination(("sync", "--limit", "-1"), True, "negative is accepted; the pipeline ignores it"),
     # sync — malformed input.
     Combination(("sync", "--limit", "many"), False, "--limit is typed int"),
     Combination(("sync", "--notebook"), False, "--notebook needs a value"),
     Combination(("sync", "--nonsense"), False, "unknown flags are a usage error"),
     Combination(("sync", "--dry"), True, "argparse accepts unambiguous abbreviations"),
-    Combination(("sync", "--s"), False, "--ssh, --sync-pdfs, --sync-epubs, --status all match"),
+    Combination(("sync", "--s"), False, "--ssh, --ssh-host, --skip-empty, --status all match"),
     # watch — every sync flag, plus its own.
     Combination(("watch", "--interval", "600"), True, "the documented usage"),
     Combination(("watch", "--notebook", "Foo", "--dry-run"), True, "watch takes every sync option"),
@@ -715,19 +813,19 @@ class TestSyncFlagsMapExactly:
                 {**BARE_SYNC, "notebook": "abc-123"},
                 id="notebook-id",
             ),
-            pytest.param(["sync", "--limit", "5"], {**BARE_SYNC, "limit": 5}, id="limit"),
-            pytest.param(["sync", "--limit", "0"], {**BARE_SYNC, "limit": 0}, id="limit-zero"),
+            pytest.param(["sync", "--limit", "5"], with_flags(max_notebooks_per_run=5), id="limit"),
+            pytest.param(
+                ["sync", "--limit", "0"], with_flags(max_notebooks_per_run=0), id="limit-zero"
+            ),
             pytest.param(["sync", "--dry-run"], {**BARE_SYNC, "dry_run": True}, id="dry-run"),
-            pytest.param(["sync", "--prune"], {**BARE_SYNC, "prune": True}, id="prune"),
-            pytest.param(["sync", "--ssh"], {**BARE_SYNC, "ssh": True}, id="ssh"),
-            pytest.param(["sync", "--cloud"], {**BARE_SYNC, "cloud": True}, id="cloud"),
-            pytest.param(["sync", "--json"], {**BARE_SYNC, "json_output": True}, id="json"),
+            pytest.param(["sync", "--prune"], with_flags(prune=True), id="prune"),
+            pytest.param(["sync", "--ssh"], with_flags(preferred_connection="ssh"), id="ssh"),
+            pytest.param(["sync", "--cloud"], with_flags(preferred_connection="cloud"), id="cloud"),
+            pytest.param(["sync", "--json"], with_flags(output_json=True), id="json"),
             pytest.param(["sync", "--keep-temp"], {**BARE_SYNC, "keep_temp": True}, id="keep-temp"),
             pytest.param(["sync", "--all-types"], {**BARE_SYNC, "all_types": True}, id="all-types"),
-            pytest.param(["sync", "--sync-pdfs"], {**BARE_SYNC, "sync_pdfs": True}, id="sync-pdfs"),
-            pytest.param(
-                ["sync", "--sync-epubs"], {**BARE_SYNC, "sync_epubs": True}, id="sync-epubs"
-            ),
+            pytest.param(["sync", "--pdf"], with_flags(sync_pdfs=True), id="pdf"),
+            pytest.param(["sync", "--epub"], with_flags(sync_epubs=True), id="epub"),
             pytest.param(
                 ["sync", "--notebook", "Foo", "--dry-run", "--keep-temp"],
                 {**BARE_SYNC, "notebook": "Foo", "dry_run": True, "keep_temp": True},
@@ -735,8 +833,21 @@ class TestSyncFlagsMapExactly:
             ),
             pytest.param(
                 ["sync", "--all-types", "--limit", "2", "--json"],
-                {**BARE_SYNC, "all_types": True, "limit": 2, "json_output": True},
+                {
+                    **with_flags(max_notebooks_per_run=2, output_json=True),
+                    "all_types": True,
+                },
                 id="everything-two-of-them-as-json",
+            ),
+            pytest.param(
+                ["sync", "--tag", "work", "--tag", "ideas,urgent"],
+                with_flags(sync_tags=("work", "ideas", "urgent")),
+                id="a-repeated-list-flag-accumulates",
+            ),
+            pytest.param(
+                ["sync", "--no-embed-images"],
+                with_flags(obsidian_embed_images=False),
+                id="a-negated-switch-arrives-as-false",
             ),
         ],
     )
@@ -744,16 +855,17 @@ class TestSyncFlagsMapExactly:
         """The parsed instruction equals the expectation in every field."""
         assert intent(argv) == expected
 
-    def test_an_unset_document_type_defers_to_config(self):
-        """``--sync-pdfs`` absent means None, not False.
+    def test_an_omitted_flag_is_absent_from_the_overrides(self):
+        """A flag nobody typed leaves no trace in ``flags`` at all.
 
-        The difference is the whole reason ``sync_arguments`` maps with ``or
-        None``: False would override a config that has PDFs switched on,
-        turning an omitted flag into an instruction the user never gave.
+        This is the whole reason every generated flag defaults to None.
+        :meth:`Settings._pick` tests ``is not None`` and nothing else, so a
+        ``sync_pdfs: False`` here would not read as "unset" — it would read as
+        "the user said no" and overrule a config file that has PDFs switched
+        on, turning an omitted flag into an instruction never given.
         """
-        options = intent(["sync"])
-        assert options["sync_pdfs"] is None
-        assert options["sync_epubs"] is None
+        assert intent(["sync"])["flags"] == {}
+        assert "sync_pdfs" not in intent(["sync", "--epub"])["flags"]
 
     def test_a_namespace_missing_a_flag_reads_as_the_flag_being_unset(self):
         """A partial namespace is a missing flag, not an AttributeError.
@@ -763,19 +875,20 @@ class TestSyncFlagsMapExactly:
         declares. A flag added to the parser and forgotten here therefore
         degrades to "not given" rather than crashing the run.
         """
-        assert sync_arguments(argparse.Namespace()) == BARE_SYNC | {"limit": None}
+        assert sync_arguments(argparse.Namespace()) == BARE_SYNC
         assert sync_arguments(argparse.Namespace(dry_run=True))["dry_run"] is True
 
-    def test_no_flag_ever_names_the_connection_preference(self):
-        """``--ssh`` and ``--cloud`` travel as themselves, not as a preference.
+    def test_a_transport_flag_arrives_as_the_setting_it_sets(self):
+        """``--ssh`` travels as ``preferred_connection``, and only as that.
 
-        The pipeline is what turns the pair into ``preferred_connection`` and
-        ``use_ssh`` in the settings layer (asserted by
-        :class:`TestForcingBothTransports`). A flag arriving already translated
-        would put that decision in two places.
+        The translation lives in the schema — the flag is declared on the
+        *choice* — so there is exactly one statement anywhere that ``--ssh``
+        means SSH. It used to be made twice, once by the parser and again by
+        the pipeline, which is two places to keep in step for a fact with one
+        source.
         """
-        for flag in SYNC_BOOLEAN_FLAGS:
-            assert "preferred_connection" not in intent(["sync", flag]), flag
+        assert intent(["sync", "--ssh"])["flags"] == {"preferred_connection": "ssh"}
+        assert intent(["sync", "--cloud"])["flags"] == {"preferred_connection": "cloud"}
 
 
 class TestEveryFlagCombination:
@@ -892,7 +1005,55 @@ class TestValueFlagsTakeTheValueGiven:
         rather than an error, and moving that decision into the parser would
         change the exit code a script sees.
         """
-        assert intent(["sync", "--limit", "-1"])["limit"] == -1
+        assert intent(["sync", "--limit", "-1"])["flags"]["max_notebooks_per_run"] == -1
+
+
+class TestEveryGeneratedFlagSetsItsOwnSetting:
+    """Each schema-declared flag reaches its own setting, carrying its own value.
+
+    :data:`SYNC_BOOLEAN_FLAGS` is a hand-written table and can only ever cover
+    the flags somebody remembered to add to it. This one is driven from
+    :func:`~living_ink.cli.flags.flaggable`, so declaring a new ``flag=`` in
+    the schema puts it under test the same day — which is the only way a
+    generated parser stays worth generating.
+
+    Three things are asserted at once, and the third is the one a per-flag test
+    would miss: the flag lands on its setting, the value survives its type
+    reader, and **nothing else in the instruction moves**. A ``dest`` typo
+    would fail the first, ``--limit`` losing its ``type=int`` the second, and a
+    flag with a real default instead of None the third — that last one is the
+    subtle failure, because the override it invents looks like an ordinary
+    value all the way down to the config file it silently beats.
+    """
+
+    @pytest.mark.parametrize("setting", flaggable("sync"), ids=lambda s: s.field)
+    def test_a_flag_sets_its_setting_and_leaves_the_rest_alone(self, setting):
+        """Every spelling of one setting produces exactly one override."""
+        for words, value in spellings_of(setting):
+            parsed = intent(["sync", *words])
+            assert parsed["flags"] == {setting.field: value}, words
+            assert {k: v for k, v in parsed.items() if k != "flags"} == {
+                k: v for k, v in BARE_SYNC.items() if k != "flags"
+            }, words
+
+    def test_no_setting_declares_a_flag_it_cannot_be_given_by(self):
+        """A declared flag is a typeable flag, on the parser, right now.
+
+        Before the generator the schema declared twenty-eight flags and the
+        parser registered ten, so eighteen settings named a spelling argparse
+        rejected. The schema was documentation that disagreed with the program.
+        """
+        surface = _option_strings(_subparsers(LivingInkCLI().build_parser())["sync"])
+        assert GENERATED_SYNC_FLAGS <= surface
+
+    def test_a_credential_never_gets_a_flag(self):
+        """No secret is typeable, whatever the schema says about it.
+
+        A key on the command line is in the shell history and in the process
+        list of every user on the machine. :func:`flaggable` filters these out
+        rather than trusting each declaration, and this is what says so.
+        """
+        assert [s.field for s in flaggable("sync") if s.secret] == []
 
 
 class TestForcingBothTransports:
@@ -1054,7 +1215,8 @@ class TestTheShortcutMatchesTheRealThing:
             ["sync", "--notebook", "Work/Notes", "--limit", "2"],
             ["sync", "--all-types", "--keep-temp", "--json"],
             ["sync", "--ssh", "--prune"],
-            ["sync", "--sync-pdfs", "--sync-epubs"],
+            ["sync", "--pdf", "--epub"],
+            ["sync", "--ai-model", "gemini-2.5-flash", "--tag", "work,ideas"],
         ],
     )
     def test_the_pipeline_receives_the_predicted_arguments(self, cli, argv):
@@ -1140,13 +1302,14 @@ class TestAbbreviationsAreAccepted:
         """The shortened form resolves to the identical instruction."""
         assert intent(abbreviated) == intent(full)
 
-    @pytest.mark.parametrize("prefix", ["--s", "--sync", "--al"])
+    @pytest.mark.parametrize("prefix", ["--s", "--ssh-", "--al", "--ai"])
     def test_an_ambiguous_prefix_is_a_usage_error(self, prefix):
         """Several flags match, so argparse refuses to guess.
 
-        ``--sync`` is the interesting one: it is a prefix of both
-        ``--sync-pdfs`` and ``--sync-epubs``, so the most natural abbreviation
-        of the pair is the one that does not work.
+        ``--ai`` is the one to watch: generating the parser from the schema
+        turned one ``--ai-model`` into six ``--ai-*`` flags, so a prefix that
+        would have been unambiguous with a hand-written parser is not, and the
+        only warning a user gets is this error rather than the wrong setting.
         """
         parser = LivingInkCLI().build_parser()
         with pytest.raises(SystemExit) as exit_info:
@@ -1485,11 +1648,17 @@ class TestTheSurfaceIsPinned:
         )
 
     def test_every_sync_boolean_flag_has_a_declared_meaning(self):
-        """No boolean sync flag escapes :data:`SYNC_BOOLEAN_FLAGS`.
+        """No hand-registered boolean sync flag escapes the tables.
 
-        The exhaustive combination pass only covers flags this table names, so
-        a store_true flag missing from it would be excluded from the sweep
-        without anything saying so.
+        The exhaustive combination pass only covers flags
+        :data:`SYNC_BOOLEAN_FLAGS` names, so a store_true flag missing from it
+        would be excluded from the sweep without anything saying so.
+
+        The generated flags are subtracted because
+        :class:`TestEveryGeneratedFlagSetsItsOwnSetting` already covers all of
+        them, from the schema, with no table to fall out of date. What is left
+        is the handful somebody wrote by hand, which is exactly the set that
+        needs a human to say what it means.
         """
         parser = _subparsers(LivingInkCLI().build_parser())["sync"]
         booleans = {
@@ -1498,7 +1667,12 @@ class TestTheSurfaceIsPinned:
             if isinstance(action, argparse._StoreTrueAction)
             for opt in action.option_strings
         }
-        undeclared = booleans - set(SYNC_BOOLEAN_FLAGS) - set(SYNC_FLAGS_OUTSIDE_THE_OPTIONS)
+        undeclared = (
+            booleans
+            - set(SYNC_BOOLEAN_FLAGS)
+            - set(SYNC_FLAGS_OUTSIDE_THE_OPTIONS)
+            - GENERATED_SYNC_FLAGS
+        )
         assert not undeclared, f"add these to SYNC_BOOLEAN_FLAGS or explain them: {undeclared}"
 
     def test_watch_accepts_every_sync_flag(self):

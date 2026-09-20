@@ -94,12 +94,34 @@ def test_cmd_status_no_config(tmp_path, capsys):
 
 @patch.object(SyncCommand, "run", return_value=0)
 def test_main_sync_command_with_ssh(mock_sync):
-    """'living-ink sync --ssh' passes ssh flag to SyncCommand.run."""
+    """'living-ink sync --ssh' reaches SyncCommand.run as its setting."""
     with patch("sys.argv", ["living-ink", "sync", "--ssh"]):
         main()
         mock_sync.assert_called_once()
         args = mock_sync.call_args[0][0]
-        assert args.ssh is True
+        assert args.preferred_connection == "ssh"
+
+
+def sync_namespace(**overrides):
+    """Build a sync namespace the way the parser would, with no mock in it.
+
+    A :class:`MagicMock` cannot stand in for a parsed namespace here: every
+    generated flag is read with ``getattr``, and a mock answers all of them
+    with a truthy attribute, so the pipeline is handed an override for every
+    setting in the schema. Real parsing is the point of these tests.
+
+    Args:
+        **overrides: Attributes to set, by their ``dest`` name.
+
+    Returns:
+        A namespace with ``sync``'s defaults and the overrides applied.
+    """
+    from living_ink.cli import LivingInkCLI
+
+    args = LivingInkCLI().build_parser().parse_args(["sync"])
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    return args
 
 
 def _run_sync_capturing_pipeline(args, tmp_path):
@@ -120,7 +142,7 @@ def _run_sync_capturing_pipeline(args, tmp_path):
 def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     """SyncCommand resolves --ssh into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_USE_SSH", raising=False)
-    args = MagicMock(ssh=True, notebook=None, limit=0, folder=None, json=False, status=False)
+    args = sync_namespace(preferred_connection="ssh")
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -151,20 +173,18 @@ def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_p
 
 @patch.object(SyncCommand, "run", return_value=0)
 def test_main_sync_command_with_cloud(mock_sync):
-    """'living-ink sync --cloud' passes cloud flag to SyncCommand.run."""
+    """'living-ink sync --cloud' reaches SyncCommand.run as its setting."""
     with patch("sys.argv", ["living-ink", "sync", "--cloud"]):
         main()
         mock_sync.assert_called_once()
         args = mock_sync.call_args[0][0]
-        assert args.cloud is True
+        assert args.preferred_connection == "cloud"
 
 
 def test_cmd_sync_cloud_flag_resolves_to_cloud(tmp_path, monkeypatch):
     """SyncCommand resolves --cloud into the pipeline's settings."""
     monkeypatch.delenv("REMARKABLE_PREFERRED_CONNECTION", raising=False)
-    args = MagicMock(
-        ssh=False, cloud=True, notebook=None, limit=0, folder=None, json=False, status=False
-    )
+    args = sync_namespace(preferred_connection="cloud")
 
     pipeline = _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -176,9 +196,7 @@ def test_cmd_sync_does_not_write_settings_into_the_environment(tmp_path, monkeyp
     """Resolved settings stay on the pipeline instead of leaking into os.environ."""
     for var in ("REMARKABLE_USE_SSH", "REMARKABLE_PREFERRED_CONNECTION", "APPLE_NOTES_FOLDER"):
         monkeypatch.delenv(var, raising=False)
-    args = MagicMock(
-        ssh=True, cloud=False, notebook=None, limit=0, folder=None, json=False, status=False
-    )
+    args = sync_namespace(preferred_connection="ssh")
 
     _run_sync_capturing_pipeline(args, tmp_path)
 
@@ -309,11 +327,9 @@ def test_sync_command_execution(tmp_path):
     cmd = SyncCommand(root=tmp_path)
     args = argparse.Namespace(
         notebook="MyNotes",
-        limit=5,
-        ssh=True,
-        cloud=False,
+        max_notebooks_per_run=5,
+        preferred_connection="ssh",
         sync_pdfs=True,
-        sync_epubs=False,
         all_types=False,
         keep_temp=True,
     )
@@ -324,12 +340,15 @@ def test_sync_command_execution(tmp_path):
             mock_init.assert_called_once()
             opts = mock_init.call_args.kwargs
             assert opts["notebook"] == "MyNotes"
-            assert opts["limit"] == 5
-            assert opts["ssh"] is True
-            assert opts["sync_pdfs"] is True
-            # An unset store-true flag must defer to config, not force False.
-            assert opts["sync_epubs"] is None
             assert opts["keep_temp"] is True
+            assert opts["flags"] == {
+                "max_notebooks_per_run": 5,
+                "preferred_connection": "ssh",
+                "sync_pdfs": True,
+            }
+            # A flag nobody gave is absent, not False: False would overrule a
+            # config that has EPUBs switched on.
+            assert "sync_epubs" not in opts["flags"]
             mock_run.assert_called_once()
 
 
@@ -781,11 +800,11 @@ class TestWatchCommand:
 
         args = parser.parse_args(["watch", "--interval", "60", "--notebook", "Foo", "--cloud"])
 
-        assert (args.command, args.interval, args.notebook, args.cloud) == (
+        assert (args.command, args.interval, args.notebook, args.preferred_connection) == (
             "watch",
             60,
             "Foo",
-            True,
+            "cloud",
         )
 
     def test_watch_interval_defaults_to_half_an_hour(self):
@@ -795,30 +814,40 @@ class TestWatchCommand:
 
 
 class TestVerbosityFlags:
-    """--verbose and --quiet are accepted on either side of the subcommand."""
+    """--verbose and --quiet are accepted on either side of the subcommand.
+
+    Both set one value, ``output.verbosity``, because they are two answers to
+    one question rather than two switches: a config file that says ``quiet``
+    and a command line that says ``--verbose`` have to be comparable, and two
+    independent booleans give no answer for the pair that are both on.
+    """
 
     def _parse(self, argv):
         return LivingInkCLI().build_parser().parse_args(argv)
 
     def test_verbose_after_the_subcommand(self):
-        assert self._parse(["sync", "--verbose"]).verbose is True
+        assert self._parse(["sync", "--verbose"]).verbosity == "verbose"
 
     def test_verbose_before_the_subcommand(self):
         """A subparser default would silently overwrite the flag given here."""
-        assert self._parse(["--verbose", "sync"]).verbose is True
+        assert self._parse(["--verbose", "sync"]).verbosity == "verbose"
 
     def test_quiet_after_the_subcommand(self):
-        assert self._parse(["sync", "-q"]).quiet is True
+        assert self._parse(["sync", "-q"]).verbosity == "quiet"
 
-    def test_neither_flag_leaves_both_unset(self):
-        args = self._parse(["sync"])
-        assert getattr(args, "verbose", False) is False
-        assert getattr(args, "quiet", False) is False
+    def test_neither_flag_leaves_the_value_unset(self):
+        """Absent, not "normal": an unset flag must defer to the config file."""
+        assert getattr(self._parse(["sync"]), "verbosity", None) is None
+
+    def test_the_later_flag_wins(self):
+        """One dest, so a contradictory pair resolves by position, not by luck."""
+        assert self._parse(["--verbose", "sync", "--quiet"]).verbosity == "quiet"
+        assert self._parse(["--quiet", "sync", "--verbose"]).verbosity == "verbose"
 
     def test_dispatch_configures_logging(self, tmp_path):
         from living_ink import logs
 
-        args = argparse.Namespace(command="status", config=None, verbose=True, quiet=False)
+        args = argparse.Namespace(command="status", config=None, verbosity="verbose")
         with (
             patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
             patch.object(StatusCommand, "run", return_value=0),
@@ -877,7 +906,7 @@ class TestStatusDefersTheDocumentQuestion:
 
     def test_the_status_flags_parse(self):
         args = LivingInkCLI().build_parser().parse_args(["sync", "--status", "--all", "--json"])
-        assert (args.command, args.status, args.all, args.json) == ("sync", True, True, True)
+        assert (args.command, args.status, args.all, args.output_json) == ("sync", True, True, True)
 
 
 class TestStateCommand:
@@ -1213,7 +1242,7 @@ class TestSyncStatusFlag:
         """Run the command against a stubbed comparison and return its output."""
         from living_ink.cli import SyncCommand
 
-        defaults = {"status": True, "all": False, "json": False}
+        defaults = {"status": True, "all": False, "output_json": False}
         args = argparse.Namespace(**{**defaults, **flags})
         with patch(
             "living_ink.cli.inventory.compare_with_device", return_value=(rows, orphans or [], None)
@@ -1276,7 +1305,7 @@ class TestSyncStatusFlag:
 
     def test_json_keys_documents_by_the_stable_status_key(self, capsys):
         orphans = [{"id": "doc-old", "name": "Deleted"}]
-        _, out = self._show(capsys, self._rows(1), orphans=orphans, json=True)
+        _, out = self._show(capsys, self._rows(1), orphans=orphans, output_json=True)
         payload = json.loads(out)
         assert payload["counts"] == {"failed": 0, "new": 1, "changed": 0, "up_to_date": 0}
         assert payload["documents"][0]["status"] == "new"

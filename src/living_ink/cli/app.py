@@ -18,6 +18,7 @@ from living_ink.cli.commands.state import StateCommand
 from living_ink.cli.commands.status import StatusCommand
 from living_ink.cli.commands.sync import SyncCommand
 from living_ink.cli.commands.watch import WatchCommand
+from living_ink.cli.flags import register_global_flags
 from living_ink.config import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -31,42 +32,32 @@ def configure_logging(args: argparse.Namespace) -> None:
     no matter which subcommand is running.
 
     Args:
-        args: Parsed arguments; ``--verbose`` and ``--quiet`` are read off it.
+        args: Parsed arguments; ``--verbose`` and ``--quiet`` arrive as the
+            one ``verbosity`` value they both set.
     """
     from living_ink import logs
 
+    verbosity = getattr(args, "verbosity", None)
     logs.configure(
         logs.LOG_PATH,
-        verbose=getattr(args, "verbose", False),
-        quiet=getattr(args, "quiet", False),
-        json_output=getattr(args, "json", False),
+        verbose=verbosity == "verbose",
+        quiet=verbosity == "quiet",
+        json_output=getattr(args, "output_json", False) or getattr(args, "json", False),
     )
 
 
 def add_verbosity_args(parser: argparse.ArgumentParser) -> None:
     """Add the ``--verbose`` / ``--quiet`` pair to a parser.
 
-    Both default to ``argparse.SUPPRESS``: the same flags are declared on the
-    top-level parser and on every subparser, and a real default on the
-    subparser would overwrite a flag given before the subcommand name.
+    Generated from ``output.verbosity``, so the two flags and the config key
+    are one declaration: a run told to be quiet by the file and a run told so
+    on the command line reach the same setting, and neither can exist without
+    the other.
 
     Args:
         parser: Parser or subparser to extend.
     """
-    group = parser.add_argument_group("output")
-    group.add_argument(
-        "--verbose",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Show every log record, including internal detail, on stderr",
-    )
-    group.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Suppress progress output; the log file is still written in full",
-    )
+    register_global_flags(parser.add_argument_group("output"))
 
 
 class LivingInkCLI:

@@ -140,11 +140,16 @@ class Choice:
         flag: A dedicated flag that selects this value, e.g. ``--ssh``. Choices
             sharing their setting's :attr:`Setting.exclusive_group` are mutually
             exclusive on the command line.
+        short: A one-letter alias for :attr:`flag`, e.g. ``-q``. Declared here
+            rather than invented by the flag generator, because which values
+            deserve a single letter is a judgement about how often they are
+            typed, and there are only ever a handful of letters to give out.
     """
 
     value: str
     label: str
     flag: Optional[str] = None
+    short: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -669,7 +674,7 @@ SETTINGS: Tuple[Setting, ...] = (
         help="How much a run prints.",
         env="LIVING_INK_VERBOSITY",
         choices=(
-            Choice("quiet", "The run report and nothing else", flag="--quiet"),
+            Choice("quiet", "The run report and nothing else", flag="--quiet", short="-q"),
             Choice("normal", "Three lines per document"),
             Choice("verbose", "A line per page", flag="--verbose"),
         ),

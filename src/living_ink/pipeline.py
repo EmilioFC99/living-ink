@@ -913,6 +913,7 @@ class SyncPipeline:
         dry_run: bool = False,
         prune: bool = False,
         json_output: bool = False,
+        flags: Optional[Dict[str, Any]] = None,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
@@ -946,6 +947,14 @@ class SyncPipeline:
             dry_run: Do everything except publish.
             prune: Delete notes whose document is gone from the tablet.
             json_output: Print the run report as JSON instead of a table.
+            flags: Further settings overrides for this run, keyed by
+                :class:`~living_ink.settings.Settings` field name. This is how
+                the front end hands over everything the schema declares a flag
+                for: registering a new flag must not mean widening this
+                signature, or the schema stops being the one declaration. The
+                named keywords above win where both name the same field, so a
+                library caller's explicit argument is never quietly overruled
+                by a mapping it did not build.
             config_path: Path to YAML config file. Defaults to standard config path.
             data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
@@ -959,8 +968,6 @@ class SyncPipeline:
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
         self.dry_run = dry_run
-        self.prune = prune
-        self.json_output = json_output
         # A dry run's whole output is the transcripts it leaves behind, so it
         # implies --keep-temp; purging them would delete what it points at.
         self.keep_temp = keep_temp or dry_run
@@ -986,19 +993,20 @@ class SyncPipeline:
         # and would silently overrule the file. ``--all-types`` is the one
         # switch that does overrule it, which is why it resolves to True
         # rather than to None.
+        named = {
+            "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
+            "use_ssh": True if ssh else False if cloud else None,
+            "sync_pdfs": True if all_types else sync_pdfs,
+            "sync_epubs": True if all_types else sync_epubs,
+            "max_notebooks_per_run": limit,
+            "prune": prune or None,
+            "output_json": json_output or None,
+        }
         self.settings = Settings.resolve(
             self.raw_config,
             flags={
-                "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
-                "use_ssh": True if ssh else False if cloud else None,
-                "sync_pdfs": True if all_types else sync_pdfs,
-                "sync_epubs": True if all_types else sync_epubs,
-                # Not greater than zero is "no override", never "process none":
-                # ``--limit 0`` is what the parser hands over when the flag was
-                # left off entirely.
-                "max_notebooks_per_run": limit if limit and limit > 0 else None,
-                "prune": prune or None,
-                "output_json": json_output or None,
+                **(flags or {}),
+                **{field: value for field, value in named.items() if value is not None},
             },
         )
 
@@ -1058,6 +1066,16 @@ class SyncPipeline:
     def limit(self) -> int:
         """Maximum number of documents to process in this run."""
         return self.settings.max_notebooks_per_run
+
+    @property
+    def prune(self) -> bool:
+        """Whether notes whose document is gone from the tablet are deleted."""
+        return self.settings.prune
+
+    @property
+    def json_output(self) -> bool:
+        """Whether the run report is printed as JSON instead of a table."""
+        return self.settings.output_json
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
