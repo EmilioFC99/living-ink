@@ -14,6 +14,7 @@ about the tablet, and ``sync --preview`` is the command that goes and asks it.
 import argparse
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 # The module, never the symbol: these are the seams the behaviour tests
@@ -24,6 +25,7 @@ from living_ink.cli.base import BaseCommand
 from living_ink.cli.status import StatusReport
 from living_ink.config import get_config_path
 from living_ink.settings import SOURCE_ENV
+from living_ink.state import HEALTHY_OUTCOMES
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,14 @@ class InfoCommand(BaseCommand):
             report: Snapshot produced by collect_status().
         """
         from living_ink.ui import bold, cyan, dim, green, red, yellow
+
+        # Above everything, including the banner: a schedule that stopped
+        # working produces no other symptom until somebody notices a notebook
+        # missing, so it cannot be a line halfway down a report.
+        if report.watch_alert:
+            print()
+            print(f"  {red('⚠')}  {bold(report.watch_alert)}")
+            print(f"     {dim(report.watch_alert_fix)}")
 
         print()
         print(bold(cyan("============================================================")))
@@ -165,13 +175,7 @@ class InfoCommand(BaseCommand):
         else:
             print(f"Obsidian:      {dim('Disabled')}")
 
-        # Background sync
-        if not report.auto_sync_installed:
-            print(f"Auto-Sync:     {dim('Not installed (run living-ink setup to enable)')}")
-        elif report.auto_sync_active:
-            print(f"Auto-Sync:     {green('Active (runs hourly in background)')}")
-        else:
-            print(f"Auto-Sync:     {yellow('Installed but not currently loaded')}")
+        InfoCommand._render_watch(report)
 
         # No document line at all, not even a pointer. This command reports the
         # setup; what is and is not synced is a live question about the tablet,
@@ -195,6 +199,54 @@ class InfoCommand(BaseCommand):
 
         InfoCommand._render_settings(report)
         print()
+
+    @staticmethod
+    def _render_watch(report: StatusReport) -> None:
+        """Print whether automatic syncing is working, in two lines.
+
+        Two, and only two: when the last one ran and when the next one is due.
+        The cron expression itself is deliberately absent — a user who wants to
+        read ``0 9 * * 1`` opens the config menu, and a user looking at ``info``
+        is asking whether the thing is working, which the expression does not
+        answer. The wording of the last-run line is
+        :func:`~living_ink.scheduler.describe_run`, shared with ``watch``, so a
+        run is not "failed" in one panel and "partial" in the other.
+
+        Args:
+            report: Snapshot produced by collect_status().
+        """
+        from living_ink import scheduler
+        from living_ink.ui import dim, green, red, yellow
+
+        if report.watch_problem:
+            print(f"Watch:         {red('Not usable')} — {report.watch_problem}")
+            return
+
+        if not report.watch_enabled:
+            off = "Not active — run 'living-ink config' to schedule automatic syncs."
+            print(f"Watch:         {dim(off)}")
+            return
+
+        last = report.last_scheduled_run
+        if last:
+            started = scheduler.parse_stored(last.get("started_at"))
+            when = (
+                scheduler.humanize_ago((datetime.now(timezone.utc) - started).total_seconds())
+                if started
+                else "at an unknown time"
+            )
+            tone = green if (last.get("outcome") in HEALTHY_OUTCOMES) else yellow
+            print(f"Watch:         last run   {when} · {tone(scheduler.describe_run(last))}")
+        else:
+            print(f"Watch:         last run   {dim('never')}")
+
+        upcoming = scheduler.parse_stored(report.watch_next_run)
+        if upcoming:
+            ahead = scheduler.humanize_duration(
+                (upcoming - datetime.now(timezone.utc)).total_seconds()
+            )
+            stamp = scheduler.format_moment(upcoming, upcoming.tzinfo)
+            print(f"               next run   in {ahead} ({stamp})")
 
     @staticmethod
     def _render_state(report: StatusReport) -> None:
