@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from living_ink.config.schema import (
     ACTIVE,
     CHOICE,
+    CRON,
     DEPRECATED,
     FLAG,
     LEGACY_KEYS,
@@ -133,7 +134,11 @@ def reads_as(value: Any, kind: str) -> bool:
     if isinstance(value, (dict, list)):
         return False
 
-    if kind in (TEXT, PATH, SECRET, CHOICE):
+    # A cron expression reads as text here on purpose: whether the five
+    # fields mean anything is ``croniter``'s question, and this package
+    # imports nothing. ``living-ink info`` is where an unparseable schedule
+    # is reported, because that is where the parser already is.
+    if kind in (TEXT, PATH, SECRET, CHOICE, CRON):
         return True
 
     if kind == FLAG:

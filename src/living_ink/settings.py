@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from living_ink.config.schema import (
     CHOICE,
+    CRON,
     DEFAULT_AI_LANGUAGE,
     DEFAULT_AI_TEMPERATURE,
     DEFAULT_ATTACHMENTS_FOLDER,
@@ -616,7 +617,7 @@ def _coerce(setting: Setting, value: Any, seen: Mapping[str, Any]) -> Any:
     if setting.kind == CHOICE:
         text = as_str(value, default)
         return text.lower() if isinstance(text, str) else text
-    if setting.kind in (TEXT, PATH) and value is not None and not str(value).strip():
+    if setting.kind in (TEXT, PATH, CRON) and value is not None and not str(value).strip():
         # An explicit blank is a value, not an omission: an empty
         # ``obsidian.attachments_folder`` means "beside the note". A blank
         # environment variable never reaches here — :meth:`Settings._pick`

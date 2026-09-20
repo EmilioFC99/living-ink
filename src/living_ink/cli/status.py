@@ -7,6 +7,7 @@ three times with three answers.
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,8 +62,31 @@ class StatusReport:
     #: so status and preflight cannot disagree about it. Empty when it is fine.
     obsidian_problem: str = ""
 
+    #: The supervisor job — launchd or systemd — whose only remaining task is
+    #: keeping ``living-ink watch`` alive. *When* a sync happens is the cron
+    #: expression below; these two say whether anything is there to run it.
     auto_sync_installed: bool = False
     auto_sync_active: bool = False
+
+    watch_enabled: bool = False
+    watch_schedule: str = ""
+    watch_timezone: str = ""
+    #: Why the schedule cannot be read, from the same validators the watcher
+    #: refuses to start on. Empty when it is fine, and empty when watching is
+    #: off — an unset schedule is not a broken one.
+    watch_problem: str = ""
+    #: When the schedule next fires, ISO-8601. None when watching is off or the
+    #: expression will not parse.
+    watch_next_run: Optional[str] = None
+    #: The most recent run the *scheduler* started, which is a different
+    #: question from :attr:`last_run`: somebody who syncs by hand every morning
+    #: would otherwise keep resetting the clock that watches the daemon.
+    last_scheduled_run: Optional[dict[str, Any]] = None
+    #: One line, shown above everything else, when the schedule is configured
+    #: and not working. Empty the rest of the time.
+    watch_alert: str = ""
+    #: The single thing to do about :attr:`watch_alert`.
+    watch_alert_fix: str = ""
 
     cache_entries: int = 0
     cache_bytes: int = 0
@@ -109,7 +133,7 @@ class StatusReport:
             "remarkable": {},
             "ai": {},
             "obsidian": {},
-            "auto_sync": {},
+            "watch": {},
             "documents": {},
             "settings": [],
         }
@@ -147,9 +171,22 @@ class StatusReport:
                 "valid": self.obsidian_valid,
                 "problem": self.obsidian_problem,
             },
-            "auto_sync": {
-                "installed": self.auto_sync_installed,
-                "active": self.auto_sync_active,
+            # Was ``auto_sync``, and renamed with the thing it describes: a
+            # scheduled sync is now a cron expression the watcher reads, and
+            # the job the two booleans describe no longer decides when anything
+            # runs — only whether the watcher is alive to read it.
+            "watch": {
+                "enabled": self.watch_enabled,
+                "schedule": self.watch_schedule,
+                "timezone": self.watch_timezone,
+                "problem": self.watch_problem,
+                "next_run": self.watch_next_run,
+                "last_scheduled_run": self.last_scheduled_run,
+                "alert": self.watch_alert,
+                "job": {
+                    "installed": self.auto_sync_installed,
+                    "active": self.auto_sync_active,
+                },
             },
             "cache": {
                 "entries": self.cache_entries,
@@ -368,8 +405,107 @@ def collect_status(config_path: Path) -> StatusReport:
         logger.debug("Could not measure the caches", exc_info=True)
 
     _collect_state(report)
+    _collect_watch(report, cfg)
 
     return report
+
+
+#: How late a scheduled sync has to be before ``info`` calls it missing. Long
+#: enough that a tick running right now, or one that started a minute late
+#: because the machine was busy, is not reported as a failure; short enough
+#: that a daemon that died overnight is flagged the next morning.
+WATCH_GRACE_SECONDS = 15 * 60
+
+
+def _collect_watch(report: StatusReport, cfg: dict[str, Any]) -> None:
+    """Fill in the schedule, the next fire and whether the last one worked.
+
+    The whole Watch panel is decided here rather than in the renderer, so the
+    console view and ``--json`` cannot disagree about whether a schedule is
+    healthy — which is the failure this module exists to prevent.
+
+    Args:
+        report: The report to fill in.
+        cfg: The parsed config, for the ``watch:`` section.
+    """
+    from living_ink import scheduler
+
+    watch_cfg = cfg.get("watch", {}) or {}
+    settings = Settings.resolve(cfg, config_path=report.config_path)
+    report.watch_enabled = bool(settings.watch_enabled)
+    report.watch_schedule = (settings.watch_schedule or "").strip()
+
+    try:
+        tz, tz_name = scheduler.resolve_timezone(settings.watch_timezone)
+    except ValueError as e:
+        report.watch_timezone = str(watch_cfg.get("timezone", "") or "")
+        report.watch_problem = str(e)
+        return
+    report.watch_timezone = tz_name
+
+    if not report.watch_enabled:
+        return
+
+    if not report.watch_schedule:
+        report.watch_problem = "Watching is on but no schedule is set (watch.schedule)."
+        return
+
+    problem = scheduler.validate_expression(report.watch_schedule)
+    if problem:
+        report.watch_problem = problem
+        return
+
+    now = datetime.now(tz)
+    report.watch_next_run = scheduler.next_fire(report.watch_schedule, now, tz).isoformat()
+
+    try:
+        from living_ink.pipeline import get_state_store
+
+        report.last_scheduled_run = get_state_store().last_scheduled_run()
+    except Exception:
+        # Same reason as _collect_state: an unreadable database must not take
+        # the rest of the health report down with it.
+        logger.debug("Could not read the last scheduled run", exc_info=True)
+        return
+
+    _raise_watch_alert(report, now, tz)
+
+
+def _raise_watch_alert(report: StatusReport, now: datetime, tz: Any) -> None:
+    """Decide whether the schedule deserves a banner, and what it should say.
+
+    Two triggers, and only two. The last scheduled run failed — which is the
+    case a user finds out about by noticing a notebook is missing, days later.
+    Or a fire time has come and gone with nothing recorded against it, which is
+    what a watcher that is not running looks like from the outside: there is no
+    error anywhere, because nothing ran to produce one.
+
+    Args:
+        report: The report to fill in; read for the last scheduled run.
+        now: The current time, in the schedule's zone.
+        tz: The schedule's zone.
+    """
+    from living_ink import scheduler, state
+
+    last = report.last_scheduled_run
+    if last is not None and last.get("outcome") not in state.HEALTHY_OUTCOMES:
+        report.watch_alert = f"The last scheduled sync {scheduler.describe_run(last)}."
+        report.watch_alert_fix = "Run 'living-ink sync' to retry, or check living-ink.log."
+        return
+
+    due = scheduler.previous_fire(report.watch_schedule, now, tz)
+    if (now - due).total_seconds() <= WATCH_GRACE_SECONDS:
+        return
+
+    started = scheduler.parse_stored(last.get("started_at")) if last else None
+    if started is not None and started >= due:
+        return
+
+    ago = scheduler.humanize_ago((now - due).total_seconds())
+    report.watch_alert = f"A scheduled sync was due {ago} and did not run."
+    report.watch_alert_fix = (
+        "Check that the background job is running: 'living-ink setup' reinstalls it."
+    )
 
 
 def _collect_state(report: StatusReport) -> None:

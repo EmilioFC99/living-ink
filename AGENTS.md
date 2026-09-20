@@ -77,11 +77,11 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 ## Things that will bite you
 
-- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink status` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env var is the one a third-party SDK reads itself (`OPENAI_API_KEY`).
+- **Settings are resolved once.** `settings.Settings.resolve(config)` merges YAML and environment into one frozen typed object; precedence is **CLI options > env var > config file > default**. `Settings.explain(config)` reports the same merge annotated with the layer that won, which is what `living-ink info` prints; both read the field-to-env-var pairing from `FIELD_ENV_VARS`, so a new setting stays reportable for free. `SyncPipeline.__init__` layers `SyncOptions` on top with `dataclasses.replace`. A new setting is one field plus one line in `resolve()` — do not write settings back into `os.environ`. The only exported env var is the one a third-party SDK reads itself (`OPENAI_API_KEY`).
 - **Importing `pipeline.py` must stay side-effect free.** Config, destinations and directories all sit behind cached accessors. `TestImportPurity` asserts a bare import creates no directories and prints nothing.
 - **The repository is stateless.** Config lives at `~/.config/living-ink/config.yml`, runtime artifacts at `~/.local/share/living-ink/`. Personal tokens, credentials and downloaded notebooks must NEVER be committed.
 - **Secrets live beside `config.yml`, never in it.** `living_ink.config.credentials` stores one file per credential under `<config dir>/credentials/`, atomically at `0600`, registered with `redact` on every read and write. The directory is derived from the resolved config path, so a second profile gets its own secrets. The name carries the provider (`ai.api_key.<provider>`, composed only by `ai_key_name()`) so switching AI providers and back does not destroy a key; `_VALID_NAME` restricts a name rather than escaping it, because it is also a filename. `migrate_secret()` copies from the old locations (`config.yml`, `~/.rmapi`) and never deletes them, so a downgrade does not force re-pairing. Anything rendering a key uses `credentials.mask()`.
-- **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink cache` shows/prunes/clears it. It is also what makes a run resumable: a page is banked as soon as it comes back, so an interrupt costs the page in flight and nothing else. An interrupted run is recorded as `outcome="interrupted"` with the counts it actually reached, and exits 130 instead of printing a traceback.
+- **Transcriptions are cached under `DATA_DIR/transcripts/`**, keyed by the page bytes plus `clean.transcription_fingerprint()` (provider, model, both prompt files). Deliberately outside the purged temp dirs — surviving the purge is what makes a repeat sync free. `living-ink info` reports it, a successful sync prunes it, and `config` → Advanced clears it. It is also what makes a run resumable: a page is banked as soon as it comes back, so an interrupt costs the page in flight and nothing else. An interrupted run is recorded as `outcome="interrupted"` with the counts it actually reached, and exits 130 instead of printing a traceback.
 - **The `pages` table is what detects a broken renderer.** Each page's `.rm` source hash and rendered PNG hash are stored together; a page whose source is unchanged but whose render is not means the renderer moved (the documented symptom of an `rmc`/`rmscene` upgrade), and a notebook whose pages nearly all render to identical bytes rendered blank. Both surface as `RunReport` warnings at the end of the run, not as log lines that scroll away.
 - **Rendered pages are cached under `DATA_DIR/renders/`**, keyed by the page's `.rm` source plus `extract.renderer_fingerprint()` (the `RENDER_FORMAT_VERSION` constant, the installed `rmc` and `rmscene`) and the background colour. An unchanged page skips the `.rm` → SVG → PNG step entirely. Bump `RENDER_FORMAT_VERSION` whenever `extract.py`'s own rendering behaviour changes.
 - **Temp artifacts are auto-purged** at pipeline start, after each notebook, and via `atexit`. Pass `--keep-temp` when debugging rendering or OCR; nothing else turns it on for you.
@@ -118,18 +118,17 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 
 ```bash
 uv sync --all-extras                                  # install deps (incl. dev)
-uv run living-ink --help                              # CLI: sync | watch | setup | status
+uv run living-ink --help                              # CLI: sync | watch | setup | info | config | uninstall
 uv run living-ink sync --notebook "Foo" --keep-temp   # one notebook, keep artifacts
 uv run living-ink sync --preview --transcribe         # transcribe, publish nothing
 uv run living-ink sync --json                         # run summary as JSON
-uv run living-ink watch --interval 600                # sync every 10 minutes
-uv run living-ink status                              # health check + effective settings
-uv run living-ink status --json                       # machine-readable health check
-uv run living-ink sync --preview                     # what is new, changed, or up to date
-uv run living-ink state                               # what is remembered between runs
+uv run living-ink watch                               # sync on the cron schedule in config.yml until stopped
+uv run living-ink info                                # health check, caches, schedule, sync state
+uv run living-ink info --json                         # machine-readable health check + every state row
+uv run living-ink sync --preview                      # what is new, changed, or up to date
 uv run living-ink sync --prune                        # also delete notes whose notebook is gone
-uv run living-ink cache                               # transcription and render cache sizes
-uv run living-ink cache --clear                       # drop them; the next sync pays again
+uv run living-ink config                              # settings menu, prompts, destructive maintenance
+uv run living-ink uninstall --yes                     # remove the background job, settings and caches
 
 uv run ruff check .           # lint
 uv run ruff format --check .  # format check (`ruff format .` to fix)

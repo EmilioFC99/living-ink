@@ -9,10 +9,13 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from living_ink import scheduler
 from living_ink.cli import (
     BaseCommand,
     InfoCommand,
@@ -25,7 +28,7 @@ from living_ink.cli import (
 from living_ink.cli.commands.setup import WizardResult
 from living_ink.cli.status import _describe_connected_device
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
-from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
+from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV, Settings
 from living_ink.state import STATUS_NEW, STATUS_UP_TO_DATE
 
 
@@ -777,116 +780,322 @@ class TestInfoChecksStoredCredentials:
 
 
 class TestWatchCommand:
-    """`watch` syncs on a timer and survives everything but a bad config."""
+    """`watch` runs the configured cron schedule and survives a bad night.
 
-    def _watch(self, side_effects, interval=30):
-        """Run the loop until the stubbed sync raises KeyboardInterrupt.
+    Every test here drives a real :class:`~living_ink.scheduler.Schedule` whose
+    clock only moves when it sleeps, so a "daily at 09:00" loop runs in
+    microseconds and the tick order under test is the shipped one. What is
+    stubbed is the sync itself and the two reads that would need a config file.
+    """
+
+    @pytest.fixture
+    def data_dir(self, tmp_path, monkeypatch):
+        """Give the watcher its own state database and lock directory.
 
         Args:
-            side_effects: What successive execute_sync calls do; the last one
-                must interrupt, or the loop would never end.
-            interval: Value for --interval.
+            tmp_path: Pytest's temporary directory.
+            monkeypatch: Pytest's patcher.
+
+        Yields:
+            The directory standing in for ``DATA_DIR``.
+        """
+        from living_ink import pipeline
+
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        pipeline.reset_state_store()
+        yield tmp_path
+        pipeline.reset_state_store()
+
+    @staticmethod
+    def _settings(**watch):
+        """Resolve settings with the watch section filled in.
+
+        Args:
+            **watch: Overrides for the ``watch:`` section.
 
         Returns:
-            (exit code, execute_sync mock, sleep mock). The interrupt is
-            turned into 130 here exactly the way ``main`` turns it into 130,
-            so each test can state what the shell would see.
+            The resolved settings.
         """
-        args = argparse.Namespace(interval=interval)
+        section = {"enabled": True, "schedule": "* * * * *", "timezone": "UTC"}
+        section.update(watch)
+        return Settings.resolve({"watch": section})
+
+    @staticmethod
+    def _schedule(expression="* * * * *"):
+        """Build a schedule whose clock only advances when it sleeps.
+
+        Starting at 08:59:30 with a fire at every minute means the first thing
+        the loop does is a catch-up for 08:59:00, so a test gets its first tick
+        without waiting and the catch-up path is exercised by default.
+
+        Args:
+            expression: The cron expression.
+
+        Returns:
+            A schedule driven by a fake clock.
+        """
+        tz = ZoneInfo("UTC")
+        clock = {"at": datetime(2026, 9, 20, 8, 59, 30, tzinfo=tz)}
+
+        def now():
+            return clock["at"]
+
+        def sleep(seconds):
+            clock["at"] = clock["at"] + timedelta(seconds=seconds)
+
+        return scheduler.Schedule(expression, tz, now=now, sleep=sleep)
+
+    def _run(self, side_effects, *, settings=None, schedule=None):
+        """Run the watcher until the stubbed sync interrupts it.
+
+        Args:
+            side_effects: What successive ``execute_sync`` calls do; the last
+                must interrupt or return an exit code, or the loop never ends.
+            settings: Settings to hand the command, resolved by default.
+            schedule: Schedule to run, or a per-call side effect list.
+
+        Returns:
+            (exit code, execute_sync mock). The interrupt is turned into 130
+            here exactly the way ``main`` turns it into 130.
+        """
+        build = (
+            {"side_effect": schedule}
+            if isinstance(schedule, list)
+            else {"return_value": schedule or self._schedule()}
+        )
         with (
+            patch.object(WatchCommand, "_read_settings", return_value=settings or self._settings()),
+            patch.object(WatchCommand, "_build_schedule", **build),
             patch.object(SyncCommand, "execute_sync", side_effect=side_effects) as sync,
-            patch("living_ink.cli.commands.watch.time.sleep") as sleep,
         ):
             try:
-                code = WatchCommand().run(args)
+                code = WatchCommand().run(argparse.Namespace())
             except KeyboardInterrupt:
                 code = 130
-        return code, sync, sleep
+        return code, sync
 
-    def test_syncs_repeatedly_until_interrupted(self):
-        code, sync, sleep = self._watch([True, True, KeyboardInterrupt()])
+    # --- refusing to start ------------------------------------------------
+
+    def test_watching_off_says_so_and_exits_without_syncing(self, data_dir, capsys):
+        """Off has one meaning, and idling would be a second one."""
+        with patch.object(SyncCommand, "execute_sync", side_effect=AssertionError("must not run")):
+            code = self._run([], settings=self._settings(enabled=False))[0]
+
+        assert code == 0
+        assert "Watching is off" in capsys.readouterr().out
+
+    def test_watching_on_with_no_schedule_is_a_configuration_error(self, data_dir, capsys):
+        with patch.object(
+            WatchCommand, "_read_settings", return_value=self._settings(schedule=None)
+        ):
+            code = WatchCommand().run(argparse.Namespace())
+
+        assert code == 1
+        assert "watch.schedule" in capsys.readouterr().err
+
+    def test_an_invalid_expression_names_the_field_it_could_not_read(self, data_dir, capsys):
+        with patch.object(
+            WatchCommand, "_read_settings", return_value=self._settings(schedule="0 9 * * funday")
+        ):
+            code = WatchCommand().run(argparse.Namespace())
+
+        assert code == 1
+        assert "day of week" in capsys.readouterr().err
+
+    def test_an_unknown_timezone_is_refused_rather_than_read_as_utc(self, data_dir, capsys):
+        with patch.object(
+            WatchCommand, "_read_settings", return_value=self._settings(timezone="Europe/Madroid")
+        ):
+            code = WatchCommand().run(argparse.Namespace())
+
+        assert code == 1
+        assert "Europe/Mad" in capsys.readouterr().err
+
+    def test_a_second_watcher_refuses_rather_than_racing_the_first(self, data_dir, capsys):
+        """Two schedulers on one machine could double-write the same note."""
+        with (
+            patch.object(scheduler.RunLock, "acquire", return_value=False),
+            patch.object(SyncCommand, "execute_sync", side_effect=AssertionError("must not run")),
+        ):
+            code = self._run([])[0]
+
+        assert code == 1
+        assert "already running" in capsys.readouterr().err
+
+    # --- the loop ---------------------------------------------------------
+
+    def test_it_syncs_once_per_fire_until_interrupted(self, data_dir):
+        code, sync = self._run([True, True, KeyboardInterrupt()])
 
         assert code == 130
         assert sync.call_count == 3
-        assert sleep.call_count == 2
 
-    def test_a_failed_sync_does_not_end_the_watch(self):
+    def test_every_tick_says_it_was_the_schedule_that_asked(self, data_dir):
+        """The run row is what ``info``'s staleness banner reads back."""
+        _, sync = self._run([KeyboardInterrupt()])
+
+        kwargs = sync.call_args.kwargs
+        assert kwargs["trigger"] == "scheduled"
+        assert kwargs["scheduled_fire_time"] == "2026-09-20T08:59:00+00:00"
+
+    def test_a_missed_fire_produces_one_catch_up_and_not_a_backlog(self, data_dir):
+        """A laptop closed for five nights is still one useful sync."""
+        _, sync = self._run([KeyboardInterrupt()], schedule=self._schedule("0 9 * * *"))
+
+        # 08:59:30 on the 20th, so yesterday's 09:00 is the overdue one.
+        assert sync.call_args.kwargs["scheduled_fire_time"] == "2026-09-19T09:00:00+00:00"
+
+    def test_a_failed_sync_does_not_end_the_watch(self, data_dir):
         """An unplugged tablet is the condition watch exists to ride out."""
-        code, sync, _ = self._watch([False, KeyboardInterrupt()])
+        code, sync = self._run([False, KeyboardInterrupt()])
 
         assert code == 130
         assert sync.call_count == 2
 
-    def test_an_unexpected_error_does_not_end_the_watch(self):
-        code, sync, _ = self._watch([RuntimeError("tablet vanished"), KeyboardInterrupt()])
+    def test_an_unexpected_error_does_not_end_the_watch(self, data_dir):
+        code, sync = self._run([RuntimeError("tablet vanished"), KeyboardInterrupt()])
 
         assert code == 130
         assert sync.call_count == 2
 
-    def test_a_stopped_watch_is_never_reported_as_a_clean_finish(self):
-        """Converting Ctrl+C to 0 is what makes a supervised watch unstoppable.
-
-        `launchd` with `KeepAlive` and systemd with `Restart=always` both read
-        exit 0 as "the job is done" and start it straight back up, so the
-        interrupt has to leave the loop intact for `main` to answer 130.
-        """
-        args = argparse.Namespace(interval=30)
-        with (
-            patch.object(SyncCommand, "execute_sync", side_effect=KeyboardInterrupt),
-            patch("living_ink.cli.commands.watch.time.sleep"),
-            pytest.raises(KeyboardInterrupt),
-        ):
-            WatchCommand().run(args)
-
-    def test_a_missing_config_stops_the_watch(self):
+    def test_a_missing_config_stops_the_watch(self, data_dir):
         """That failure will still be there next tick, so looping is pointless."""
-        code, sync, _ = self._watch([ConfigurationMissing("no config")])
+        code, sync = self._run([ConfigurationMissing("no config")])
 
         assert code == 1
         assert sync.call_count == 1
 
-    def test_the_watch_never_offers_the_setup_wizard(self):
+    def test_the_watch_never_offers_the_setup_wizard(self, data_dir):
         """It runs unattended; blocking on input() would hang a daemon."""
-        args = argparse.Namespace(interval=30)
+        with patch("builtins.input", side_effect=AssertionError("must not prompt")):
+            assert self._run([ConfigurationMissing("nope")])[0] == 1
+
+    def test_a_stopped_watch_is_never_reported_as_a_clean_finish(self, data_dir):
+        """Converting Ctrl+C to 0 is what makes a supervised watch unstoppable.
+
+        ``launchd`` with ``KeepAlive`` and systemd with ``Restart=always`` both
+        read exit 0 as "the job is done" and start it straight back up, so the
+        interrupt has to leave the loop intact for ``main`` to answer 130.
+        """
         with (
-            patch.object(SyncCommand, "execute_sync", side_effect=ConfigurationMissing("nope")),
-            patch("builtins.input", side_effect=AssertionError("must not prompt")),
-            patch("living_ink.cli.commands.watch.time.sleep"),
-        ):
-            assert WatchCommand().run(args) == 1
-
-    def test_the_interval_is_floored(self):
-        """Polling faster than a sync finishes just stacks runs on each other."""
-        _, _, sleep = self._watch([True, KeyboardInterrupt()], interval=1)
-
-        sleep.assert_called_once_with(WatchCommand.MIN_INTERVAL)
-
-    def test_interrupting_the_wait_stops_it_the_same_way(self):
-        """Ctrl+C lands in the sleep far more often than in a sync."""
-        args = argparse.Namespace(interval=30)
-        with (
-            patch.object(SyncCommand, "execute_sync", return_value=True),
-            patch("living_ink.cli.commands.watch.time.sleep", side_effect=KeyboardInterrupt),
+            patch.object(WatchCommand, "_read_settings", return_value=self._settings()),
+            patch.object(WatchCommand, "_build_schedule", return_value=self._schedule()),
+            patch.object(SyncCommand, "execute_sync", side_effect=KeyboardInterrupt),
             pytest.raises(KeyboardInterrupt),
         ):
-            WatchCommand().run(args)
+            WatchCommand().run(argparse.Namespace())
 
-    def test_watch_is_registered_and_takes_every_sync_option(self):
-        parser = LivingInkCLI().build_parser()
+    def test_each_tick_drops_the_config_and_destination_caches(self, data_dir):
+        """Trap 1: a daemon that never re-reads config runs last month's."""
+        from living_ink import pipeline
 
-        args = parser.parse_args(["watch", "--interval", "60", "--notebook", "Foo", "--cloud"])
+        with patch.object(pipeline, "reset_caches") as reset:
+            self._run([True, KeyboardInterrupt()])
 
-        assert (args.command, args.interval, args.notebook, args.preferred_connection) == (
-            "watch",
-            60,
-            "Foo",
-            "cloud",
+        assert reset.call_count == 2
+        # The open database is not one of them: _ADDED_COLUMNS probes on every
+        # open, and nothing in config.yml can move the file.
+        assert all(call.kwargs == {"keep_state_store": True} for call in reset.call_args_list)
+
+    def test_a_tick_that_cannot_take_the_lock_is_recorded_as_skipped(self, data_dir):
+        """Skipped, never queued: the run already going will see the same tablet."""
+        from contextlib import contextmanager
+
+        from living_ink import pipeline
+
+        @contextmanager
+        def busy(_lock):
+            yield False
+
+        with (
+            patch.object(scheduler, "optional_lock", busy),
+            patch.object(SyncCommand, "execute_sync", side_effect=AssertionError("must not run")),
+            patch.object(WatchCommand, "_read_settings", return_value=self._settings()),
+            patch.object(WatchCommand, "_build_schedule", return_value=self._schedule()),
+            patch.object(WatchCommand, "_reread", side_effect=[None, KeyboardInterrupt()]),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            WatchCommand().run(argparse.Namespace())
+
+        rows = pipeline.get_state_store().recent_runs(5)
+        assert [row["outcome"] for row in rows] == ["skipped_overlapping"] * 2
+        # Newest first, so the catch-up for the fire time already past is last.
+        assert rows[-1]["scheduled_fire_time"] == "2026-09-20T08:59:00+00:00"
+
+    def test_turning_watching_off_stops_the_loop_cleanly(self, data_dir, capsys):
+        with patch.object(
+            WatchCommand,
+            "_reread",
+            return_value=self._settings(enabled=False),
+        ):
+            code, sync = self._run([True])
+
+        assert code == 0
+        assert sync.call_count == 1
+        assert "turned off" in capsys.readouterr().out
+
+    def test_a_changed_schedule_is_picked_up_without_a_restart(self, data_dir, capsys):
+        """The same re-read that catches a new model catches a new schedule."""
+        first, second = self._schedule("* * * * *"), self._schedule("0 9 * * *")
+
+        code, sync = self._run(
+            [True, KeyboardInterrupt()],
+            schedule=[first, second, second],
         )
 
-    def test_watch_interval_defaults_to_half_an_hour(self):
-        args = LivingInkCLI().build_parser().parse_args(["watch"])
+        assert code == 130
+        assert sync.call_count == 2
+        assert "Schedule changed" in capsys.readouterr().out
 
-        assert args.interval == WatchCommand.DEFAULT_INTERVAL
+    # --- what it prints ---------------------------------------------------
+
+    def test_it_opens_with_the_whole_status_of_the_watcher(self, data_dir, capsys):
+        """ "Is this thing working?" is answered without a second command."""
+        self._run([KeyboardInterrupt()])
+
+        out = capsys.readouterr().out
+        assert "Living Ink · watching" in out
+        assert "every minute" in out or "* * * * *" in out
+        assert "Last run     never" in out
+        assert "Next run" in out
+        assert "Ctrl+C to stop." in out
+
+    def test_json_prints_no_panel(self, data_dir, capsys):
+        """``--json`` promises stdout holds objects and nothing else."""
+        self._run([KeyboardInterrupt()], settings=self._settings(), schedule=None)
+        capsys.readouterr()
+
+        self._run(
+            [KeyboardInterrupt()],
+            settings=Settings.resolve(
+                {"watch": {"enabled": True, "schedule": "* * * * *"}, "output": {"json": True}}
+            ),
+        )
+
+        assert "Living Ink · watching" not in capsys.readouterr().out
+
+    def test_a_finished_tick_is_reported_in_one_line(self, data_dir, capsys):
+        from living_ink import pipeline
+
+        store = pipeline.get_state_store()
+        run_id = store.start_run(trigger="scheduled", scheduled_fire_time="2026-09-20T08:59:00")
+        store.finish_run(run_id, outcome="success", seen=3, published=3)
+
+        self._run([KeyboardInterrupt()])
+
+        assert "synced 3 documents" in capsys.readouterr().out
+
+    # --- the parser -------------------------------------------------------
+
+    def test_watch_takes_no_behaviour_flags(self):
+        """A supervisor restarts without them, so they would stop applying."""
+        with pytest.raises(SystemExit):
+            LivingInkCLI().build_parser().parse_args(["watch", "--notebook", "Foo"])
+
+    def test_watch_takes_the_output_flags(self):
+        args = LivingInkCLI().build_parser().parse_args(["watch", "--json", "--verbose"])
+
+        assert (args.command, args.output_json, args.verbosity) == ("watch", True, "verbose")
 
 
 class TestVerbosityFlags:
@@ -1328,6 +1537,277 @@ class TestInfoReportsTheStores:
         assert report.cache_entries == 1
         InfoCommand._render_console(report)
         assert "1 page(s)" in capsys.readouterr().out
+
+
+class TestInfoWatchPanel:
+    """Whether automatic syncing is working, in two lines and one banner.
+
+    The cron expression is deliberately not among them: a user reading `info`
+    is asking whether the thing works, and `0 9 * * 1` does not answer that.
+    The panel and the `--json` payload are decided in one place — a health
+    check whose two views disagree is worse than one view.
+    """
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        """A real store on a throwaway database, wired into the status reader."""
+        from living_ink import pipeline
+
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield pipeline.get_state_store()
+        pipeline.reset_state_store()
+
+    def _report(self, tmp_path, **watch):
+        """Collect the watch half of a report from a config fragment."""
+        from living_ink.cli import status as status_module
+
+        report = status_module.StatusReport(config_path=tmp_path / "config.yml")
+        status_module._collect_watch(report, {"watch": watch})
+        return report
+
+    # -- reading the configuration -----------------------------------------
+
+    def test_watching_off_is_not_a_problem(self, tmp_path):
+        """An unset schedule is not a broken one."""
+        report = self._report(tmp_path, enabled=False)
+
+        assert (report.watch_enabled, report.watch_problem, report.watch_next_run) == (
+            False,
+            "",
+            None,
+        )
+
+    def test_the_zone_is_named_even_when_watching_is_off(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        assert self._report(tmp_path, enabled=False).watch_timezone == "Asia/Tokyo"
+
+    def test_watching_on_with_no_schedule_is_a_problem(self, tmp_path):
+        report = self._report(tmp_path, enabled=True)
+
+        assert "no schedule is set" in report.watch_problem
+        assert report.watch_next_run is None
+
+    def test_an_invalid_expression_names_the_field(self, tmp_path):
+        report = self._report(tmp_path, enabled=True, schedule="0 9 * * funday")
+
+        assert "day of week" in report.watch_problem
+        assert report.watch_next_run is None
+
+    def test_an_unknown_timezone_is_refused_rather_than_read_as_utc(self, tmp_path):
+        """An hour or two off, all year, with nothing in the output admitting it."""
+        report = self._report(
+            tmp_path, enabled=True, schedule="0 9 * * *", timezone="Europe/Madridd"
+        )
+
+        assert "not a known timezone" in report.watch_problem
+        assert report.watch_next_run is None
+
+    def test_a_valid_schedule_reports_when_it_next_fires(self, store, tmp_path):
+        report = self._report(
+            tmp_path, enabled=True, schedule="0 9 * * *", timezone="Europe/Madrid"
+        )
+        from living_ink import scheduler
+
+        upcoming = scheduler.parse_stored(report.watch_next_run)
+        assert report.watch_problem == ""
+        assert upcoming is not None and upcoming > datetime.now(timezone.utc)
+
+    def test_it_reads_the_last_scheduled_run_and_not_the_last_manual_one(self, store, tmp_path):
+        from living_ink import state as state_module
+
+        scheduled = store.start_run(trigger=state_module.TRIGGER_SCHEDULED)
+        store.finish_run(scheduled, outcome=state_module.OUTCOME_SUCCESS, published=2)
+        store.start_run()
+
+        report = self._report(tmp_path, enabled=True, schedule="* * * * *", timezone="UTC")
+
+        assert report.last_scheduled_run["id"] == scheduled
+
+    def test_an_unreadable_database_does_not_take_the_report_down(self, tmp_path, monkeypatch):
+        from living_ink import pipeline
+
+        monkeypatch.setattr(
+            pipeline,
+            "get_state_store",
+            MagicMock(side_effect=sqlite3.DatabaseError("file is not a database")),
+        )
+        report = self._report(tmp_path, enabled=True, schedule="0 9 * * *", timezone="UTC")
+
+        assert report.watch_problem == ""
+        assert report.watch_alert == ""
+
+    # -- deciding on the banner --------------------------------------------
+
+    def _alert(self, last, *, minutes_late=60, schedule="0 9 * * *"):
+        """Run the banner decision against a fixed clock.
+
+        Args:
+            last: The last scheduled run row, or None.
+            minutes_late: How long ago the previous fire time was.
+            schedule: The expression the report carries.
+
+        Returns:
+            The filled-in report.
+        """
+        from pathlib import Path as _Path
+
+        from living_ink.cli import status as status_module
+
+        tz = ZoneInfo("Europe/Madrid")
+        due = datetime(2026, 9, 19, 9, 0, tzinfo=tz)
+        now = due + timedelta(minutes=minutes_late)
+        report = status_module.StatusReport(config_path=_Path("config.yml"))
+        report.watch_schedule = schedule
+        report.last_scheduled_run = last
+        # The fixed clock is only honest if the schedule really did fire then.
+        assert scheduler.previous_fire(schedule, now, tz) == due
+        status_module._raise_watch_alert(report, now, tz)
+        return report
+
+    def test_a_failed_scheduled_run_raises_the_banner(self):
+        from living_ink import state as state_module
+
+        report = self._alert(
+            {
+                "outcome": state_module.OUTCOME_ERROR,
+                "error": "reMarkable Cloud pairing was revoked",
+                "started_at": "2026-09-19T07:00:00+00:00",
+            }
+        )
+
+        assert "reMarkable Cloud pairing was revoked" in report.watch_alert
+        assert "living-ink sync" in report.watch_alert_fix
+
+    def test_a_quiet_night_is_not_a_failure(self):
+        """A schedule that fires nightly and finds nothing is working."""
+        from living_ink import state as state_module
+
+        report = self._alert(
+            {
+                "outcome": state_module.OUTCOME_NOTHING_TO_DO,
+                "started_at": "2026-09-19T07:00:00+00:00",
+            }
+        )
+
+        assert report.watch_alert == ""
+
+    def test_a_fire_time_that_nothing_answered_raises_the_banner(self):
+        """What a watcher that is not running looks like from the outside:
+        there is no error anywhere, because nothing ran to produce one."""
+        report = self._alert(None, minutes_late=60 * 20)
+
+        assert "did not run" in report.watch_alert
+        assert "living-ink setup" in report.watch_alert_fix
+
+    def test_a_tick_that_has_only_just_come_due_is_not_late(self):
+        """A run in flight, or one a minute late because the machine was busy."""
+        assert self._alert(None, minutes_late=5).watch_alert == ""
+
+    def test_a_run_that_started_after_the_fire_time_clears_it(self):
+        from living_ink import state as state_module
+
+        report = self._alert(
+            {
+                "outcome": state_module.OUTCOME_SUCCESS,
+                "started_at": "2026-09-19T07:02:00+00:00",  # 09:02 in Madrid
+            }
+        )
+
+        assert report.watch_alert == ""
+
+    def test_a_run_from_before_the_fire_time_does_not(self):
+        from living_ink import state as state_module
+
+        report = self._alert(
+            {
+                "outcome": state_module.OUTCOME_SUCCESS,
+                "started_at": "2026-09-18T07:00:00+00:00",  # yesterday's
+            }
+        )
+
+        assert "did not run" in report.watch_alert
+
+    # -- what it prints ----------------------------------------------------
+
+    def test_the_panel_says_how_to_turn_watching_on(self, tmp_path, capsys):
+        InfoCommand._render_watch(self._report(tmp_path, enabled=False))
+
+        assert "living-ink config" in capsys.readouterr().out
+
+    def test_an_unusable_schedule_is_reported_in_the_panel(self, tmp_path, capsys):
+        InfoCommand._render_watch(self._report(tmp_path, enabled=True))
+        out = capsys.readouterr().out
+
+        assert "Not usable" in out
+        assert "no schedule is set" in out
+
+    def test_a_schedule_that_never_ran_says_so(self, store, tmp_path, capsys):
+        InfoCommand._render_watch(
+            self._report(tmp_path, enabled=True, schedule="0 9 * * *", timezone="UTC")
+        )
+        out = capsys.readouterr().out
+
+        assert "last run" in out and "never" in out
+        assert "next run   in" in out
+
+    def test_the_last_run_is_worded_the_way_watch_words_it(self, store, tmp_path, capsys):
+        from living_ink import state as state_module
+
+        run_id = store.start_run(trigger=state_module.TRIGGER_SCHEDULED)
+        store.finish_run(run_id, outcome=state_module.OUTCOME_SUCCESS, published=3)
+
+        InfoCommand._render_watch(
+            self._report(tmp_path, enabled=True, schedule="0 9 * * *", timezone="UTC")
+        )
+        out = capsys.readouterr().out
+
+        assert "synced 3 documents" in out
+        assert "just now" in out
+
+    def test_the_panel_never_prints_the_cron_expression(self, store, tmp_path, capsys):
+        InfoCommand._render_watch(
+            self._report(tmp_path, enabled=True, schedule="0 9 * * 1", timezone="UTC")
+        )
+
+        assert "0 9 * * 1" not in capsys.readouterr().out
+
+    def test_the_banner_is_above_everything_else(self, tmp_path, capsys):
+        """A schedule that stopped working produces no other symptom until
+        somebody notices a notebook missing, so it cannot be halfway down."""
+        from living_ink.cli import status as status_module
+
+        report = status_module.StatusReport(config_path=tmp_path / "config.yml")
+        report.watch_alert = "A scheduled sync was due 2 days ago and did not run."
+        report.watch_alert_fix = "Check that the background job is running."
+
+        InfoCommand._render_console(report)
+        out = capsys.readouterr().out
+
+        assert report.watch_alert in out
+        assert out.index(report.watch_alert) < out.index("Living Ink")
+
+    def test_a_healthy_report_shows_no_banner(self, store, tmp_path, capsys):
+        report = self._report(tmp_path, enabled=True, schedule="* * * * *", timezone="UTC")
+        InfoCommand._render_console(report)
+
+        assert "⚠" not in capsys.readouterr().out
+
+    def test_json_carries_the_whole_panel_and_the_job_under_it(self, tmp_path):
+        """The supervisor's two booleans moved under `watch.job`: they no
+        longer decide when anything runs, only whether the watcher is alive."""
+        report = self._report(tmp_path, enabled=True, schedule="0 9 * * *", timezone="UTC")
+        report.config_found = True
+        report.auto_sync_installed = True
+        payload = report.to_dict()["watch"]
+
+        assert payload["enabled"] is True
+        assert payload["schedule"] == "0 9 * * *"
+        assert payload["timezone"] == "UTC"
+        assert payload["next_run"] == report.watch_next_run
+        assert payload["job"] == {"installed": True, "active": False}
 
 
 class TestInterruptExitCode:

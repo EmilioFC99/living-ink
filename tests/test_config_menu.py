@@ -547,6 +547,254 @@ class TestTheWidgetMatchesTheKind:
         assert "preferred_connection" not in saved(config_file).get("remarkable", {})
 
 
+class TestTheScheduleRow:
+    """``watch.schedule`` is the one row whose answer is a cron expression.
+
+    It is a kind rather than a special case in the menu — ``CRON`` — so what is
+    worth pinning here is that the kind buys the three things a bare text box
+    would not: presets, the next fire time beside each one, and a refusal to
+    store five fields that do not parse. An invalid expression saved is a
+    watcher that will not start, and the user finds out the next morning.
+    """
+
+    def _schedule_steps(self, *answers: Any) -> List[Tuple[str, Any]]:
+        """Script a session that edits the schedule and discards.
+
+        Args:
+            *answers: The answers to the schedule's prompts, in order.
+
+        Returns:
+            The steps, ending at Discard.
+        """
+        return edit_steps("watch", "watch_schedule", *answers)
+
+    def test_it_offers_the_presets_rather_than_a_text_box(self, config_file, monkeypatch):
+        write(config_file, {})
+        script = Menu(self._schedule_steps("0 9 * * *")).install(monkeypatch)
+        ConfigMenu().run()
+        assert script.widget_for("when?") == "select"
+
+    def test_the_question_names_the_zone_the_times_are_in(self, config_file, monkeypatch):
+        write(config_file, {"watch": {"timezone": "Asia/Tokyo"}})
+        script = Menu(self._schedule_steps("0 9 * * *")).install(monkeypatch)
+        ConfigMenu().run()
+        question = next(q for _w, q in script.asked if "when?" in q.lower())
+        assert "Asia/Tokyo" in question
+
+    def test_a_preset_is_stored_as_its_expression(self, config_file, monkeypatch):
+        write(config_file, {})
+        menu = drive(self._schedule_steps("0 9,18 * * *"), monkeypatch)
+        assert menu.edits == {"watch_schedule": "0 9,18 * * *"}
+
+    def test_turning_it_off_removes_the_key(self, config_file, monkeypatch):
+        write(config_file, {"watch": {"schedule": "0 9 * * *"}})
+        drive(
+            [
+                ("what would you like to change", "watch"),
+                ("watch —", "watch_schedule"),
+                ("when?", RESET),
+                ("watch —", BACK),
+                ("what would you like to change", SAVE),
+                ("save?", True),
+            ],
+            monkeypatch,
+        )
+        assert "schedule" not in saved(config_file).get("watch", {})
+
+    def test_the_custom_row_asks_for_the_five_fields(self, config_file, monkeypatch):
+        write(config_file, {})
+        script = Menu(self._schedule_steps(config_module.CUSTOM_CRON, "30 7 * * 1-5")).install(
+            monkeypatch
+        )
+        ConfigMenu().run()
+        assert script.widget_for("cron expression") == "text"
+
+    def test_a_typed_expression_is_stored_stripped(self, config_file, monkeypatch):
+        write(config_file, {})
+        menu = drive(
+            self._schedule_steps(config_module.CUSTOM_CRON, "  30 7 * * 1-5  "), monkeypatch
+        )
+        assert menu.edits == {"watch_schedule": "30 7 * * 1-5"}
+
+    def test_typing_nothing_removes_the_key(self, config_file, monkeypatch):
+        write(config_file, {"watch": {"schedule": "0 9 * * *"}})
+        drive(
+            [
+                ("what would you like to change", "watch"),
+                ("watch —", "watch_schedule"),
+                ("when?", config_module.CUSTOM_CRON),
+                ("cron expression", "   "),
+                ("watch —", BACK),
+                ("what would you like to change", SAVE),
+                ("save?", True),
+            ],
+            monkeypatch,
+        )
+        assert "schedule" not in saved(config_file).get("watch", {})
+
+    def _cancel_steps(self, *answers: Any) -> List[Tuple[str, Any]]:
+        """Script a session whose only edit was cancelled.
+
+        Args:
+            *answers: The answers to the schedule's prompts, ending in a
+                cancel.
+
+        Returns:
+            The steps. There is no "throw away" confirmation at the end,
+            because the menu only asks it when something is pending — which is
+            itself the thing these two tests are checking.
+        """
+        return [
+            ("what would you like to change", "watch"),
+            ("watch —", "watch_schedule"),
+            *[("", answer) for answer in answers],
+            ("watch —", BACK),
+            ("what would you like to change", DISCARD),
+        ]
+
+    def test_cancelling_the_picker_changes_nothing(self, config_file, monkeypatch):
+        write(config_file, {})
+        menu = drive(self._cancel_steps(None), monkeypatch)
+        assert menu.edits == {}
+
+    def test_cancelling_the_typed_expression_changes_nothing(self, config_file, monkeypatch):
+        write(config_file, {})
+        menu = drive(self._cancel_steps(config_module.CUSTOM_CRON, None), monkeypatch)
+        assert menu.edits == {}
+
+
+class TestTheScheduleIsShownBeforeItIsChosen:
+    """Every option carries when it would actually fire.
+
+    ``0 9 1 * *`` and ``0 9 * * 1`` both parse and both read as a morning
+    schedule; one runs twelve times a year. The next fire time beside the row
+    is the only thing on the screen that tells them apart.
+    """
+
+    def test_each_preset_says_when_it_would_next_fire(self, config_file, monkeypatch):
+        from living_ink import scheduler
+
+        write(config_file, {})
+        captured: List[Any] = []
+
+        def capture_select(message: str, choices: Any, **_kwargs: Any) -> Any:
+            captured.extend(choices)
+            return "0 9 * * *"
+
+        script = Menu(self._steps()).install(monkeypatch)
+        monkeypatch.setattr(ui, "select", _only_for("when?", capture_select, script))
+        ConfigMenu().run()
+
+        described = {c.value: c.description for c in captured if c.description}
+        for _label, expression in scheduler.SCHEDULE_PRESETS:
+            if expression is not None:
+                assert described.get(expression), f"{expression} was offered with no next fire"
+
+    def test_a_typed_expression_is_echoed_back_as_three_fire_times(
+        self, config_file, monkeypatch, capsys
+    ):
+        write(config_file, {})
+        drive(
+            edit_steps("watch", "watch_schedule", config_module.CUSTOM_CRON, "0 9 * * 1"),
+            monkeypatch,
+        )
+        assert capsys.readouterr().out.count("fires ") == 3
+
+    @staticmethod
+    def _steps() -> List[Tuple[str, Any]]:
+        """Script a session that opens the schedule picker and discards.
+
+        Returns:
+            The steps, ending at Discard. The picker's own answer comes from
+            the capturing stand-in rather than the script, so the ``when?``
+            step is deliberately absent.
+        """
+        return [
+            ("what would you like to change", "watch"),
+            ("watch —", "watch_schedule"),
+            ("watch —", BACK),
+            ("what would you like to change", DISCARD),
+            ("throw away", True),
+        ]
+
+
+def _only_for(fragment: str, replacement: Any, script: Menu) -> Any:
+    """Route one question to ``replacement`` and the rest back to the script.
+
+    The scripted :class:`Menu` is a queue, so a test that wants to inspect the
+    *choices* of one prompt cannot simply replace ``ui.select`` wholesale — the
+    section menu is a select too, and swallowing it would derail the flow.
+
+    Args:
+        fragment: Case-insensitive text identifying the question to intercept.
+        replacement: What answers that one.
+        script: The queue answering everything else.
+
+    Returns:
+        A stand-in for :func:`living_ink.ui.select`.
+    """
+    scripted = script._replier("select")
+
+    def select(message: str, *args: Any, **kwargs: Any) -> Any:
+        if fragment.lower() in message.lower():
+            return replacement(message, *args, **kwargs)
+        return scripted(message, *args, **kwargs)
+
+    return select
+
+
+class TestTheCronValidator:
+    """What the keystroke validator accepts, refuses, and says about it."""
+
+    def test_an_empty_answer_is_allowed(self):
+        assert config_module._valid_cron("") is True
+        assert config_module._valid_cron("   ") is True
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["0 9 * * *", "*/15 * * * *", "0 9,18 * * 1-5", "0 0 1 JAN *"],
+    )
+    def test_an_expression_croniter_reads_is_allowed(self, expression):
+        assert config_module._valid_cron(expression) is True
+
+    @pytest.mark.parametrize("expression", ["not a schedule", "0 9 * *", "99 9 * * *"])
+    def test_an_expression_it_cannot_read_is_refused_with_a_reason(self, expression):
+        problem = config_module._valid_cron(expression)
+        assert problem is not True
+        assert isinstance(problem, str) and problem
+
+
+class TestTheZoneTheScheduleIsReadIn:
+    """The picker's times follow the timezone being edited, not the saved one."""
+
+    def test_an_unsaved_timezone_edit_is_what_the_times_are_shown_in(
+        self, config_file, monkeypatch
+    ):
+        write(config_file, {"watch": {"timezone": "UTC"}})
+        script = Menu(
+            [
+                ("what would you like to change", "watch"),
+                ("watch —", "watch_timezone"),
+                ("", "Asia/Tokyo"),
+                ("watch —", "watch_schedule"),
+                ("when?", "0 9 * * *"),
+                ("watch —", BACK),
+                ("what would you like to change", DISCARD),
+                ("throw away", True),
+            ]
+        ).install(monkeypatch)
+        ConfigMenu().run()
+        question = next(q for _w, q in script.asked if "when?" in q.lower())
+        assert "Asia/Tokyo" in question
+
+    def test_an_unreadable_zone_falls_back_rather_than_ending_the_session(
+        self, config_file, monkeypatch
+    ):
+        write(config_file, {"watch": {"timezone": "Mars/Olympus_Mons"}})
+        menu = drive(edit_steps("watch", "watch_schedule", "0 9 * * *"), monkeypatch)
+        assert menu.edits == {"watch_schedule": "0 9 * * *"}
+
+
 class TestSecrets:
     """A credential never enters the config file, and never comes back out on screen."""
 

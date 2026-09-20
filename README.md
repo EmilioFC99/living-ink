@@ -44,15 +44,27 @@ Once installed, you can use the global `living-ink` command from anywhere:
 ```bash
 living-ink           # Sync notes (or runs setup if unconfigured)
 living-ink sync      # Run the sync pipeline
-living-ink watch     # Keep syncing on a schedule until you stop it
+living-ink watch     # Keep syncing on the schedule in config.yml until you stop it
 living-ink setup     # Re-run interactive setup wizard
-living-ink info      # Check tablet, AI, vault, caches, and sync state
+living-ink info      # Check tablet, AI, vault, caches, schedule, and sync state
 living-ink config    # Change any setting, edit the prompts, clear the caches
+living-ink uninstall # Remove the background job, settings and caches
 ```
 
 `info` reads; `config` writes. Every setting `info` prints appears in the `config`
 menu under the same name, nothing is written until you confirm the summary, and
 your API keys stay out of `config.yml` — they live in a `0600` file of their own.
+
+Automatic syncing is one cron expression in `config.yml` (`config` → Watch offers
+the common ones and shows you the next three times each would fire). `watch` reads
+it, and on macOS `setup` installs a LaunchAgent whose only job is keeping `watch`
+alive — so the schedule is somewhere you can read and change it, not buried in a
+plist. `info` says when the last scheduled sync ran and when the next one is due,
+and puts a banner above everything if one was missed.
+
+`uninstall` removes the background job and the caches, then asks separately before
+removing your settings, credentials and sync record. **It never touches your notes,
+under any flag** — pass `--yes` to answer every question with yes.
 
 ---
 
@@ -107,7 +119,8 @@ docker compose run --rm living-ink sync
 
 ### 24/7 Background Sync Daemon
 ```bash
-# Run continuous background sync (every 30 mins by default, configurable via SYNC_INTERVAL)
+# Sync on a schedule (every 30 minutes by default; set WATCH_SCHEDULE to any
+# five-field cron expression, and WATCH_TIMEZONE to the zone to read it in)
 docker compose --profile daemon up -d
 ```
 

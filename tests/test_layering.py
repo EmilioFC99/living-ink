@@ -177,6 +177,29 @@ class TestCoreIsBelowThePlugins:
         assert {k: v for k, v in offenders.items() if v} == {}
 
 
+class TestTheSchedulerOwnsNoWork:
+    """Rule 5: ``scheduler.py`` imports the state store and nothing else.
+
+    The schedule says *when*; ``WatchCommand`` says what happens then. That
+    split is the reason :meth:`Schedule.ticks` is a generator rather than a
+    loop that runs a sync: a module that imported the pipeline could not be
+    tested without one, and the DST arithmetic — the part most worth testing —
+    has nothing to do with a tablet.
+
+    ``state`` is allowed because the catch-up question is "has anything run
+    since this fire time", and the runs table is where that is written down.
+    It is below the scheduler, not beside it: nothing in ``state`` reads a
+    schedule.
+    """
+
+    def test_the_scheduler_imports_only_the_state_store(self):
+        assert module_imports(PACKAGE_ROOT / "scheduler.py") == ["state"]
+
+    def test_the_state_store_cannot_import_the_scheduler_back(self):
+        imports = module_imports(PACKAGE_ROOT / "state.py")
+        assert [name for name in imports if name.split(".")[0] == "scheduler"] == []
+
+
 class TestTheDomainModelIsALeaf:
     """``core/document.py`` imports nothing from Living Ink at all.
 
@@ -251,7 +274,7 @@ def cli_self_imports(path: Path) -> List[Tuple[str, str]]:
 
 
 class TestTheFrontEndIsTheTop:
-    """Rule 5: nothing in the library imports ``cli/``, and ``cli/`` never imports itself.
+    """Rule 6: nothing in the library imports ``cli/``, and ``cli/`` never imports itself.
 
     Two directions, one idea. Outward, the front end is the top of the stack:
     a library module that reaches into it has made the CLI a dependency of the

@@ -16,6 +16,7 @@ from living_ink.cli.commands.config import ConfigCommand
 from living_ink.cli.commands.info import InfoCommand
 from living_ink.cli.commands.setup import SetupCommand
 from living_ink.cli.commands.sync import SyncCommand
+from living_ink.cli.commands.uninstall import UninstallCommand
 from living_ink.cli.commands.watch import WatchCommand
 from living_ink.cli.flags import register_global_flags
 from living_ink.config import get_config_path, read_config_file
@@ -110,16 +111,16 @@ class LivingInkCLI:
         commands: Dictionary mapping command names to BaseCommand classes.
     """
 
-    #: The commands 1.0 ships, in the order ``--help`` lists them. Five of the
-    #: six so far: ``uninstall`` is still unbuilt, and
-    #: ``tests/test_cli_behaviour.py`` pins its absence so it stays a stated
-    #: fact rather than an oversight.
+    #: The six commands 1.0 ships, in the order ``--help`` lists them: what a
+    #: user does daily first, then what they set up, and ``uninstall`` last
+    #: because it is the one nobody is looking for until they are.
     DEFAULT_COMMANDS: list[Type[BaseCommand]] = [
         SyncCommand,
         WatchCommand,
         SetupCommand,
         InfoCommand,
         ConfigCommand,
+        UninstallCommand,
     ]
 
     def __init__(

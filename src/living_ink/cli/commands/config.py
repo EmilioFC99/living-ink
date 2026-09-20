@@ -44,6 +44,7 @@ import logging
 import os
 import shlex
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -52,6 +53,7 @@ from living_ink.cli.base import BaseCommand
 from living_ink.config.schema import (
     ACTIVE,
     CHOICE,
+    CRON,
     FLAG,
     LIST,
     LIVE_SETTINGS,
@@ -74,6 +76,7 @@ SAVE = "\x00save"
 DISCARD = "\x00discard"
 BACK = "\x00back"
 RESET = "\x00reset"
+CUSTOM_CRON = "\x00cron"
 
 #: The editors to fall back on, in order, when neither ``$VISUAL`` nor
 #: ``$EDITOR`` is set. ``nano`` first: a user with no editor preference is
@@ -366,6 +369,9 @@ class ConfigMenu:
             picked = ui.select("Which one?", rows, default=str(current))
             return None if picked is None else _reset_or(picked)
 
+        if setting.kind == CRON:
+            return self._edit_schedule(current)
+
         if setting.kind == LIST:
             return self._edit_list(setting, current)
 
@@ -381,6 +387,87 @@ class ConfigMenu:
             return None
         typed = typed.strip()
         return REMOVED_VALUE if not typed else coerce(setting, typed)
+
+    def _edit_schedule(self, current: Any) -> Any:
+        """Pick a schedule from the common ones, or write a cron expression.
+
+        Every option carries the moment it would next fire, and a typed
+        expression is echoed back as the next three. That is the only feedback
+        that distinguishes ``0 9 1 * *`` from ``0 9 * * 1``: both parse, both
+        look like a morning schedule, and one of them runs twelve times a
+        year. An expression that does not parse is refused here rather than
+        saved and reported later by ``info``.
+
+        Args:
+            current: The effective expression, used to preselect a row.
+
+        Returns:
+            A cron expression, :data:`REMOVED_VALUE` to unset it, or None if
+            the user cancelled.
+        """
+        from living_ink import scheduler
+
+        held = str(current or "").strip()
+        try:
+            tz, tz_name = scheduler.resolve_timezone(self._timezone())
+        except ValueError as problem:
+            # A zone typed into the file by hand, or exported as
+            # ``LIVING_INK_WATCH_TIMEZONE``, reaches here unvalidated. Falling
+            # back to the host's is the only reading that lets the user carry
+            # on: refusing would close the one screen that can fix it.
+            console(ui.yellow(f"  {problem} Showing times in this machine's zone."))
+            tz, tz_name = scheduler.resolve_timezone(None)
+        now = datetime.now(tz)
+
+        rows: List[ui.Choice] = []
+        for label, expression in scheduler.SCHEDULE_PRESETS:
+            if expression is None:
+                rows.append(ui.Choice(RESET, "No schedule"))
+                continue
+            upcoming = scheduler.next_fire(expression, now, tz)
+            rows.append(
+                ui.Choice(
+                    expression,
+                    label,
+                    description=f"next: {scheduler.format_moment(upcoming, tz)}",
+                )
+            )
+        rows.append(ui.Choice(CUSTOM_CRON, "Write a cron expression…"))
+
+        picked = ui.select(f"When? (times in {tz_name})", rows, default=held or RESET)
+        if picked is None:
+            return None
+        if picked != CUSTOM_CRON:
+            return _reset_or(picked)
+
+        typed = ui.text(
+            "Cron expression (minute hour day month weekday)",
+            default=held,
+            validate=_valid_cron,
+        )
+        if typed is None:
+            return None
+        typed = typed.strip()
+        if not typed:
+            return REMOVED_VALUE
+
+        for moment in scheduler.next_fires(typed, now, tz, count=3):
+            console(ui.dim(f"    fires {scheduler.format_moment(moment, tz)}"))
+        return typed
+
+    def _timezone(self) -> str:
+        """Return the timezone the schedule is read in, edits included.
+
+        Args:
+            None.
+
+        Returns:
+            The pending or effective ``watch.timezone``, or "" for the host's.
+        """
+        if "watch_timezone" in self.edits:
+            return str(self.edits["watch_timezone"] or "")
+        origin = self.origins().get("watch_timezone")
+        return str(getattr(origin, "value", "") or "")
 
     def _edit_list(self, setting: Setting, current: Any) -> Any:
         """Ask for a list value, by ticking or by typing.
@@ -868,6 +955,26 @@ def coerce(setting: Setting, typed: str) -> Any:
         # string is closer to what the user meant than a crash.
         logger.debug("Could not read %r as %s; storing as text", typed, setting.kind)
     return typed
+
+
+def _valid_cron(answer: str) -> Any:
+    """Accept an empty answer, or one ``croniter`` can read.
+
+    A keystroke validator rather than a check after the fact: a schedule that
+    is rejected on save has already cost the user the typing, and a schedule
+    that is *saved* invalid is a watcher that refuses to start.
+
+    Args:
+        answer: What is typed so far.
+
+    Returns:
+        True when acceptable, otherwise the problem to show.
+    """
+    from living_ink import scheduler
+
+    if not answer.strip():
+        return True
+    return scheduler.validate_expression(answer.strip()) or True
 
 
 def _reset_or(picked: str) -> Any:

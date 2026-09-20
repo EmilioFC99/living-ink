@@ -319,36 +319,33 @@ def verify_ai_provider(
 
 
 # ---------------------------------------------------------------------------
-# macOS LaunchAgent (Background Sync) Helpers
+# macOS LaunchAgent (keeping the watcher alive)
 # ---------------------------------------------------------------------------
 
 LAUNCH_AGENT_LABEL = "com.livingink.sync"
 LAUNCH_AGENT_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
 
-def find_uv_path() -> str:
-    """Find the full path to the uv executable."""
-    found = shutil.which("uv")
-    if found:
-        return found
-    local_uv = Path.home() / ".local" / "bin" / "uv"
-    if local_uv.exists():
-        return str(local_uv)
-    cargo_uv = Path.home() / ".cargo" / "bin" / "uv"
-    if cargo_uv.exists():
-        return str(cargo_uv)
-    return "uv"
+def install_launch_agent(repo_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Install the macOS LaunchAgent that keeps ``living-ink watch`` running.
 
+    The job answers one question — is the watcher alive — and nothing else.
+    It used to answer two: the plist carried a ``StartInterval``, so *when* a
+    sync happened was a number baked into a file in ``~/Library``, invisible
+    to ``info``, unreachable from ``config``, and impossible to express as
+    "weekdays at nine". The schedule is now a cron expression in ``config.yml``
+    that the watcher reads on every tick, which is why this plist has no
+    interval and why editing the schedule needs no reinstall.
 
-def install_launch_agent(
-    repo_dir: Optional[Path] = None,
-    interval_seconds: int = 3600,
-) -> Tuple[bool, str]:
-    """Install macOS LaunchAgent plist for periodic background note sync.
+    ``ProgramArguments`` is the installed ``living-ink`` executable, never
+    ``uv run`` from a checkout: a supervised process that resolves its
+    interpreter out of a directory the user may rename is a background job
+    that dies silently months later. A missing CLI is therefore a refusal
+    with a remedy, not a fallback.
 
     Args:
-        repo_dir: Root repository directory path.
-        interval_seconds: Sync interval in seconds (default: 3600 / 1 hour).
+        repo_dir: Root repository directory, used only to locate the log
+            directory the job's stdout and stderr are redirected to.
 
     Returns:
         Tuple of (success_bool, message_str).
@@ -356,25 +353,19 @@ def install_launch_agent(
     if platform.system() != "Darwin":
         return False, "LaunchAgent background sync is only supported on macOS."
 
+    cli_path = shutil.which("living-ink") or str(Path.home() / ".local" / "bin" / "living-ink")
+    if not Path(cli_path).exists():
+        return False, (
+            "The 'living-ink' command is not installed, so there is nothing for the "
+            "background job to run. Install it first, then run setup again."
+        )
+
     from living_ink.config import get_logs_dir
 
     logs_dir = get_logs_dir(repo_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
     out_log = logs_dir / "launchagent.log"
     err_log = logs_dir / "launchagent.error.log"
-
-    cli_path = shutil.which("living-ink") or str(Path.home() / ".local" / "bin" / "living-ink")
-    if Path(cli_path).exists():
-        args_xml = f"""        <string>{cli_path}</string>
-        <string>sync</string>"""
-    else:
-        uv_path = find_uv_path()
-        args_xml = f"""        <string>{uv_path}</string>
-        <string>run</string>
-        <string>python</string>
-        <string>-m</string>
-        <string>living_ink</string>
-        <string>sync</string>"""
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -384,10 +375,13 @@ def install_launch_agent(
     <string>{LAUNCH_AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-{args_xml}
+        <string>{cli_path}</string>
+        <string>watch</string>
     </array>
-    <key>StartInterval</key>
-    <integer>{interval_seconds}</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>{out_log}</string>
     <key>StandardErrorPath</key>
@@ -403,7 +397,8 @@ def install_launch_agent(
     try:
         LAUNCH_AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
 
-        # Unload if already running
+        # Unload first, always: a reinstall that only rewrites the file leaves
+        # the old process running against the old plist until the next login.
         if LAUNCH_AGENT_PLIST.exists():
             subprocess.run(
                 ["launchctl", "unload", str(LAUNCH_AGENT_PLIST)],
@@ -423,7 +418,7 @@ def install_launch_agent(
         if res.returncode != 0:
             return False, f"Failed to load LaunchAgent: {res.stderr.strip()}"
 
-        return True, f"Installed background sync (runs every {interval_seconds // 60} minutes)"
+        return True, "Installed the background job that runs your sync schedule"
     except OSError as e:
         return False, f"Could not create LaunchAgent: {e}"
 
@@ -511,6 +506,8 @@ def generate_config_yaml(
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
     max_notebooks_per_run: int = 5,
+    watch_schedule: str = "",
+    watch_timezone: str = "",
 ) -> str:
     """Generate clean, commented config.yml content.
 
@@ -534,6 +531,10 @@ def generate_config_yaml(
         obsidian_root_folder: Root folder inside the vault.
         obsidian_mirror_folders: Whether to mirror reMarkable folder hierarchy.
         max_notebooks_per_run: Maximum notebooks to process per sync run.
+        watch_schedule: A cron expression, or "" for no automatic syncing.
+        watch_timezone: The zone that expression is read in, written only
+            alongside a schedule — a timezone with nothing to schedule is a
+            line in the file that decides nothing.
 
     Returns:
         YAML string ready to be written to config.yml.
@@ -547,10 +548,19 @@ def generate_config_yaml(
     if ai_base_url:
         ai["base_url"] = ai_base_url
 
+    # Enabled *is* having a schedule. Two keys that can disagree — a schedule
+    # with ``enabled: false``, or the reverse — give the user a watcher that
+    # runs nothing and a config that says it should.
+    watch: Dict[str, Any] = {"enabled": bool(watch_schedule)}
+    if watch_schedule:
+        watch["schedule"] = watch_schedule
+        watch["timezone"] = watch_timezone
+
     return render_config(
         {
             "schema_version": SCHEMA_VERSION,
             "ai": ai,
+            "watch": watch,
             "remarkable": {
                 "preferred_connection": preferred_connection,
                 "use_ssh": use_ssh,

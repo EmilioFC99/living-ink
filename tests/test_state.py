@@ -228,6 +228,106 @@ class TestRuns:
         assert store.get_publication("doc-1", "Obsidian")["run_id"] == run_id
 
 
+class TestWhatAskedForTheRun:
+    """A scheduled run and a hand-typed one are told apart, and stay apart.
+
+    The whole staleness banner rests on this: somebody who syncs by hand every
+    morning must not keep resetting the clock that is watching the daemon.
+    """
+
+    def test_a_run_is_manual_unless_it_says_otherwise(self, store):
+        store.start_run()
+        assert store.last_run()["trigger"] == state.TRIGGER_MANUAL
+
+    def test_a_scheduled_run_records_the_time_it_was_due(self, store):
+        store.start_run(
+            trigger=state.TRIGGER_SCHEDULED,
+            scheduled_fire_time="2026-09-19T07:00:00+00:00",
+        )
+        row = store.last_run()
+        assert (row["trigger"], row["scheduled_fire_time"]) == (
+            state.TRIGGER_SCHEDULED,
+            "2026-09-19T07:00:00+00:00",
+        )
+
+    def test_the_last_scheduled_run_ignores_manual_ones(self, store):
+        scheduled = store.start_run(trigger=state.TRIGGER_SCHEDULED)
+        store.start_run()
+        store.start_run()
+
+        assert store.last_scheduled_run()["id"] == scheduled
+
+    def test_nothing_scheduled_yet_is_not_an_error(self, store):
+        store.start_run()
+        assert store.last_scheduled_run() is None
+
+    def test_a_failure_keeps_the_line_that_explains_it(self, store):
+        run_id = store.start_run()
+        store.finish_run(run_id, outcome=state.OUTCOME_ERROR, error="Tablet unreachable")
+        assert store.last_run()["error"] == "Tablet unreachable"
+
+    def test_a_success_carries_no_error(self, store):
+        run_id = store.start_run()
+        store.finish_run(run_id, outcome=state.OUTCOME_SUCCESS)
+        assert store.last_run()["error"] is None
+
+    def test_an_old_database_reads_its_runs_as_manual(self, tmp_path):
+        """The three columns are added by ALTER on open, with no version bump.
+
+        A row written before they existed is a manual run that was never
+        scheduled, which is exactly what it was.
+        """
+        path = tmp_path / "state.db"
+        with StateStore(path) as first:
+            first.start_run()
+
+        conn = sqlite3.connect(str(path))
+        for column in ("trigger", "scheduled_fire_time", "error"):
+            conn.execute(f"ALTER TABLE runs DROP COLUMN {column}")
+        conn.commit()
+        conn.close()
+
+        with StateStore(path) as second:
+            row = second.last_run()
+            assert (row["trigger"], row["scheduled_fire_time"], row["error"]) == (
+                state.TRIGGER_MANUAL,
+                None,
+                None,
+            )
+
+
+class TestReadingRunsBack:
+    """What ``watch`` prints at startup and what the catch-up decision asks."""
+
+    def test_recent_runs_are_newest_first(self, store):
+        ids = [store.start_run() for _ in range(4)]
+        assert [row["id"] for row in store.recent_runs(3)] == list(reversed(ids))[:3]
+
+    def test_recent_runs_on_an_empty_database(self, store):
+        assert store.recent_runs(5) == []
+
+    def test_a_limit_of_zero_asks_for_nothing(self, store):
+        store.start_run()
+        assert store.recent_runs(0) == []
+
+    def test_runs_since_counts_what_covers_a_fire_time(self, store):
+        before = state._now()
+        store.start_run()
+        store.start_run()
+
+        assert store.runs_since(before) == 2
+
+    def test_runs_since_a_moment_still_ahead_counts_nothing(self, store):
+        store.start_run()
+        assert store.runs_since("2999-01-01T00:00:00+00:00") == 0
+
+    def test_a_run_started_exactly_on_the_fire_time_counts(self, store):
+        """``>=``, not ``>``: a tick that started on the second it was due has
+        answered for it, and a strict comparison would run it twice."""
+        store.start_run()
+        assert store.runs_since(store.last_run()["started_at"]) == 1
+
+
 class TestDocuments:
     """An inventory of the device, so `what is pending` needs no tablet."""
 

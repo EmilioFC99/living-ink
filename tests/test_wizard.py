@@ -90,7 +90,7 @@ CLOUD_ONLY = {
     "which vault": "",  # filled in per test
     "which folder inside the vault": "Living Ink",
     "mirror the tablet": True,
-    "sync automatically every hour": False,
+    "sync automatically": "",  # the schedule preset meaning "off"
     "save this configuration": True,
     "run your first sync now": False,
 }
@@ -107,7 +107,7 @@ USB_ONLY = {
     "which vault": "",
     "which folder inside the vault": "Living Ink",
     "mirror the tablet": True,
-    "sync automatically every hour": False,
+    "sync automatically": "",  # the schedule preset meaning "off"
     "save this configuration": True,
     "run your first sync now": False,
 }
@@ -328,6 +328,132 @@ class TestWhatTheSummaryShows:
         cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
         assert cfg["obsidian"]["enabled"] is False
         assert "no destination" in capsys.readouterr().out.lower()
+
+
+class TestTheScheduleQuestion:
+    """§13.3: the wizard asks *when*, and the answer lands in ``config.yml``.
+
+    The question used to be "sync automatically every hour?" — one cadence,
+    stored as a ``StartInterval`` in a plist. A user who wanted weekday
+    mornings had no answer, and a user who said yes could not afterwards find
+    out what they had agreed to. What replaced it has to keep two promises:
+    the answer is a schedule, and the schedule is somewhere readable.
+    """
+
+    def _with_schedule(self, expression: str) -> Dict[str, Any]:
+        """Script the standard flow, answering the schedule question.
+
+        Args:
+            expression: The preset's value — a cron expression, or "" for off.
+
+        Returns:
+            The answers to hand :func:`run_wizard`.
+        """
+        return {**CLOUD_ONLY, "sync automatically": expression}
+
+    def test_a_chosen_schedule_is_written_as_a_cron_expression(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        run_wizard(monkeypatch, tmp_path, self._with_schedule("0 9 * * *"), vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["watch"]["enabled"] is True
+        assert cfg["watch"]["schedule"] == "0 9 * * *"
+
+    def test_the_zone_is_written_beside_it(self, monkeypatch, tmp_path, vault, probes):
+        """Without it the expression means something different on a trip."""
+        from living_ink import scheduler
+
+        run_wizard(monkeypatch, tmp_path, self._with_schedule("0 9 * * *"), vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["watch"]["timezone"] == scheduler.host_timezone_name()
+
+    def test_declining_writes_the_section_turned_off_and_nothing_else(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """Half a schedule is worse than none: ``enabled`` alone is unambiguous."""
+        run_wizard(monkeypatch, tmp_path, self._with_schedule(""), vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["watch"] == {"enabled": False}
+
+    def test_the_question_says_when_each_option_would_next_fire(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """The only thing distinguishing ``0 9 * * 1`` from ``0 9 1 * *`` on screen."""
+        from living_ink import scheduler
+
+        captured: List[Any] = []
+        script = Script({**self._with_schedule(""), "which vault": str(vault)})
+        script.install(monkeypatch)
+
+        def select(message: str, choices: Any = (), **kwargs: Any) -> Any:
+            if "sync automatically" in message.lower():
+                captured.extend(choices)
+            return script._reply(message, choices, **kwargs)
+
+        monkeypatch.setattr(ui, "select", select)
+        Wizard(root=tmp_path, bin_dir=tmp_path / "bin").run()
+
+        offered = {c.value: c.description for c in captured}
+        for _label, expression in scheduler.SCHEDULE_PRESETS:
+            if expression is not None:
+                assert offered.get(expression), f"{expression} was offered with no next fire"
+
+    def test_the_written_schedule_is_one_the_scheduler_can_read(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """A wizard that writes an expression ``watch`` refuses is worse than none."""
+        from living_ink import scheduler
+
+        run_wizard(monkeypatch, tmp_path, self._with_schedule("0 9,18 * * *"), vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert scheduler.validate_expression(cfg["watch"]["schedule"]) is None
+        assert scheduler.validate_timezone(cfg["watch"]["timezone"]) is None
+
+
+class TestTheJobThatKeepsTheWatcherAlive:
+    """The supervisor is installed for a schedule, and only for a schedule."""
+
+    def test_a_schedule_installs_the_launch_agent_on_a_mac(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch(
+                "living_ink.setup_wizard.install_launch_agent",
+                return_value=(True, "Installed"),
+            ) as install,
+        ):
+            run_wizard(
+                monkeypatch, tmp_path, {**CLOUD_ONLY, "sync automatically": "0 9 * * *"}, vault
+            )
+
+        assert install.called
+
+    def test_no_schedule_installs_nothing(self, monkeypatch, tmp_path, vault, probes):
+        """Nothing to supervise, so nothing is left behind to uninstall."""
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch(
+                "living_ink.setup_wizard.install_launch_agent",
+                return_value=(True, "Installed"),
+            ) as install,
+        ):
+            run_wizard(monkeypatch, tmp_path, {**CLOUD_ONLY, "sync automatically": ""}, vault)
+
+        assert not install.called
+
+    def test_elsewhere_the_schedule_is_written_and_the_user_is_told_what_runs_it(
+        self, monkeypatch, tmp_path, vault, probes, capsys
+    ):
+        """A config nothing reads is the silent half of this feature."""
+        with patch("platform.system", return_value="Linux"):
+            run_wizard(
+                monkeypatch, tmp_path, {**CLOUD_ONLY, "sync automatically": "0 9 * * *"}, vault
+            )
+
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["watch"]["schedule"] == "0 9 * * *"
+        assert "living-ink watch" in capsys.readouterr().out
 
 
 class TestTheClosingEstimate:

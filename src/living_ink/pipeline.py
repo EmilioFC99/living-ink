@@ -402,7 +402,7 @@ def reset_state_store() -> None:
         _state_store = None
 
 
-def reset_caches() -> None:
+def reset_caches(*, keep_state_store: bool = False) -> None:
     """Drop everything this module holds for the lifetime of the process.
 
     The three accessors above cache so that one run reads ``config.yml`` once.
@@ -414,12 +414,22 @@ def reset_caches() -> None:
     The scheduler calls this between ticks. A single ``sync`` never needs it,
     which is why the accessors do not invalidate themselves on a timer: the
     boundary is a run ending, and only the caller knows where that is.
+
+    Args:
+        keep_state_store: Leave the open database alone. The scheduler passes
+            True: a config change can move a destination or a model, but never
+            the database, and reopening it per tick would pay the
+            ``_ADDED_COLUMNS`` probe and the legacy-import sweep every night
+            for nothing. Everything else that resets caches — a test, a wizard
+            that moved the data directory — does want the handle dropped, so
+            the default is the thorough one.
     """
     global _default_config, _default_destinations
 
     _default_config = None
     _default_destinations = None
-    reset_state_store()
+    if not keep_state_store:
+        reset_state_store()
 
 
 def load_processed_log(dest_name: str):
@@ -884,6 +894,8 @@ class SyncPipeline:
         dry_run: bool = False,
         prune: bool = False,
         json_output: bool = False,
+        trigger: str = state.TRIGGER_MANUAL,
+        scheduled_fire_time: Optional[str] = None,
         flags: Optional[Dict[str, Any]] = None,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
@@ -926,6 +938,14 @@ class SyncPipeline:
                 spells ``--preview --transcribe``.
             prune: Delete notes whose document is gone from the tablet.
             json_output: Print the run report as JSON instead of a table.
+            trigger: Who asked for this run —
+                :data:`~living_ink.state.TRIGGER_MANUAL` or
+                :data:`~living_ink.state.TRIGGER_SCHEDULED`. It is recorded on
+                the run row and nothing else reads it during the run; what it
+                buys is that ``info`` can tell a dead schedule from a user who
+                simply has not synced by hand lately.
+            scheduled_fire_time: The time a scheduled run was due, ISO-8601.
+                Meaningless for a manual run and left None there.
             flags: Further settings overrides for this run, keyed by
                 :class:`~living_ink.settings.Settings` field name. This is how
                 the front end hands over everything the schema declares a flag
@@ -992,6 +1012,16 @@ class SyncPipeline:
             },
         )
 
+        self.trigger = trigger
+        self.scheduled_fire_time = scheduled_fire_time
+
+        # Set by _execute when the selection found nothing to do. Read back by
+        # _run_recorded, which is the only place that can tell the difference
+        # between a run that published nothing and one that had nothing to
+        # publish. Initialised here for the same reason _counts is: a failure
+        # before _execute starts must not turn into an AttributeError.
+        self.nothing_pending = False
+
         # Opened by run(); every state row written during that run carries it,
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
@@ -1002,6 +1032,11 @@ class SyncPipeline:
         # connection — is read back by _run_recorded(), and an unset attribute
         # there turns the real error into an AttributeError about counting.
         self._counts: Tuple[int, int, int] = (0, 0, 0)
+
+        # What an exception said, if one ended the run. Preferred over the
+        # counts by _failure_line(), because "reMarkable Cloud pairing was
+        # revoked" is actionable and "0 of 0 published" is not.
+        self._failure_detail: Optional[str] = None
 
         # 3. Transcription cache. Pages are transcribed concurrently, so the
         # hit and miss tallies need a lock even though the entries themselves
@@ -2418,22 +2453,36 @@ class SyncPipeline:
         """
         store = get_state_store()
         # A dry run must leave no trace, and a run row is a trace.
-        self.run_id = None if self.dry_run else store.start_run()
+        self.run_id = (
+            None
+            if self.dry_run
+            else store.start_run(trigger=self.trigger, scheduled_fire_time=self.scheduled_fire_time)
+        )
         seen = published = failed = 0
-        outcome = "error"
+        outcome = state.OUTCOME_ERROR
         try:
             result = self._execute()
             seen, published, failed = self._counts
-            outcome = "success" if result else "partial"
-            if outcome == "success":
+            outcome = state.OUTCOME_SUCCESS if result else state.OUTCOME_PARTIAL
+            if outcome == state.OUTCOME_SUCCESS:
                 self._prune_caches()
+                if self.nothing_pending:
+                    outcome = state.OUTCOME_NOTHING_TO_DO
             return result
         except KeyboardInterrupt:
             # Ctrl+C is not a failure, and the run did not do nothing. Record
             # what it got through, then let the interrupt carry on out.
             seen, published, failed = self._counts
-            outcome = "interrupted"
+            outcome = state.OUTCOME_INTERRUPTED
             self._report_interrupt(published)
+            raise
+        except Exception as exc:
+            # Something the pipeline could not handle — an unreachable tablet,
+            # a revoked token, a config that will not load. Its message is the
+            # only specific thing anyone will get, and ``info``'s banner is
+            # where it is read back, so keep it instead of the bare counts.
+            seen, published, failed = self._counts
+            self._failure_detail = redact(f"{exc}".strip() or type(exc).__name__)
             raise
         finally:
             self._signal_outcome(outcome)
@@ -2444,6 +2493,13 @@ class SyncPipeline:
                     seen=seen,
                     published=published,
                     failed=failed,
+                    # An interrupt is the user's own decision, so it leaves no
+                    # error text — only a run that failed on its own has one.
+                    error=(
+                        self._failure_line()
+                        if outcome in (state.OUTCOME_ERROR, state.OUTCOME_PARTIAL)
+                        else None
+                    ),
                 )
 
     def _prune_caches(self) -> None:
@@ -2486,15 +2542,15 @@ class SyncPipeline:
         contracted to change nothing.
 
         Args:
-            outcome: The run's recorded outcome — ``success``, ``partial``,
-                ``error`` or ``interrupted``.
+            outcome: The run's recorded outcome — ``success``,
+                ``nothing_to_do``, ``partial``, ``error`` or ``interrupted``.
         """
-        if self.dry_run or outcome == "interrupted":
+        if self.dry_run or outcome == state.OUTCOME_INTERRUPTED:
             return
 
         for dest in self.destinations:
             try:
-                if outcome == "success":
+                if outcome in state.HEALTHY_OUTCOMES:
                     dest.clear_failure()
                 else:
                     dest.report_failure(self._failure_summary(outcome))
@@ -2512,7 +2568,7 @@ class SyncPipeline:
             A short paragraph naming the counts and the run's warnings.
         """
         seen, published, failed = self._counts
-        if outcome == "partial":
+        if outcome == state.OUTCOME_PARTIAL:
             headline = f"{published} of {seen} notebook(s) synced; {failed} failed."
         else:
             headline = f"The sync stopped before it finished. {published} of {seen} published."
@@ -2524,6 +2580,30 @@ class SyncPipeline:
         lines.append("")
         lines.append(f"Run `living-ink info` for details, or see the log at {logs.LOG_PATH}.")
         return "\n".join(lines)
+
+    def _failure_line(self) -> str:
+        """Say in one line why the run failed, for the ``runs.error`` column.
+
+        Distinct from :meth:`_failure_summary`, which writes a paragraph into
+        a note somebody will read in Obsidian. This one is read back by
+        ``info``'s banner, which has one line to work with, so it prefers the
+        most specific thing available: what a document actually said, then a
+        run-level warning, then the counts.
+
+        Returns:
+            A single line with no trailing newline.
+        """
+        if self._failure_detail:
+            return self._failure_detail
+        report = self.report
+        if report:
+            for outcome in report.documents:
+                if outcome.status == FAILED and outcome.reason:
+                    return f"{outcome.name}: {outcome.reason}"
+            if report.warnings:
+                return report.warnings[0]
+        seen, published, failed = self._counts
+        return f"{published} of {seen} document(s) published; {failed} failed."
 
     def _report_interrupt(self, published: int) -> None:
         """Say what an interrupted run kept, so the user knows what it cost.
@@ -2551,6 +2631,8 @@ class SyncPipeline:
         """
         self._counts = (0, 0, 0)
         self.report = RunReport()
+        self.nothing_pending = False
+        self._failure_detail = None
 
         validate_environment()
         log("Pipeline started.")
@@ -2575,6 +2657,11 @@ class SyncPipeline:
         self._report_selection(chosen)
 
         if not chosen.to_process:
+            # Recorded, not inferred. A scheduled tick that found nothing is a
+            # healthy run and has to be distinguishable from one that never
+            # happened, or the staleness banner either cries wolf at every
+            # quiet week or never fires at all.
+            self.nothing_pending = True
             if not self.target_notebook:
                 log("No new or updated notebooks found for any active destination. Exiting.")
             self._print_summary()
