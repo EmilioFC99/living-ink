@@ -9,6 +9,7 @@ same probes and neither half should have to import the other to be tested.
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from living_ink import setup_wizard
@@ -196,6 +197,18 @@ class TestAiVerification:
     def test_verify_none_provider(self):
         """Provider 'none' always passes without making network calls."""
         ok, msg = verify_ai_provider("none")
+        assert ok is True
+        assert "disabled" in msg.lower()
+
+    @pytest.mark.parametrize("name", [None, "", "   "])
+    def test_no_provider_at_all_reads_as_none(self, name):
+        """``provider:`` with nothing after it is not a provider to verify.
+
+        ``info`` passes whatever the config held, and a valueless key parses
+        to ``None`` — which used to reach ``.strip()`` and crash the health
+        check rather than report the cleanup as off.
+        """
+        ok, msg = verify_ai_provider(name)
         assert ok is True
         assert "disabled" in msg.lower()
 
