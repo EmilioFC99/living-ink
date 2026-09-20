@@ -1109,9 +1109,11 @@ class TestInfoDefersTheDocumentQuestion:
         """A count from the database alone would be a guess about the tablet."""
         assert "documents" not in self._report().to_dict()
 
-    def test_the_console_points_at_the_live_comparison(self, capsys):
+    def test_the_console_says_nothing_about_documents(self, capsys):
+        """Not even a pointer: a line about documents that reports no documents
+        reads as an answer, and the answer is somewhere else."""
         InfoCommand._render_console(self._report())
-        assert "living-ink sync --preview" in capsys.readouterr().out
+        assert "Documents" not in capsys.readouterr().out
 
     def test_list_is_gone(self):
         assert "list" not in LivingInkCLI().commands
