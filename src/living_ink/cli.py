@@ -1778,10 +1778,9 @@ def configure_logging(args: argparse.Namespace) -> None:
         args: Parsed arguments; ``--verbose`` and ``--quiet`` are read off it.
     """
     from living_ink import logs
-    from living_ink.pipeline import LOG_PATH
 
     logs.configure(
-        LOG_PATH,
+        logs.LOG_PATH,
         verbose=getattr(args, "verbose", False),
         quiet=getattr(args, "quiet", False),
         json_output=getattr(args, "json", False),

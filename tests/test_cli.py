@@ -818,7 +818,7 @@ class TestVerbosityFlags:
 
         args = argparse.Namespace(command="status", config=None, verbose=True, quiet=False)
         with (
-            patch("living_ink.pipeline.LOG_PATH", tmp_path / "pipeline.log"),
+            patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
             patch.object(StatusCommand, "run", return_value=0),
         ):
             try:

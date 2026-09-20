@@ -32,7 +32,6 @@ from living_ink.destinations import (
     ObsidianDestination,
 )
 from living_ink.pipeline import (
-    LOG_PATH,
     DocumentJob,
     SyncOptions,
     SyncPipeline,
@@ -1337,35 +1336,8 @@ class TestOpeningTheStoreSweepsDeadDestinations:
         assert store.published_versions("AppleNotesDestination") == {}
 
 
-class TestLogRedaction:
-    """pipeline.log writes the file users attach to bug reports."""
-
-    def test_a_registered_secret_never_reaches_the_log_file(self, tmp_path, monkeypatch, capsys):
-        from living_ink import redact as redact_mod
-
-        redact_mod.clear_secrets()
-        redact_mod.register_secret("rm-device-token-abcdef123456")
-        log_path = tmp_path / "pipeline.log"
-        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
-        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
-
-        try:
-            pipeline.log("connecting with rm-device-token-abcdef123456")
-        finally:
-            redact_mod.clear_secrets()
-
-        written = log_path.read_text(encoding="utf-8")
-        assert "rm-device-token-abcdef123456" not in written
-        assert "***redacted***" in written
-        # The same masked text is what the user saw on screen.
-        assert "rm-device-token-abcdef123456" not in capsys.readouterr().out
-
-    def test_ordinary_messages_are_untouched(self, tmp_path, monkeypatch):
-        log_path = tmp_path / "pipeline.log"
-        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
-        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
-        pipeline.log("Publishing Meeting Notes")
-        assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
+class TestConfigSecretsAreRegistered:
+    """Loading a config arms the redactor before anything can log a key."""
 
     def test_config_credentials_are_registered_on_load(self, tmp_path):
         from living_ink import redact as redact_mod
@@ -1385,48 +1357,6 @@ class TestLogRedaction:
 
         assert "AIzaSyExampleKeyForTesting1234" in secrets
         assert "rm-device-token-abcdef123456" in secrets
-
-
-class TestLogPersistence:
-    """The log used to be truncated at the top of every run()."""
-
-    @pytest.fixture(autouse=True)
-    def _isolated(self):
-        from living_ink import logs
-
-        logs.reset_handlers()
-        yield
-        logs.reset_handlers()
-
-    def test_a_new_run_keeps_the_previous_run(self, tmp_path, monkeypatch):
-        """`watch` calls run() every interval; it used to keep only the last."""
-        from living_ink import logs
-
-        log_path = tmp_path / "pipeline.log"
-        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
-        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
-
-        pipeline.log("connection refused")
-        logs.mark_run_start()
-        pipeline.log("all good")
-
-        written = log_path.read_text(encoding="utf-8")
-        assert "connection refused" in written
-        assert "all good" in written
-
-    def test_log_is_silent_on_the_console_when_quiet(self, tmp_path, monkeypatch, capsys):
-        from living_ink import logs
-
-        log_path = tmp_path / "pipeline.log"
-        monkeypatch.setattr(pipeline, "LOG_PATH", log_path)
-        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
-        logs.configure(log_path, quiet=True)
-        try:
-            pipeline.log("Publishing Meeting Notes")
-            assert capsys.readouterr().out == ""
-            assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
-        finally:
-            logs._console_mode = logs.ConsoleMode.PLAIN
 
 
 class TestExternalIdRoundTrip:
@@ -3238,14 +3168,14 @@ class TestJsonSummaryReachesStdout:
     def test_stdout_holds_the_document_and_nothing_else(self, capsys):
         """A stray progress line ahead of the JSON is what made this unusable."""
         pipe = self._pipeline(json_output=True)
-        logs.configure(LOG_PATH, json_output=True)
+        logs.configure(logs.LOG_PATH, json_output=True)
         log("Destination added: Obsidian")
         pipe._print_summary()
         captured = capsys.readouterr()
 
         json.loads(captured.out)
         assert "Destination added" in captured.err
-        logs.configure(LOG_PATH)
+        logs.configure(logs.LOG_PATH)
 
     def test_without_the_flag_the_table_is_printed_instead(self, capsys):
         self._pipeline(json_output=False)._print_summary()

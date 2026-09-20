@@ -28,12 +28,18 @@ from datetime import datetime
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from living_ink.redact import SecretFilter
+from living_ink.config import get_logs_dir
+from living_ink.redact import SecretFilter, redact
 
 #: Logger every module in the package writes through, directly or by propagation.
 PACKAGE_LOGGER = "living_ink"
+
+#: Where :func:`log` writes when nothing has configured a path. It lived on
+#: ``pipeline`` for as long as ``log()`` did, which meant every module that
+#: wanted to say something to the user had to import the pipeline to say it.
+LOG_PATH = get_logs_dir() / "pipeline.log"
 
 #: Keeps the log useful for a daemon without letting it grow without bound.
 #: Five megabytes and three backups caps the whole thing at roughly 20 MB.
@@ -215,3 +221,23 @@ def console(message: str) -> None:
         print(message)
     elif _console_mode is ConsoleMode.JSON:
         print(message, file=sys.stderr)
+
+
+def log(message: Any) -> None:
+    """Say one line to the user, and put it in the log file.
+
+    The friendly progress line the pipeline and the stages emit, redacted at
+    this single choke point rather than at each of the ~90 call sites: the log
+    file is what a user attaches to a bug report.
+
+    Console and file are separate decisions: ``--quiet`` silences the first,
+    and the second is a rotating handler shared with every other module's
+    logger calls, so the file holds more than just these messages.
+
+    Args:
+        message: Anything printable. Stringified here.
+    """
+    text = redact(str(message))
+    console(text)
+    ensure_configured(LOG_PATH)
+    logging.getLogger(PACKAGE_LOGGER).info(text)

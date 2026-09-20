@@ -60,6 +60,7 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.devices import default_reading
+from living_ink.logs import log
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
     DEFERRED,
@@ -132,9 +133,8 @@ WORK_DIR = DATA_DIR / "work"
 TRANSCRIPT_CACHE_DIR = DATA_DIR / CACHE_DIRNAME
 RENDER_CACHE_DIR = DATA_DIR / RENDER_CACHE_DIRNAME
 LOGS_DIR = get_logs_dir()
-LOG_PATH = LOGS_DIR / "pipeline.log"
 
-#: Everything log() emits goes through here, alongside the rest of the package.
+#: Everything this module emits goes through here, alongside the rest of the package.
 _logger = logging.getLogger(__name__)
 
 
@@ -538,18 +538,6 @@ def preprocess_image(in_path: Path, out_path: Path):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     im.save(out_path, quality=95)
-
-
-def log(msg):
-    # Redacted at the single choke point rather than at each of the ~90 call
-    # sites: pipeline.log is the file a user attaches to a bug report.
-    msg = redact(str(msg))
-    # Console and file are separate decisions now: --quiet silences the first,
-    # and the second is a rotating handler shared with every other module's
-    # logger calls, so the file holds more than just these ~90 messages.
-    logs.console(msg)
-    logs.ensure_configured(LOG_PATH)
-    _logger.info(msg)
 
 
 def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
@@ -2650,7 +2638,7 @@ class SyncPipeline:
             True if sync succeeded or completed gracefully, False on error.
         """
         ensure_runtime_dirs()
-        logs.ensure_configured(LOG_PATH)
+        logs.ensure_configured(logs.LOG_PATH)
         logs.mark_run_start()
         try:
             return self._run_recorded()
@@ -2768,7 +2756,7 @@ class SyncPipeline:
             lines.append("")
             lines.extend(f"- {warning}" for warning in self.report.warnings)
         lines.append("")
-        lines.append(f"Run `living-ink status` for details, or see the log at {LOG_PATH}.")
+        lines.append(f"Run `living-ink status` for details, or see the log at {logs.LOG_PATH}.")
         return "\n".join(lines)
 
     def _report_interrupt(self, published: int) -> None:
