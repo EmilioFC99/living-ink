@@ -4,7 +4,6 @@
 import atexit
 import datetime
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -14,7 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
-from PIL import Image, ImageFilter, ImageOps
 
 from living_ink import logs, state
 from living_ink.cache import CACHE_DIRNAME, RENDER_CACHE_DIRNAME, RenderCache, TranscriptCache
@@ -45,7 +43,7 @@ from living_ink.core.selection import (
     SelectionCriteria,
     select,
 )
-from living_ink.core.stages import Transcriber
+from living_ink.core.stages import Transcriber, prepare_pages, write_transcript
 from living_ink.core.temp import DocumentWorkspace, page_number, purge_all
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
@@ -509,30 +507,6 @@ def add_to_processed_log(
         external_id=external_id,
         target=target,
     )
-
-
-def preprocess_image(in_path: Path, out_path: Path):
-    im = Image.open(in_path)
-    # Always composite onto a white background, regardless of mode
-    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
-        bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-        bg.paste(im, (0, 0), im if im.mode == "RGBA" else None)
-        im = bg.convert("RGB")
-    else:
-        im = im.convert("RGB")
-
-    # Autocontrast
-    im = ImageOps.autocontrast(im, cutoff=2)
-
-    # Upscale 1.5x (rounded)
-    w, h = im.size
-    im = im.resize((int(w * 1.5), int(h * 1.5)), resample=Image.Resampling.LANCZOS)
-
-    # Sharpen
-    im = im.filter(ImageFilter.SHARPEN)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    im.save(out_path, quality=95)
 
 
 def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
@@ -1958,14 +1932,7 @@ class SyncPipeline:
 
     def _preprocess_images(self, job: DocumentJob) -> None:
         """Prepare each page image for OCR, writing the results beside them."""
-        pre_dir = job.workspace.preprocessed_dir
-        pre_dir.mkdir(parents=True, exist_ok=True)
-
-        for p in job.imgs:
-            out_p = pre_dir / p.name
-            preprocess_image(p, out_p)
-            job.pre_paths.append(out_p)
-
+        job.pre_paths.extend(prepare_pages(job.imgs, job.workspace.preprocessed_dir))
         self._record_page_hashes(job)
 
     def _record_page_hashes(self, job: DocumentJob) -> None:
@@ -2117,49 +2084,14 @@ class SyncPipeline:
         cleans the page in the same call, so there is no earlier, rawer text
         for a second file to hold.
         """
-        meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
-
-        self._write_transcript(job, job.workspace.transcript, meta)
+        write_transcript(
+            job.workspace.transcript,
+            {"notebook": job.notebook, "images": [p.name for p in job.imgs]},
+            job.pages,
+            job.extracted_doc_text,
+            job.doc_file_path,
+        )
         log(f"Cleaned OCR text saved to {job.workspace.transcript}")
-
-    def _write_transcript(self, job: DocumentJob, path: Path, meta: Dict[str, Any]) -> None:
-        """Write one transcript: a metadata line, then a section per page.
-
-        A page that produced no text keeps its header and gets no body, so the
-        page numbering still lines up with the notebook, and a page that failed
-        says so where the missing text would have been.
-
-        Written for a person to read. Nothing in the pipeline reads it back.
-
-        Args:
-            job: The job being transcribed.
-            path: File to write.
-            meta: Metadata dict, written as the first line.
-        """
-        from living_ink.extract import format_page_section_header
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta) + "\n\n")
-
-            if not job.pages and job.extracted_doc_text:
-                f.write(job.extracted_doc_text + "\n")
-                return
-
-            for page in job.pages:
-                header = format_page_section_header(
-                    page.number,
-                    job.doc_file_path,
-                    include_divider=True,
-                    # Already read once, when the page was rendered. Letting the
-                    # header re-read them reopens the PDF once per page.
-                    label=page.label,
-                    breadcrumbs=page.breadcrumbs,
-                )
-                body = page.error if page.error else page.text.strip()
-                f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
-
-            if job.extracted_doc_text and not any(p.text.strip() for p in job.pages):
-                f.write(job.extracted_doc_text + "\n")
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 
