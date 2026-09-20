@@ -18,7 +18,7 @@ Precedence, highest first:
 4. The defaults in :mod:`living_ink.config.schema`.
 
 **There is no table of fields in this module.** Every field, key, environment
-variable and default comes from :data:`living_ink.config.schema.SETTINGS`, and
+variable and default comes from :data:`living_ink.config.schema.LIVE_SETTINGS`, and
 :meth:`resolve` and :meth:`explain` walk it. A parallel list is how ``explain``
 came to be blind to two settings that shape every run; the parity test in
 ``tests/test_settings.py`` is what keeps the two from drifting again.
@@ -53,9 +53,9 @@ from living_ink.config.schema import (
     DEFAULT_VERBOSITY,
     FLAG,
     LIST,
+    LIVE_SETTINGS,
     NUMBER,
     PATH,
-    SETTINGS,
     STORE_CREDENTIALS,
     TEXT,
     WHOLE,
@@ -247,7 +247,7 @@ class Settings:
     using it. Per-run CLI overrides are applied by building a new instance with
     :func:`dataclasses.replace`, not by mutation.
 
-    The fields below must match :data:`living_ink.config.schema.SETTINGS`
+    The fields below must match :data:`living_ink.config.schema.LIVE_SETTINGS`
     exactly, one for one. That is asserted by a test rather than maintained by
     hand: a field with no schema entry cannot be resolved from anything, and a
     schema entry with no field is invisible to every reader at once.
@@ -407,7 +407,7 @@ class Settings:
         resolved: List[Tuple[str, Any, str, str]] = []
         seen: Dict[str, Any] = {}
 
-        for setting in SETTINGS:
+        for setting in LIVE_SETTINGS:
             value, source, detail = cls._pick(setting, raw, environ, given, config_path, seen)
             value = _coerce(setting, value, seen)
             seen[setting.field] = value
@@ -487,7 +487,7 @@ class Settings:
             One :class:`SettingOrigin` per setting, in schema order.
         """
         layers = cls._layers(config, env, flags, config_path)
-        by_field = {setting.field: setting for setting in SETTINGS}
+        by_field = {setting.field: setting for setting in LIVE_SETTINGS}
 
         origins = []
         for name, value, source, detail in layers:
@@ -654,7 +654,7 @@ def _assert_parity() -> None:
             test suite asserts the same thing with a readable message; this is
             the belt, so that a mismatch cannot survive even an unrun test.
     """
-    declared = {setting.field for setting in SETTINGS}
+    declared = {setting.field for setting in LIVE_SETTINGS}
     present = {f.name for f in fields(Settings)}
     if declared != present:
         missing = ", ".join(sorted(declared - present)) or "none"

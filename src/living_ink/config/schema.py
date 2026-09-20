@@ -182,6 +182,14 @@ class Setting:
             :attr:`key` in memory at load time. Declaring the pairing here, on
             the surviving setting, is what keeps a rename from being written
             down in two places that can disagree.
+        replacement: Key named in the warning when this setting is retired.
+            Distinct from :attr:`legacy_keys`, which is for a pure rename: a
+            rename copies the value forward, and this is for the case where it
+            cannot, because the successor holds a different *shape* of answer.
+            ``sync.sync_pdfs: true`` and ``sync.types: [notebook, pdf]`` say
+            the same thing in two forms nothing can mechanically convert
+            between, so the user is told the new spelling rather than guessed
+            at.
         commands: Which commands get the flag. ``watch`` gets none: a
             supervised process is restarted without its arguments, so a flag
             would stop applying without saying so.
@@ -202,6 +210,7 @@ class Setting:
     credential: Optional[str] = None
     status: str = ACTIVE
     legacy_keys: Tuple[str, ...] = ()
+    replacement: Optional[str] = None
     commands: Tuple[str, ...] = ("sync",)
     secret: bool = False
 
@@ -769,7 +778,20 @@ def _section_keys() -> Dict[str, Dict[str, Setting]]:
 
 
 #: Section name to the keys it accepts, current and legacy alike.
+#:
+#: Retired settings stay in here, which is the whole point of retiring one
+#: rather than deleting it: an unrecognised key is a hard error, so a key that
+#: disappears from the index stops every config still naming it from loading.
 SECTION_KEYS: Dict[str, Dict[str, Setting]] = _section_keys()
+
+#: The settings that still have a value — everything but the retired ones.
+#:
+#: :data:`SETTINGS` is what the *validator* reads, because a config naming a
+#: dead key has to be recognised in order to be warned about. This is what
+#: everything else reads: a retired setting has no field on
+#: :class:`living_ink.settings.Settings` and no flag, so resolving one would
+#: mean handing the dataclass a keyword it does not have.
+LIVE_SETTINGS: Tuple[Setting, ...] = tuple(s for s in SETTINGS if s.status != REMOVED)
 
 #: Dotted legacy path to the setting that superseded it.
 LEGACY_KEYS: Dict[str, Setting] = {

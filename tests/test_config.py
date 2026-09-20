@@ -4,15 +4,25 @@ import pytest
 import yaml
 
 from living_ink.config import (
+    ACTIVE,
+    DEPRECATED,
     ERROR,
+    FLAG,
+    LIVE_SETTINGS,
+    REMOVED,
     SCHEMA_VERSION,
+    SECTION_KEYS,
+    SETTINGS,
     WARNING,
     ConfigProblem,
+    Setting,
     apply_status,
     read_config_file,
     split_problems,
+    validate,
     validate_config,
 )
+from living_ink.config.validate import _retired_problem
 from living_ink.settings import Settings
 from living_ink.setup_wizard import generate_config_yaml
 
@@ -282,3 +292,90 @@ class TestStatus:
         # The API key has no current spelling in config.yml at all — it is a
         # credential now — so it is not mapped onto one. It is still read.
         assert Settings.resolve(loaded, env={}).ai_api_key == "sk-x"
+
+
+def _retired(status, *, key="sync.sync_pdfs", replacement=None):
+    """Build a setting carrying a status, for the cases the schema has none of.
+
+    Args:
+        status: The status to declare.
+        key: The dotted config key.
+        replacement: The key named in the warning, if any.
+
+    Returns:
+        A :class:`~living_ink.config.schema.Setting` and nothing else — no
+        registration, so the module-level indexes are untouched.
+    """
+    return Setting(
+        field=key.rpartition(".")[2],
+        key=key,
+        kind=FLAG,
+        default=False,
+        help="",
+        status=status,
+        replacement=replacement,
+    )
+
+
+class TestAKeyHasAStatusOfItsOwn:
+    """A section is not the only thing that can be retired.
+
+    :class:`~living_ink.config.schema.Setting` has carried ``status`` since the
+    mechanism was built for sections, and nothing read it: a key whose feature
+    had been deleted could only be retired by deleting the whole section it
+    lived in, or by leaving it in the schema pretending to still work.
+    """
+
+    def test_an_active_key_has_nothing_to_report(self):
+        """The overwhelming majority, and they must cost nothing."""
+        assert _retired_problem("sync.limit", _retired(ACTIVE)) is None
+
+    def test_a_deprecated_key_names_its_replacement(self):
+        """Still read, still works, and the user is told where it went."""
+        problem = _retired_problem("sync.sync_pdfs", _retired(DEPRECATED, replacement="sync.types"))
+        assert problem == ConfigProblem(WARNING, "sync.sync_pdfs", "deprecated", "use sync.types")
+
+    def test_a_removed_key_says_it_is_being_ignored(self):
+        """The difference that matters: this one no longer does anything."""
+        problem = _retired_problem("sync.sync_pdfs", _retired(REMOVED, replacement="sync.types"))
+        assert problem.level == WARNING
+        assert problem.message == "no longer used, and ignored"
+        assert problem.hint == "use sync.types instead"
+
+    def test_a_removed_key_with_no_successor_is_told_to_go(self):
+        """Nothing replaced it, so the only useful advice is to delete the line."""
+        assert _retired_problem("sync.sync_pdfs", _retired(REMOVED)).hint == "delete it"
+
+    def test_a_removed_key_is_dropped_before_anything_reads_it(self, monkeypatch):
+        """Same contract as a removed section, one level down.
+
+        A retired setting has no field on :class:`Settings` to resolve onto, so
+        leaving it in the loaded config would hand the dataclass a keyword it
+        does not have.
+        """
+        monkeypatch.setattr(validate, "SETTINGS", (_retired(REMOVED),))
+        loaded = apply_status({"sync": {"sync_pdfs": True, "limit": 5}})
+        assert loaded["sync"] == {"limit": 5}
+
+    def test_dropping_a_key_leaves_the_section_and_the_original_alone(self, monkeypatch):
+        """Emptying a section is not deleting it, and the parsed dict is the caller's."""
+        monkeypatch.setattr(validate, "SETTINGS", (_retired(REMOVED),))
+        original = {"sync": {"sync_pdfs": True}}
+        loaded = apply_status(original)
+        assert loaded["sync"] == {}
+        assert original == {"sync": {"sync_pdfs": True}}
+
+    def test_a_retired_key_stays_in_the_schema_so_it_stays_recognised(self):
+        """Deleting the entry is what the status exists to avoid.
+
+        An unrecognised key is a hard ERROR, so a key that disappears from
+        :data:`SECTION_KEYS` stops every config still naming it from loading.
+        """
+        for setting in SETTINGS:
+            if setting.status == REMOVED and setting.key is not None:
+                assert SECTION_KEYS[setting.section][setting.leaf] is setting
+
+    def test_only_the_live_settings_are_resolved(self):
+        """What the validator reads and what the resolver reads are not the same set."""
+        assert LIVE_SETTINGS == tuple(s for s in SETTINGS if s.status != REMOVED)
+        assert all(s.status != REMOVED for s in LIVE_SETTINGS)
