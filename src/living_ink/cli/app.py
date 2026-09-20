@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Type
 
 from living_ink.cli.base import BaseCommand
+from living_ink.cli.commands.completions import CompletionsCommand
 from living_ink.cli.commands.config import ConfigCommand
 from living_ink.cli.commands.info import InfoCommand
 from living_ink.cli.commands.setup import SetupCommand
@@ -111,7 +112,7 @@ class LivingInkCLI:
         commands: Dictionary mapping command names to BaseCommand classes.
     """
 
-    #: The six commands 1.0 ships, in the order ``--help`` lists them: what a
+    #: The seven commands 1.0 ships, in the order ``--help`` lists them: what a
     #: user does daily first, then what they set up, and ``uninstall`` last
     #: because it is the one nobody is looking for until they are.
     DEFAULT_COMMANDS: list[Type[BaseCommand]] = [
@@ -120,6 +121,7 @@ class LivingInkCLI:
         SetupCommand,
         InfoCommand,
         ConfigCommand,
+        CompletionsCommand,
         UninstallCommand,
     ]
 
