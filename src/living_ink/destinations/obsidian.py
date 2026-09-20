@@ -17,9 +17,10 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from living_ink import notemerge
+from living_ink.config import Setting, settings_for_section
 from living_ink.core.document import Document, Page, PublishContext, PublishResult
 from living_ink.destinations.base import (
     Destination,
@@ -87,6 +88,12 @@ class ObsidianDestination(FileSystemDestination):
     # One managed block per source page, so a re-publish rewrites the page that
     # changed and leaves the note the user wrote under it exactly where it is.
     merge_unit: ClassVar[MergeUnit] = MergeUnit.PAGE
+
+    # Read from the schema rather than listed here, so a new obsidian.* setting
+    # joins the change-detection digest by existing, not by being remembered in
+    # a second place. Every value this destination reads comes from its own
+    # section, which is what makes the section the right unit.
+    settings: ClassVar[Tuple[Setting, ...]] = settings_for_section("obsidian")
 
     # Characters forbidden in filenames across macOS, Windows, Linux, and Obsidian
     FORBIDDEN_CHARS_REGEX = re.compile(r'[/\\:*?"<>|#^\[\]]')

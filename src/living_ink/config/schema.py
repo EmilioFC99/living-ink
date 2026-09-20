@@ -772,6 +772,30 @@ LEGACY_KEYS: Dict[str, Setting] = {
 }
 
 
+def settings_for_section(name: str) -> Tuple[Setting, ...]:
+    """Return the settings a config section currently owns.
+
+    Current spellings only — :data:`SECTION_KEYS` indexes legacy paths too, and
+    a legacy key resolves to the same field, so including both would digest one
+    value twice under two names.
+
+    Args:
+        name: Section name as written in ``config.yml``, e.g. ``"obsidian"``.
+
+    Returns:
+        The section's settings, sorted by field so the order is stable across
+        edits to :data:`SETTINGS` — a digest over these must not change because
+        a declaration moved.
+    """
+    prefix = f"{name}."
+    return tuple(
+        sorted(
+            (s for s in SETTINGS if s.key and s.key.startswith(prefix)),
+            key=lambda s: s.field,
+        )
+    )
+
+
 def section_status(name: str) -> Section:
     """Return the declared section, or an active placeholder for an implied one.
 
