@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -272,6 +273,29 @@ class TestImportPurity:
         """A bare import does not build destinations, so it stays quiet."""
         result = self._import_in_subprocess(tmp_path)
         assert result.stdout == ""
+
+    def test_import_does_not_reconfigure_a_third_party_logger(self, tmp_path):
+        """The old suppression block raised rmscene to ERROR at import time.
+
+        Two things were wrong with it and only the second was cosmetic: it
+        threw away the only signal that a page parsed incompletely, and it did
+        so to any application that merely imported Living Ink.
+        """
+        env = {**os.environ, "LIVING_INK_DATA_DIR": str(tmp_path / "data")}
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import logging, living_ink.pipeline;"
+                "print(logging.getLogger('rmscene').level,"
+                "logging.getLogger('rmscene').handlers)",
+            ],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout.strip() == "0 []"
 
     def test_default_config_is_loaded_once(self, monkeypatch):
         """get_default_config caches, so config is read a single time."""
@@ -1953,6 +1977,104 @@ class TestTheRendererContractDrivesTheRun:
                 self._job(), source, self._bundle()
             )
         assert source.renderer.calls.count("render:1") == 1
+
+
+class TestParserWarningsReachTheReport:
+    """rmscene's complaints are the only sign a page parsed incompletely.
+
+    They used to be discarded — both parser loggers were raised to ``ERROR``
+    when ``pipeline`` was imported — so a partial render published silently.
+    Letting them out untouched is no better: they repeat per page, they name a
+    block type and not a document, and they land in the middle of whatever the
+    run is printing. They belong in the run report, attributed to the notebook.
+    """
+
+    @pytest.fixture
+    def contract(self):
+        """The renderer-contract fixtures, reused rather than copied."""
+        return TestTheRendererContractDrivesTheRun()
+
+    class WarningRenderer(TestTheRendererContractDrivesTheRun.RecordingRenderer):
+        """A renderer whose parser complains the way rmscene does."""
+
+        def __init__(self, *args, complaints=(), at="render", **kwargs):
+            super().__init__(*args, **kwargs)
+            self._complaints = list(complaints)
+            self._at = at
+
+        def _complain(self):
+            for message in self._complaints:
+                logging.getLogger("rmscene.scene_stream").warning(message)
+
+        def prepare(self, bundle, ctx):
+            if self._at == "prepare":
+                self._complain()
+            return super().prepare(bundle, ctx)
+
+        def render(self, bundle, page, ctx):
+            if self._at == "render":
+                self._complain()
+            return super().render(bundle, page, ctx)
+
+    def _run(self, contract, tmp_path, renderer):
+        """Render one document and return the pipeline that did it."""
+        pipe = contract._pipeline(tmp_path)
+        pipe._render_source(contract._job(), contract._source(renderer), contract._bundle())
+        return pipe
+
+    def test_a_parse_warning_becomes_a_report_warning(self, contract, tmp_path):
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(pages=contract._refs(1), complaints=["Unknown block type 42"]),
+        )
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_it_never_reaches_a_stream(self, contract, tmp_path, capsys):
+        """The whole point: a ``--json`` run writes one document to stdout."""
+        self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(pages=contract._refs(1), complaints=["Unknown block type 42"]),
+        )
+        captured = capsys.readouterr()
+        assert "Unknown block type" not in captured.out
+        assert "Unknown block type" not in captured.err
+
+    def test_one_complaint_repeated_per_page_is_reported_once(self, contract, tmp_path):
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(
+                pages=contract._refs(1, 2, 3), complaints=["Some data has not been read"]
+            ),
+        )
+        assert pipe.report.warnings == ["Notes: Some data has not been read"]
+
+    def test_a_complaint_made_while_preparing_is_caught_too(self, contract, tmp_path):
+        """rmscene reads the document in ``prepare`` and ``pages``, not only render."""
+        pipe = self._run(
+            contract,
+            tmp_path,
+            self.WarningRenderer(
+                pages=contract._refs(1), complaints=["Unknown block type 42"], at="prepare"
+            ),
+        )
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_a_document_that_stopped_early_still_reports_them(self, contract, tmp_path):
+        """That document is exactly the one whose warnings explain why."""
+        renderer = self.WarningRenderer(
+            pages=(), text=None, complaints=["Unknown block type 42"], at="prepare"
+        )
+        pipe = contract._pipeline(tmp_path)
+        with pytest.raises(pipeline._StopProcessing):
+            pipe._render_source(contract._job(), contract._source(renderer), contract._bundle())
+        assert pipe.report.warnings == ["Notes: Unknown block type 42"]
+
+    def test_a_quiet_render_reports_nothing(self, contract, tmp_path):
+        pipe = self._run(contract, tmp_path, self.WarningRenderer(pages=contract._refs(1)))
+        assert pipe.report.warnings == []
 
 
 class TestTheDownloadedZipHonoursKeepTemp:

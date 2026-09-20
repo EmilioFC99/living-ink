@@ -54,7 +54,7 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.devices import default_reading
-from living_ink.logs import log, notice
+from living_ink.logs import collect_parser_warnings, log, notice
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
     DEFERRED,
@@ -73,43 +73,6 @@ if TYPE_CHECKING:  # pragma: no cover - names for annotations only
     # registry is reached at call time, so a source module can import from the
     # pipeline's neighbours without a cycle.
     from living_ink.sources import PageRef, RenderContext, SourceBundle, SourceType
-
-
-# --- LOGGING SUPPRESSION ---
-# Suppress specific benign warnings from rmscene/rmc that scare users
-class WarningFilter(logging.Filter):
-    def filter(self, record):
-        try:
-            msg = record.getMessage()
-            if any(
-                p in msg
-                for p in (
-                    "Unknown formatting code",
-                    "Some data has not been read",
-                    "Unknown block type",
-                )
-            ):
-                return False
-        except (TypeError, ValueError, KeyError):
-            # getMessage() interpolates the record's args; a library that logs
-            # a mismatched format string must not take the filter down with it.
-            pass
-        return True
-
-
-# Apply filter and elevate log level for rmscene / rmc
-_suppress_filter = WarningFilter()
-for logger_name in [
-    "rmscene",
-    "rmscene.tagged_block_reader",
-    "rmscene.scene_stream",
-    "rmscene.scene_tree",
-    "rmscene.text",
-    "rmc",
-]:
-    _l = logging.getLogger(logger_name)
-    _l.addFilter(_suppress_filter)
-    _l.setLevel(logging.ERROR)
 
 
 ROOT = find_repo_root()
@@ -1736,21 +1699,46 @@ class SyncPipeline:
         ctx = self._render_context()
         renderer = source.renderer
 
-        if not renderer.prepare(bundle, ctx):
-            self._nothing_to_render(job, source)
+        # Wrapped around the whole contract, not just the render call: rmscene
+        # reads the document in `prepare` and `pages` too, and a warning that
+        # escaped there would land in the middle of a `--json` document.
+        with collect_parser_warnings() as parser_warnings:
+            try:
+                if not renderer.prepare(bundle, ctx):
+                    self._nothing_to_render(job, source)
 
-        refs = list(renderer.pages(bundle, ctx))
-        job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
+                refs = list(renderer.pages(bundle, ctx))
+                job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
 
-        # Not `not refs`: an unannotated PDF and an EPUB with no annotations
-        # both render zero pages and publish their text layer instead. Only a
-        # document with neither has nothing to say.
-        if not refs and not job.extracted_doc_text:
-            self._nothing_to_render(job, source)
+                # Not `not refs`: an unannotated PDF and an EPUB with no
+                # annotations both render zero pages and publish their text
+                # layer instead. Only a document with neither has nothing to
+                # say.
+                if not refs and not job.extracted_doc_text:
+                    self._nothing_to_render(job, source)
 
-        if refs:
-            log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
-            self._render_pages(job, source, bundle, refs, ctx)
+                if refs:
+                    log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
+                    self._render_pages(job, source, bundle, refs, ctx)
+            finally:
+                # In a finally because a document that stopped early is exactly
+                # the one whose parse warnings explain why.
+                self._report_parser_warnings(job, parser_warnings)
+
+    def _report_parser_warnings(self, job: DocumentJob, messages: List[str]) -> None:
+        """Put what the ``.rm`` parsers complained about into the run report.
+
+        Attributed to the document, because the messages themselves name a
+        block type or a byte count and nothing a user could act on otherwise.
+
+        Args:
+            job: The document that was being rendered.
+            messages: Distinct parser warnings, in the order first seen.
+        """
+        for message in messages:
+            _logger.warning("%s: %s", job.notebook, message)
+            if self.report:
+                self.report.warn(f"{job.notebook}: {message}")
 
     def _nothing_to_render(self, job: DocumentJob, source: "SourceType") -> None:
         """Stop processing a document that produced neither pages nor text.

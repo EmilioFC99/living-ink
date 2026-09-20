@@ -24,17 +24,24 @@ embeds it, and third-party chatter stays out of the file.
 
 import logging
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, List, Optional, Sequence, Set, Tuple
 
 from living_ink.config import get_logs_dir
 from living_ink.redact import SecretFilter, redact
 
 #: Logger every module in the package writes through, directly or by propagation.
 PACKAGE_LOGGER = "living_ink"
+
+#: The ``.rm`` parsing stack. A block it can only partly read is reported by
+#: logging a warning and carrying on, so these lines are the only sign that a
+#: page rendered incomplete rather than cleanly. Naming the two roots is
+#: enough: ``rmscene.text`` and the rest propagate up to them.
+PARSER_LOGGERS: Tuple[str, ...] = ("rmscene", "rmc")
 
 #: Where :func:`log` writes when nothing has configured a path. It lived on
 #: ``pipeline`` for as long as ``log()`` did, which meant every module that
@@ -244,6 +251,83 @@ def notice(message: str) -> None:
             sometimes the key itself.
     """
     print(redact(str(message)), file=sys.stderr)
+
+
+class _WarningCollector(logging.Handler):
+    """Holds one copy of each distinct message, in the order first seen.
+
+    A notebook with one unreadable block shape logs the same line on every
+    page it appears, so the interesting number is how many *kinds* of problem
+    a document had, not how many times each was mentioned.
+    """
+
+    def __init__(self) -> None:
+        """Start empty, accepting warnings and worse."""
+        super().__init__(level=logging.WARNING)
+        self.messages: List[str] = []
+        self._seen: Set[str] = set()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Keep the record's rendered message, if it is new.
+
+        Args:
+            record: The record the parser logged.
+        """
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError, KeyError):
+            # getMessage() interpolates the record's args; a library that logs
+            # a mismatched format string must not take the render down with it.
+            return
+        if message not in self._seen:
+            self._seen.add(message)
+            self.messages.append(message)
+
+
+@contextmanager
+def collect_parser_warnings(
+    logger_names: Sequence[str] = PARSER_LOGGERS,
+) -> Iterator[List[str]]:
+    """Catch what the ``.rm`` parsers log instead of letting it reach a stream.
+
+    These warnings used to be discarded: the package raised both loggers to
+    ``ERROR`` at import time, so a page that parsed incompletely rendered a
+    partial image and said nothing anywhere. Letting them out instead is no
+    better — they are not Living Ink's own log, they repeat per page, and they
+    arrive in the middle of whatever the run is printing. Collected, they
+    become one line each in the run report, attributed to the document that
+    produced them, which is where a user looks for "what went wrong".
+
+    ``propagate`` is turned off for the duration as well as the handler added,
+    because a record that reaches the root logger with no handlers on it is
+    printed to stderr by :data:`logging.lastResort` — captured *and* leaked.
+
+    Rendering is single-threaded, so one collector at a time is the whole
+    story; this is not safe to nest around concurrent renders.
+
+    Args:
+        logger_names: Logger roots to collect from.
+
+    Yields:
+        The list the messages accumulate in. It fills as the block runs and is
+        complete when the block exits.
+    """
+    collector = _WarningCollector()
+    restore = []
+    for name in logger_names:
+        library = logging.getLogger(name)
+        restore.append((library, library.level, library.propagate))
+        library.setLevel(logging.WARNING)
+        library.propagate = False
+        library.addHandler(collector)
+    try:
+        yield collector.messages
+    finally:
+        for library, level, propagate in restore:
+            library.removeHandler(collector)
+            library.setLevel(level)
+            library.propagate = propagate
+        collector.close()
 
 
 def log(message: Any) -> None:
