@@ -73,16 +73,19 @@ REMOVED = "removed"
 
 #: Where a resolved value is persisted between runs.
 #:
-#: ``config`` is the ordinary case: the value has a key in ``config.yml``.
-#: ``credentials`` values are secrets and live one file per credential in the
-#: credentials directory (:mod:`living_ink.config.credentials`); they never
-#: enter ``config.yml`` and never get a command-line flag, because a flag puts
-#: them in the shell history and the process list. ``env_only`` values have no
-#: persisted form at all — they exist here so that ``info`` can report them
-#: rather than leaving a setting that shapes the run invisible.
+#: There are two answers and no third. ``config`` is the ordinary case: the
+#: value has a key in ``config.yml``. ``credentials`` values are secrets and
+#: live one file per credential in the credentials directory
+#: (:mod:`living_ink.config.credentials`); they never enter ``config.yml`` and
+#: never get a command-line flag, because a flag puts them in the shell history
+#: and the process list.
+#:
+#: There used to be a third, ``env_only``, for the two settings that shaped a
+#: run but had nowhere to be written down. It is gone: every setting ``info``
+#: prints is now one the ``config`` menu can change, which means the menu needs
+#: no case for a row it must refuse to edit.
 STORE_CONFIG = "config"
 STORE_CREDENTIALS = "credentials"
-STORE_ENV_ONLY = "env_only"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -182,8 +185,7 @@ class Setting:
             merged into the one below it.
         exclusive_group: Flags sharing a group become one mutually exclusive
             argparse group.
-        store: :data:`STORE_CONFIG`, :data:`STORE_CREDENTIALS` or
-            :data:`STORE_ENV_ONLY`.
+        store: :data:`STORE_CONFIG` or :data:`STORE_CREDENTIALS`.
         credential: Credential name for a :data:`STORE_CREDENTIALS` setting
             whose name is fixed. None when the name is composed at resolve time
             — the AI key is stored per provider, so its name is not knowable
@@ -282,6 +284,7 @@ class Section:
 SECTIONS: Dict[str, Section] = {
     "ai": Section("Which model reads your handwriting."),
     "ocr": Section("How pages are read."),
+    "render": Section("How a page is drawn before it is read."),
     "remarkable": Section("How to reach the tablet."),
     "sync": Section("What gets synced, and what gets skipped."),
     "obsidian": Section("Where notes are published."),
@@ -727,29 +730,30 @@ SETTINGS: Tuple[Setting, ...] = (
         env="LIVING_INK_OUTPUT_JSON",
         flag="--json",
     ),
-    # ── No config key ──────────────────────────────────────────────────────
+    # ── Environment-only until 1.0 ─────────────────────────────────────────
     #
-    # Both shape a run and neither has ever been reachable from config.yml.
-    # They are declared so that ``info`` reports them: a setting that changes
-    # what gets rendered or whether text is cleaned, and that nothing can
-    # print, is one nobody can debug.
+    # Both shape a run, and for a while neither was reachable from
+    # ``config.yml`` — they were declared only so that ``info`` would report
+    # them, on the grounds that a setting nothing can print is one nobody can
+    # debug. That left ``info`` listing two rows the config menu could not
+    # change, which is the same invisibility one step further on, so they now
+    # have keys like everything else. The environment variables keep their old
+    # spellings and still outrank the file.
     Setting(
         field="repair_enabled",
-        key=None,
+        key="ai.repair_enabled",
         kind=FLAG,
         default=True,
         help="Run the AI cleanup pass. Off is equivalent to ai.provider = none.",
         env="ENABLE_REPAIR",
-        store=STORE_ENV_ONLY,
     ),
     Setting(
         field="render_background",
-        key=None,
+        key="render.background",
         kind=TEXT,
         default=DEFAULT_RENDER_BACKGROUND,
         help="Paper colour behind a rendered page. Part of the render cache key.",
         env="REMARKABLE_BACKGROUND_COLOR",
-        store=STORE_ENV_ONLY,
     ),
 )
 
