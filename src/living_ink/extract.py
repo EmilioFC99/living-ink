@@ -69,12 +69,6 @@ def quiet_mupdf() -> Iterator[None]:
 #: that parsed but is not the shape the format promises.
 _JSON_ERRORS = (ValueError, TypeError, KeyError)
 
-#: Bumped whenever this module's own rendering behaviour changes — the rmc
-#: monkey-patching, the background compositing, the bounds calculation. It is
-#: part of the render cache key, so a bump correctly invalidates every cached
-#: page image rather than serving output the current code would not produce.
-RENDER_FORMAT_VERSION = 4
-
 # Margin around content when using content-based bounding box (in pixels)
 CONTENT_MARGIN = 50
 
@@ -279,21 +273,38 @@ def extract_text_from_epub(epub_path: Path) -> str:
         return ""
 
 
-def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Path]:
-    """Extract the raw PDF or EPUB file stored inside a reMarkable document zip.
+def extract_raw_document_from_zip(
+    zip_path: Path, out_path: Path, suffixes: Optional[Sequence[str]] = None
+) -> Optional[Path]:
+    """Extract the original document stored inside a reMarkable document zip.
 
     Args:
         zip_path: Path to the downloaded document zip archive.
         out_path: Destination path for the extracted raw document.
+        suffixes: Which extensions count as the original document, without the
+            dot ("pdf", "epub"). Defaults to every suffix the source registry
+            declares, so registering a source is enough to have its files
+            pulled out of the zip. Pass an explicit tuple to narrow it — a
+            renderer that would rather not accept a neighbouring format.
 
     Returns:
-        Path to the extracted file, or None if no PDF/EPUB found in archive.
+        Path to the extracted file, or None if the archive holds none.
     """
+    if suffixes is None:
+        # Call-time import: `sources` imports this module, so taking the
+        # dependency at module level would close the cycle.
+        from living_ink.sources import source_suffixes
+
+        suffixes = source_suffixes()
+    wanted = tuple(f".{s.lower().lstrip('.')}" for s in suffixes)
+    if not wanted:
+        return None
+
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             for name in zf.namelist():
                 lower_name = name.lower()
-                if lower_name.endswith((".pdf", ".epub")):
+                if lower_name.endswith(wanted):
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(out_path, "wb") as f:
                         f.write(zf.read(name))
@@ -455,37 +466,6 @@ def render_composite_pdf_page(
         return out_buf.getvalue()
     except _DOC_ERRORS as e:
         logger.debug(f"Failed to render composite PDF page {page_index}: {e}")
-        return None
-
-
-def render_pdf_page_preview(
-    pdf_path: Path,
-    page_index: int = 0,
-    dpi: int = 150,
-) -> Optional[bytes]:
-    """Render a single page of a PDF as a preview PNG image.
-
-    Args:
-        pdf_path: Path to the PDF document.
-        page_index: 0-indexed page number to render (default: 0 for cover).
-        dpi: Resolution for rendering.
-
-    Returns:
-        PNG image bytes, or None on failure.
-    """
-    try:
-        with quiet_mupdf(), fitz.open(str(pdf_path)) as doc:
-            if page_index < 0 or page_index >= len(doc):
-                return None
-            page = doc[page_index]
-            pix = page.get_pixmap(dpi=dpi)
-            pdf_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-        out_buf = io.BytesIO()
-        pdf_img.save(out_buf, format="PNG")
-        return out_buf.getvalue()
-    except _DOC_ERRORS as e:
-        logger.debug(f"Failed to render PDF page preview: {e}")
         return None
 
 
@@ -1114,19 +1094,26 @@ def get_page_source_hashes(zip_path: Path) -> List[str]:
 
 @lru_cache(maxsize=1)
 def renderer_fingerprint() -> str:
-    """Identify everything, other than the page source, that shapes a render.
+    """Identify the libraries that turn a ``.rm`` file into an image.
 
     A cached PNG is only reusable while the code that produced it is
-    unchanged. ``rmc`` and ``rmscene`` are the two libraries that turn a ``.rm``
-    file into an image, and :data:`RENDER_FORMAT_VERSION` covers the parts this
-    module does itself — the monkey-patching in :func:`_patch_rmc`, the
-    background handling, the bounds. Bump it when any of those change.
+    unchanged. ``rmc`` and ``rmscene`` are the two libraries this module drives,
+    and their versions are the part of that no source can know for itself.
 
-    The background colour is deliberately *not* in here: it is per-render
-    rather than per-build, so the caller folds it into the key instead.
+    This used to carry a hand-maintained ``RENDER_FORMAT_VERSION`` covering
+    what *this* module does — the monkey-patching, the background handling, the
+    bounds. One number for three renderers meant a change to the PDF compositor
+    threw away every cached notebook page, and remembering to bump it was a
+    convention rather than a mechanism. Each
+    :class:`~living_ink.sources.Renderer` now declares its own ``version`` and
+    the pipeline puts it in the key beside this digest, so a renderer
+    invalidates its own pages and nobody else's.
+
+    The background colour and the panel size are deliberately *not* in here:
+    they are per-run rather than per-build, so the caller folds them in.
 
     Returns:
-        A short hex digest identifying the current rendering behaviour.
+        A short hex digest identifying the installed rendering libraries.
     """
     versions = []
     for module in ("rmc", "rmscene"):
@@ -1137,8 +1124,7 @@ def renderer_fingerprint() -> str:
             # distinguishing from any installed version.
             versions.append(f"{module}=absent")
 
-    parts = [f"format={RENDER_FORMAT_VERSION}", *versions]
-    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256("\0".join(versions).encode("utf-8")).hexdigest()[:16]
 
 
 def get_document_page_count(zip_path: Path) -> int:

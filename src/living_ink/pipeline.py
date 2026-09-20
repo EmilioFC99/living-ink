@@ -10,11 +10,10 @@ import re
 import sqlite3
 import sys
 import threading
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 from PIL import Image, ImageFilter, ImageOps
@@ -57,6 +56,12 @@ from living_ink.report import (
 )
 from living_ink.safeio import restrict_permissions
 from living_ink.settings import Settings
+
+if TYPE_CHECKING:  # pragma: no cover - names for annotations only
+    # Imported for typing rather than at module level on purpose: the sources
+    # registry is reached at call time, so a source module can import from the
+    # pipeline's neighbours without a cycle.
+    from living_ink.sources import PageRef, RenderContext, SourceBundle, SourceType
 
 
 # --- LOGGING SUPPRESSION ---
@@ -736,20 +741,29 @@ def matches_notebook_target(item: Any, target_str: str, id_map: Dict[str, Any]) 
 
 
 def get_document_type(item: Any, client: Optional[Any] = None) -> str:
-    """Determine whether an item is a 'notebook', 'pdf', or 'epub'.
+    """Determine which registered source handles a document.
+
+    Three signals, strongest first: the ``fileType`` the transport reports, the
+    extension of a file listed against the document, and the extension of its
+    display title. Every one of them is answered by
+    :mod:`living_ink.sources`, so adding a document type does not mean editing
+    this function.
 
     Args:
         item: The document/metadata item or dict.
         client: Optional API client to query for file type.
 
     Returns:
-        One of 'notebook', 'pdf', or 'epub'.
+        The name of a registered source — ``'notebook'``, ``'pdf'`` or
+        ``'epub'`` today, and the fallback source's name when nothing matches.
     """
+    from living_ink.sources import fallback_source, source_for_file_type, source_for_filename
+
     if client is not None:
         try:
-            ft = client.get_file_type(item)
-            if ft in ("pdf", "epub"):
-                return ft
+            source = source_for_file_type(client.get_file_type(item))
+            if source:
+                return source.name
         except Exception:
             # Deliberately broad. This is a probe against whichever transport
             # happens to be connected, and the filename fallback below answers
@@ -759,24 +773,22 @@ def get_document_type(item: Any, client: Optional[Any] = None) -> str:
 
     files = get_val(item, "files") or []
     for f in files:
-        fid = str(f.get("id") if isinstance(f, dict) else getattr(f, "id", "")).lower()
-        if fid.endswith(".pdf"):
-            return "pdf"
-        if fid.endswith(".epub"):
-            return "epub"
+        fid = str(f.get("id") if isinstance(f, dict) else getattr(f, "id", ""))
+        source = source_for_filename(fid)
+        if source:
+            return source.name
 
     name = str(
         get_val(item, "VissibleName")
         or get_val(item, "VisibleName")
         or getattr(item, "name", "")
         or ""
-    ).lower()
-    if name.endswith(".pdf"):
-        return "pdf"
-    if name.endswith(".epub"):
-        return "epub"
+    )
+    source = source_for_filename(name)
+    if source:
+        return source.name
 
-    return "notebook"
+    return fallback_source().name
 
 
 def to_datetime(value: Any) -> Optional[datetime.datetime]:
@@ -1663,10 +1675,16 @@ class SyncPipeline:
         Returns:
             A DocumentJob with identity, paths and titles filled in.
         """
+        from living_ink.sources import source_for_name
+
         notebook = get_val(nb_item, "VissibleName") or get_val(nb_item, "VisibleName")
         doc_type = get_document_type(nb_item, client)
         folder_path = get_notebook_path(nb_item, id_map)
         safe_name = sanitize_filename(notebook)
+        # Where the source document lands, if this type has one. The extension
+        # comes from the registered source rather than a `doc_type in
+        # ("pdf", "epub")` test, so a new format needs no edit here.
+        suffix = source_for_name(doc_type).source_suffix
 
         job = DocumentJob(
             item=nb_item,
@@ -1678,9 +1696,7 @@ class SyncPipeline:
             folder_path=folder_path,
             display_title=f"{folder_path} / {notebook}" if folder_path else notebook,
             keep_temp=self.keep_temp if keep_temp is None else keep_temp,
-            doc_file_path=(
-                DOCS_DIR / f"{safe_name}.{doc_type}" if doc_type in ("pdf", "epub") else None
-            ),
+            doc_file_path=(DOCS_DIR / f"{safe_name}.{suffix}" if suffix else None),
         )
 
         type_badge = f" ({doc_type.upper()})" if doc_type != "notebook" else ""
@@ -1732,37 +1748,56 @@ class SyncPipeline:
         self._describe_pages(job)
 
     def _describe_pages(self, job: DocumentJob) -> None:
-        """Record what each rendered page *is*, while the source is open anyway.
+        """Record what each rendered page *is*, while the source is still around.
 
         The page number, the label a heading shows and the chapter it sits
         under are all properties of the render, not of the publish. They used
         to be recovered at publish time by regexing the PNG filename and
         reopening the source PDF once per page, from inside the destination.
 
+        The source type decides how a page is labelled — a PDF reads its own
+        page labels and outline, a notebook has neither — so this asks the
+        renderer rather than checking a file extension. The bundle it builds
+        carries no zip: the pages are already rendered and may have been
+        rendered on an earlier run, and labelling reads the source document,
+        never the zip.
+
         Args:
             job: The job whose images are settled; sets ``pages``.
         """
-        from living_ink.extract import get_pdf_toc_breadcrumbs, page_labels
+        from living_ink.sources import PageRef, SourceBundle, source_for_name
 
-        source = job.source_file()
+        source = source_for_name(job.doc_type)
         numbers = [job.page_number(i) for i in range(len(job.imgs))]
-        labels = page_labels(numbers, source)
-
-        job.pages = [
-            Page(
-                index=index,
+        refs = [
+            PageRef(
+                ordinal=index,
                 number=number,
-                label=labels.get(number, f"Page {number}"),
-                breadcrumbs=tuple(get_pdf_toc_breadcrumbs(number, source)),
-                image_path=image,
                 # The digest the render cache keyed this page under, when the
                 # page was rendered this run. A page reused from disk has none,
                 # which is why this is a key and not an identity.
-                source_key=(
-                    job.source_hashes[number - 1] if number - 1 < len(job.source_hashes) else ""
-                ),
+                source_key=(job.source_hashes[index] if index < len(job.source_hashes) else ""),
             )
-            for index, (image, number) in enumerate(zip(job.imgs, numbers))
+            for index, number in enumerate(numbers)
+        ]
+        bundle = SourceBundle(
+            doc_id=str(job.notebook_id),
+            title=job.notebook,
+            zip_path=None,
+            source_path=job.doc_file_path,
+        )
+        descriptions = source.renderer.describe_pages(bundle, refs)
+
+        job.pages = [
+            Page(
+                index=ref.ordinal,
+                number=ref.number,
+                label=description.label,
+                breadcrumbs=description.breadcrumbs,
+                image_path=image,
+                source_key=ref.source_key,
+            )
+            for image, ref, description in zip(job.imgs, refs, descriptions)
         ]
 
     def _rendered_pages(self, job: DocumentJob) -> List[Path]:
@@ -1774,17 +1809,37 @@ class SyncPipeline:
             if p.name.startswith(prefix) and p.suffix.lower() == ".png"
         )
 
+    def _render_context(self) -> "RenderContext":
+        """Build the render settings this run uses, once.
+
+        Returns:
+            A :class:`~living_ink.sources.RenderContext`. The background colour
+            is in here and is passed to the renderer — it used to be folded
+            into the cache key and then dropped on the way to the render call,
+            so changing it invalidated every cached page and produced
+            byte-identical images.
+        """
+        from living_ink.sources import RenderContext
+
+        return RenderContext(
+            device=self.device.info,
+            background=self.settings.render_background,
+            keep_temp=self.keep_temp,
+        )
+
     def _render_document(self, job: DocumentJob, client: Any) -> None:
-        """Download the document zip and render it with the right renderer.
+        """Download the document zip and render it with its source's renderer.
 
         Args:
             job: The job being rendered.
             client: reMarkable API client.
 
         Raises:
-            _StopProcessing: If the zip cannot be downloaded.
+            _StopProcessing: If the zip cannot be downloaded, or the document
+                holds nothing the renderer can produce.
         """
         from living_ink.extract import extract_tags_from_zip
+        from living_ink.sources import SourceBundle, source_for_name
 
         tmp_zip = DATA_DIR / f"{job.safe_name}.zip"
         raw_bytes = client.download(job.item)
@@ -1794,202 +1849,166 @@ class SyncPipeline:
 
         try:
             job.tags.extend(extract_tags_from_zip(tmp_zip) or [])
-            renderer = self._RENDERERS.get(job.doc_type, SyncPipeline._render_notebook)
-            renderer(self, job, tmp_zip, client)
+            self._render_source(
+                job,
+                source_for_name(job.doc_type),
+                SourceBundle(
+                    doc_id=str(job.notebook_id),
+                    title=job.notebook,
+                    zip_path=tmp_zip,
+                    source_path=job.doc_file_path,
+                    item=job.item,
+                    client=client,
+                ),
+            )
         finally:
-            tmp_zip.unlink(missing_ok=True)
+            # The .rm source zip is exactly what a render bug needs, and
+            # CLAUDE.md tells people to debug rendering with --keep-temp. It
+            # used to be unlinked either way.
+            if self.keep_temp:
+                log(f"Keeping {tmp_zip} (--keep-temp).")
+            else:
+                tmp_zip.unlink(missing_ok=True)
 
-    def _ensure_source_file(self, job: DocumentJob, tmp_zip: Path, client: Any) -> bool:
-        """Put the original PDF/EPUB on disk, from the zip or by direct download.
+    def _render_source(
+        self, job: DocumentJob, source: "SourceType", bundle: "SourceBundle"
+    ) -> None:
+        """Run one source's renderer over one downloaded document.
+
+        The sequence is the :class:`~living_ink.sources.Renderer` contract in
+        order: prepare, enumerate, read the text layer, render. It is the same
+        five calls for every source, which is the point — the differences
+        between a notebook, a PDF and an EPUB live in the renderer, not here.
 
         Args:
-            job: The job whose ``doc_file_path`` should end up on disk.
-            tmp_zip: The downloaded document zip.
-            client: reMarkable API client, for the direct-download fallback.
-
-        Returns:
-            True if the source file is now on disk.
-        """
-        from living_ink.api import download_raw_file
-        from living_ink.extract import extract_raw_document_from_zip
-
-        extract_raw_document_from_zip(tmp_zip, job.doc_file_path)
-        if not job.doc_file_path.exists():
-            raw = download_raw_file(client, job.item, job.doc_type)
-            if raw:
-                job.doc_file_path.write_bytes(raw)
-        return job.doc_file_path.exists()
-
-    def _render_pdf(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
-        """Render an annotated PDF's marked-up pages, or fall back to its text."""
-        from living_ink.extract import (
-            extract_text_from_pdf,
-            get_pdf_annotated_page_map,
-            render_composite_pdf_page,
-            render_pdf_page_preview,
-        )
-
-        if not self._ensure_source_file(job, tmp_zip, client):
-            return
-
-        annotated_pages = get_pdf_annotated_page_map(tmp_zip)
-        if annotated_pages:
-            log(f"Rendering {len(annotated_pages)} annotated pages for PDF '{job.notebook}'...")
-            with zipfile.ZipFile(tmp_zip, "r") as zf:
-                names = set(zf.namelist())
-                for p_info in annotated_pages:
-                    rm_name = p_info["rm_file_name"]
-                    rm_data = zf.read(rm_name) if rm_name in names else b""
-                    comp_bytes = render_composite_pdf_page(
-                        job.doc_file_path,
-                        p_info["pdf_page_index"],
-                        rm_data,
-                        screen=self.device.info.screen,
-                    )
-                    if comp_bytes:
-                        self._save_page(job, p_info["page_num"], comp_bytes, "Saved annotated page")
-            return
-
-        log(
-            f"PDF '{job.notebook}' has no handwritten annotations. "
-            "Extracting text & cover preview..."
-        )
-        cover_bytes = render_pdf_page_preview(job.doc_file_path, 0)
-        if cover_bytes:
-            self._save_page(job, 1, cover_bytes, "Saved cover preview")
-        job.extracted_doc_text = extract_text_from_pdf(job.doc_file_path)
-
-    def _render_epub(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
-        """Extract an EPUB's text, and render any annotation pages it carries."""
-        from living_ink.extract import (
-            extract_text_from_epub,
-            get_document_page_count,
-        )
-
-        if self._ensure_source_file(job, tmp_zip, client):
-            job.extracted_doc_text = extract_text_from_epub(job.doc_file_path)
-
-        page_count = get_document_page_count(tmp_zip)
-        if page_count > 0:
-            log(f"Rendering {page_count} annotation pages for EPUB '{job.notebook}'...")
-            self._render_zip_pages(job, tmp_zip, page_count)
-
-    def _render_notebook(self, job: DocumentJob, tmp_zip: Path, client: Any) -> None:
-        """Render every page of a handwritten notebook.
+            job: The job being rendered; sets ``extracted_doc_text``,
+                ``source_hashes`` and the saved page images.
+            source: The registered source handling this document.
+            bundle: The document's files on disk.
 
         Raises:
-            _StopProcessing: If the notebook is empty. That is not a failure —
-                there is simply nothing to publish.
+            _StopProcessing: If the document yields neither pages nor text.
         """
-        from living_ink.extract import get_document_page_count
+        ctx = self._render_context()
+        renderer = source.renderer
 
-        page_count = get_document_page_count(tmp_zip)
-        if page_count == 0:
+        if not renderer.prepare(bundle, ctx):
+            self._nothing_to_render(job, source)
+
+        refs = list(renderer.pages(bundle, ctx))
+        job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
+
+        # Not `not refs`: an unannotated PDF and an EPUB with no annotations
+        # both render zero pages and publish their text layer instead. Only a
+        # document with neither has nothing to say.
+        if not refs and not job.extracted_doc_text:
+            self._nothing_to_render(job, source)
+
+        if refs:
+            log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
+            self._render_pages(job, source, bundle, refs, ctx)
+
+    def _nothing_to_render(self, job: DocumentJob, source: "SourceType") -> None:
+        """Stop processing a document that produced neither pages nor text.
+
+        Whether that is a skip or a failure is the source's declaration, not a
+        guess made here: an empty notebook is a user who has not written
+        anything yet, while a PDF that yielded nothing was supposed to have
+        content and did not.
+
+        Raises:
+            _StopProcessing: Always.
+        """
+        if source.empty_is_skip:
             raise _StopProcessing(
-                True, f"Notebook '{job.notebook}' has 0 pages (empty notebook). Skipping."
+                True, f"{source.label} '{job.notebook}' has 0 pages (empty). Skipping."
             )
+        raise _StopProcessing(
+            False, f"No pages or text could be extracted for '{job.notebook}'. Skipping."
+        )
 
-        log(f"Rendering {page_count} pages for {job.notebook}...")
-        self._render_zip_pages(job, tmp_zip, page_count)
+    def _render_pages(
+        self,
+        job: DocumentJob,
+        source: "SourceType",
+        bundle: "SourceBundle",
+        refs: List["PageRef"],
+        ctx: "RenderContext",
+    ) -> None:
+        """Render every page of a document, reusing what has not changed.
 
-    def _render_zip_pages(self, job: DocumentJob, tmp_zip: Path, page_count: int) -> None:
-        """Render every page of a document zip, reusing what has not changed.
-
-        Turning one ``.rm`` page into a PNG goes through rmc, an SVG, and
-        PyMuPDF, and it is the slowest local step in a sync. It is also pure:
-        the same strokes rendered by the same libraries give the same image.
-        So a page whose source is byte-identical to one already rendered is
-        served from the cache and never re-rendered.
+        Turning one page into a PNG goes through rmc, an SVG, and PyMuPDF, and
+        it is the slowest local step in a sync. It is also pure: the same
+        source rendered by the same code gives the same image. So a page whose
+        source digest and render settings match one already rendered is served
+        from the cache and never re-rendered. **Every source is cached this
+        way** — the PDF composite path used to render uncached on every run.
 
         Args:
             job: The job being rendered.
-            tmp_zip: The downloaded document zip.
-            page_count: How many pages the zip holds.
+            source: The registered source handling this document.
+            bundle: The document's files on disk.
+            refs: The pages to render, in publication order.
+            ctx: The run's render settings.
         """
-        from living_ink.extract import (
-            RenderError,
-            get_page_source_hashes,
-            render_page_from_document_zip,
-            renderer_fingerprint,
-        )
+        from living_ink.extract import RenderError, renderer_fingerprint
 
-        # Computed even with the cache off: hashing the .rm entries of a zip
-        # already on disk is cheap, and the source hashes are what let a later
-        # stage tell "this page changed" from "the renderer changed".
-        source_hashes = get_page_source_hashes(tmp_zip)
-        job.source_hashes = source_hashes
-        # The background and the panel size are chosen per run rather than
-        # baked into the build, so they belong in the key rather than in the
-        # renderer fingerprint. The panel matters because plugging in a
+        # The renderer's own version and the source's name are in the key
+        # because a global format number cannot say which of three renderers
+        # changed. The background and the panel size are chosen per run rather
+        # than baked into the build, so they are in the key too: plugging in a
         # different tablet changes the size a boundless page renders at, and a
         # cache that ignored it would serve the other device's geometry.
-        screen = self.device.info.screen
-        background = self.settings.render_background
         fingerprint = (
-            f"{renderer_fingerprint()}:{background}:{screen[0]}x{screen[1]}"
-            if source_hashes and self.renders.enabled
+            f"{renderer_fingerprint()}:{source.name}:v{source.renderer.version}:{ctx.fingerprint()}"
+            if self.renders.enabled
             else ""
         )
 
         reused = 0
-        for page in range(1, page_count + 1):
-            key = self._render_key(source_hashes, page, fingerprint)
+        for ref in refs:
+            key = (
+                self.renders.key(ref.source_key.encode("utf-8"), fingerprint)
+                if fingerprint and ref.source_key
+                else None
+            )
             png_bytes = self.renders.get(key) if key else None
 
             if png_bytes is None:
                 try:
-                    png_bytes = render_page_from_document_zip(
-                        tmp_zip, page, background_color=background, screen=screen
-                    )
+                    png_bytes = source.renderer.render(bundle, ref, ctx)
                 except RenderError as e:
                     # Named rather than counted: a page that renders to nothing
                     # used to publish as an empty note with no error anywhere.
                     job.failed_pages += 1
-                    log(f"Failed to render page {page} of {job.notebook}: {e}")
+                    log(f"Failed to render page {ref.number} of {job.notebook}: {e}")
                     if self.report:
-                        self.report.warn(f"{job.notebook} page {page}: {e}")
+                        self.report.warn(f"{job.notebook} page {ref.number}: {e}")
                     continue
                 if png_bytes is None:
+                    # A counted failure, not a skip. The PDF path used to drop
+                    # a page it could not composite and never say so.
                     job.failed_pages += 1
-                    log(f"Failed to render page {page} of {job.notebook}.")
+                    log(f"Failed to render page {ref.number} of {job.notebook}.")
                     continue
                 if key:
                     self.renders.put(key, png_bytes)
             else:
                 reused += 1
 
-            self._save_page(job, page, png_bytes)
+            # Appended per saved page rather than assigned up front, so the
+            # digests line up with the images even when a page fails.
+            job.source_hashes.append(ref.source_key)
+            self._save_page(job, ref.number, png_bytes)
 
         if reused:
-            log(f"{reused} of {page_count} pages were already rendered; reused as-is.")
-
-    def _render_key(self, source_hashes: List[str], page: int, fingerprint: str) -> Optional[str]:
-        """Return the render cache key for one page, or None if it has none.
-
-        Args:
-            source_hashes: Per-page source digests, in page order.
-            page: One-based page number.
-            fingerprint: Identifies the renderer and the background colour.
-
-        Returns:
-            A cache key, or None when the page's source could not be hashed.
-        """
-        if page > len(source_hashes):
-            return None
-        digest = source_hashes[page - 1]
-        if not digest:
-            return None
-        return self.renders.key(digest.encode("utf-8"), fingerprint)
+            log(f"{reused} of {len(refs)} pages were already rendered; reused as-is.")
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
         """Write one rendered page image into the white-background directory."""
         out_img = WHITE_DIR / f"{job.safe_name}.page-{page}.png"
         out_img.write_bytes(data)
         log(f"{label}: {out_img}")
-
-    # Which renderer handles which document type. A type with no entry here is
-    # rendered as a handwritten notebook.
-    _RENDERERS = {"pdf": _render_pdf, "epub": _render_epub}
 
     # ── Stage 3: tags ────────────────────────────────────────────────────
 

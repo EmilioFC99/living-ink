@@ -272,14 +272,15 @@ class TestRendererFingerprint:
         assert len(fingerprint) == 16
         assert int(fingerprint, 16) >= 0
 
-    def test_bumping_the_format_version_invalidates_every_render(self, monkeypatch):
-        """Changing this module's own rendering must miss the cache."""
-        before = renderer_fingerprint()
-        renderer_fingerprint.cache_clear()
-        monkeypatch.setattr(extract, "RENDER_FORMAT_VERSION", extract.RENDER_FORMAT_VERSION + 1)
-        after = renderer_fingerprint()
-        renderer_fingerprint.cache_clear()
-        assert before != after
+    def test_it_says_nothing_about_a_particular_renderer(self):
+        """This is the libraries, not the code any one source runs.
+
+        It used to carry a hand-bumped ``RENDER_FORMAT_VERSION``, which meant a
+        change to the PDF compositor invalidated every cached notebook page.
+        Each renderer now declares its own version and the pipeline puts it in
+        the key beside this.
+        """
+        assert not hasattr(extract, "RENDER_FORMAT_VERSION")
 
     def test_a_library_upgrade_invalidates_every_render(self, monkeypatch):
         """Upgrading rmc is the documented cause of a changed page image."""
@@ -464,25 +465,6 @@ class TestBlankRenderIsLoud:
         assert extract.RmPageStats(0, 0).has_content is False
         assert extract.RmPageStats(1, 0).has_content is True
         assert extract.RmPageStats(0, 1).has_content is True
-
-
-class TestRenderFingerprintCoversTheGuards:
-    """The guards change what a render produces, so cached pages must miss."""
-
-    def test_the_format_version_was_bumped(self):
-        assert extract.RENDER_FORMAT_VERSION >= 2
-
-    def test_the_fingerprint_moves_with_it(self, monkeypatch):
-        """Otherwise the cache serves images the guarded code would refuse."""
-        renderer_fingerprint.cache_clear()
-        before = renderer_fingerprint()
-
-        monkeypatch.setattr(extract, "RENDER_FORMAT_VERSION", 99)
-        renderer_fingerprint.cache_clear()
-        after = renderer_fingerprint()
-
-        renderer_fingerprint.cache_clear()
-        assert before != after
 
 
 class TestTypedTextExportsInLinearTime:

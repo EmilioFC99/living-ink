@@ -15,7 +15,6 @@ from living_ink.extract import (
     format_page_label,
     get_pdf_annotated_page_map,
     render_composite_pdf_page,
-    render_pdf_page_preview,
 )
 from living_ink.pipeline import get_document_type
 from tests.builders import make_both, make_page
@@ -135,7 +134,7 @@ class TestGetPdfAnnotatedPageMap:
 
 
 class TestPdfRendering:
-    """Test render_composite_pdf_page and render_pdf_page_preview."""
+    """Test render_composite_pdf_page."""
 
     @pytest.fixture
     def sample_pdf(self, tmp_path):
@@ -149,13 +148,6 @@ class TestPdfRendering:
         doc.save(str(pdf_path))
         doc.close()
         return pdf_path
-
-    def test_render_pdf_page_preview(self, sample_pdf):
-        png_bytes = render_pdf_page_preview(sample_pdf, 0)
-        assert png_bytes is not None
-        img = Image.open(io.BytesIO(png_bytes))
-        assert img.width > 0
-        assert img.height > 0
 
     def test_render_composite_pdf_page_without_rm(self, sample_pdf):
         png_bytes = render_composite_pdf_page(sample_pdf, 0, rm_bytes=b"")
