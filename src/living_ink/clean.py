@@ -53,16 +53,36 @@ _provider: Optional[TextRepairProvider] = None
 _repair_enabled: Optional[bool] = None
 
 
+def _read_prompt(path: Path) -> str:
+    """Read one of the two packaged prompt files.
+
+    A missing file is an error rather than a fallback to a terser prompt
+    written inline. Both files ship inside the package, so the only way one
+    goes missing is a broken installation — and the silent substitute was worse
+    than a crash twice over: the run pays for a page of OCR done against a
+    prompt nobody wrote down, and
+    :func:`transcription_fingerprint` hashes the substitute, so the cache fills
+    up with transcriptions that look reusable and are not.
+
+    Args:
+        path: :data:`PROMPT_FILE` or :data:`OCR_PROMPT_FILE`.
+
+    Returns:
+        The prompt text, stripped.
+
+    Raises:
+        OSError: If the file cannot be read.
+    """
+    return path.read_text(encoding="utf-8").strip()
+
+
 def _read_prompt_instructions() -> str:
     """Read the cleanup prompt instructions from the prompt file.
 
     Returns:
-        The prompt text from ``cleanup_prompt.txt``, or a minimal
-        fallback string if the file is missing.
+        The prompt text from ``cleanup_prompt.txt``.
     """
-    if PROMPT_FILE.exists():
-        return PROMPT_FILE.read_text(encoding="utf-8").strip()
-    return "Clean this OCR text."
+    return _read_prompt(PROMPT_FILE)
 
 
 def configure(settings: Settings) -> None:
@@ -257,12 +277,9 @@ def _read_ocr_instructions() -> str:
     """Read the OCR prompt instructions from the prompt file.
 
     Returns:
-        The prompt text from ``ocr_prompt.txt``, or a minimal
-        fallback string if the file is missing.
+        The prompt text from ``ocr_prompt.txt``.
     """
-    if OCR_PROMPT_FILE.exists():
-        return OCR_PROMPT_FILE.read_text(encoding="utf-8").strip()
-    return "Transcribe the handwritten text from this notebook page image."
+    return _read_prompt(OCR_PROMPT_FILE)
 
 
 def transcription_fingerprint(settings: Settings) -> str:

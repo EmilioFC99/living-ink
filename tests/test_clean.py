@@ -232,12 +232,12 @@ class TestReadPromptInstructions:
         result = clean._read_prompt_instructions()
         assert "Test instructions" in result
 
-    def test_fallback_when_file_missing(self, tmp_path):
-        """Returns fallback text when prompt file doesn't exist."""
+    def test_a_missing_file_raises(self, tmp_path):
+        """Substituting a terser prompt would poison the transcript cache."""
         missing = tmp_path / "nonexistent.txt"
         with patch.object(clean, "PROMPT_FILE", missing):
-            result = clean._read_prompt_instructions()
-            assert "Clean this OCR text" in result
+            with pytest.raises(OSError):
+                clean._read_prompt_instructions()
 
     def test_strips_whitespace(self, tmp_path):
         """Result is stripped of leading/trailing whitespace."""
@@ -329,12 +329,12 @@ class TestReadOcrInstructions:
         result = clean._read_ocr_instructions()
         assert "Test OCR instructions" in result
 
-    def test_fallback_when_file_missing(self, tmp_path):
-        """Returns fallback text when prompt file doesn't exist."""
+    def test_a_missing_file_raises(self, tmp_path):
+        """A broken install must not quietly transcribe against a stub prompt."""
         missing = tmp_path / "nonexistent.txt"
         with patch.object(clean, "OCR_PROMPT_FILE", missing):
-            result = clean._read_ocr_instructions()
-            assert "Transcribe the handwritten text" in result
+            with pytest.raises(OSError):
+                clean._read_ocr_instructions()
 
 
 class TestTranscriptionFingerprint:
