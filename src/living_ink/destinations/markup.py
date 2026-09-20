@@ -6,12 +6,12 @@ the target cannot express, assemble the payload. Steps 1 and 6 are shared code;
 steps 2 to 5 are per-destination instructions against one contract.
 
 **This is a different axis from the publish lifecycle.** Placement, atomicity,
-retry and state are *not* shared — Apple Notes creates its attachments inside
-the same ``osascript`` call as the note, so a base class sequencing "attachments,
-then body" is unimplementable for it (which is why
+retry and state are *not* shared — a destination that uploads a note and its
+attachments in one API call cannot implement a base class that sequences
+"attachments, then body", which is why
 :class:`~living_ink.destinations.filesystem.FileSystemDestination` exists
-separately and Apple Notes does not extend it). Content transformation is
-shared, and that is what lives here.
+separately rather than as the only base. Content transformation is shared, and
+that is what lives here.
 
 **The vocabulary is derived, not invented.** A :class:`BlockKind` exists when
 both hold: the canonical body can plausibly contain it, *and* at least one

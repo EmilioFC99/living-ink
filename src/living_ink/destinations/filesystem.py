@@ -24,9 +24,9 @@ on the wrong side of the cut.
 
 This is the lifecycle axis, not the content axis. Turning a document into one
 destination's markup is :mod:`living_ink.destinations.markup`, and it is
-deliberately separate: Apple Notes shares the content transformation and can
-share none of this, because it creates a note and its attachments inside a
-single ``osascript`` call.
+deliberately separate: a destination that posts to an API shares the content
+transformation and can share none of this, because it has no file to place, no
+directory to create and nothing to write atomically.
 """
 
 import abc

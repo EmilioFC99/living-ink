@@ -1,6 +1,6 @@
 """Destinations for publishing reMarkable notes.
 
-Abstracts the publication target (Apple Notes, Obsidian, etc.) from the
+Abstracts the publication target (Obsidian, and whatever follows it) from the
 processing logic. All publication targets inherit from
 :class:`~living_ink.destinations.base.Destination`.
 

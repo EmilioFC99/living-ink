@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to digital note apps (**Apple Notes** and **Obsidian**). It pulls documents over USB SSH or reMarkable Cloud, renders `.rm` pages to PNG, transcribes them with a multimodal LLM, and publishes structured notes to every configured destination.
+**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to **Obsidian**. It pulls documents over USB SSH or reMarkable Cloud, renders `.rm` pages to PNG, transcribes them with a multimodal LLM, and publishes structured notes to every configured destination.
 
 - **Language**: Python 3.10+
 - **Package manager**: [uv](https://docs.astral.sh/uv/) — never raw `pip`
@@ -56,7 +56,6 @@ Render pages: .rm → SVG → PNG (white background); PDFs composite annotations
 Transcribe: AI vision OCR (one multimodal call reads the page and cleans it)
     ↓
 Publish via Destination.publish()
-    ├── AppleNotesDestination (AppleScript, one folder level)
     └── ObsidianDestination (Markdown + frontmatter, full folder tree)
 
 Note identity is the reMarkable document id, never the title. `publish()` receives `doc_id`; Obsidian writes it into the frontmatter as `living_ink_id` and will not merge two different documents into one file; `publications.target` records where each note landed, and is fed back as `existing_target` so a rename or a move relocates the note. A published document missing from the tablet listing is reported as an orphan; `living-ink sync --prune` deletes it via `Destination.unpublish()`, which never removes a note that cannot be proven to be Living Ink's.
@@ -99,7 +98,6 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 | credentials | `ai.api_key.<provider>` | LLM API key, one file per provider |
 | credentials | `remarkable.cloud_token` | reMarkable Cloud auth token |
 | credentials | `remarkable.ssh_password` | SSH password, when the tablet has one |
-| `config.yml` | `apple_notes.enabled` / `apple_notes.folder_name` | Apple Notes destination |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
 | `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
 | `config.yml` | `sync.ocr_concurrency` | Pages transcribed at once (default 4; 1 is serial) |
