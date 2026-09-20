@@ -2431,8 +2431,9 @@ class SyncPipeline:
         dropped after a run that did not want it. A failed or interrupted run
         prunes nothing, because it does not know what it would have used.
 
-        There is no manual prune command, so this is the only caller — the
-        placement is the feature, not a convenience on top of one.
+        ``living-ink cache --prune`` is the other caller, and the difference is
+        the point: there the user has said when, so any moment is the right
+        one. Here nobody has, so the placement is what makes it safe.
         """
         if self.dry_run:
             return
