@@ -199,3 +199,76 @@ class TestTheWorkspaceIsALeaf:
 
     def test_temp_imports_nothing_from_the_package(self):
         assert module_imports(PACKAGE_ROOT / "core" / "temp.py") == []
+
+
+def cli_self_imports(path: Path) -> List[Tuple[str, str]]:
+    """Return the ``living_ink.cli`` names a file imports at module level.
+
+    Args:
+        path: The ``.py`` file to read.
+
+    Returns:
+        ``(module, name)`` pairs, where ``module`` is the dotted module the
+        import came from and ``name`` is the thing taken out of it. A plain
+        ``import living_ink.cli.foo`` yields ``("living_ink.cli.foo", "")``.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: List[Tuple[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            found.extend(
+                (alias.name, "") for alias in node.names if alias.name.startswith("living_ink.cli")
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "living_ink.cli" or node.module.startswith("living_ink.cli."):
+                found.extend((node.module, alias.name) for alias in node.names)
+    return found
+
+
+class TestTheFrontEndIsTheTop:
+    """Rule 5: nothing in the library imports ``cli/``, and ``cli/`` never imports itself.
+
+    Two directions, one idea. Outward, the front end is the top of the stack:
+    a library module that reaches into it has made the CLI a dependency of the
+    thing the CLI exists to drive, and `python -m living_ink` is the single
+    allowed edge. Inward, ``cli/__init__`` imports every submodule to re-export
+    it, so a submodule importing *back* from ``living_ink.cli`` is a cycle that
+    resolves only by accident of import order — it must name the submodule that
+    defines what it wants.
+
+    The re-export surface is for callers outside the package, and it is also
+    why the seams the behaviour tests replace are imported as modules
+    (``from living_ink.cli import caches as caches_api``): that is a submodule
+    import, not a re-export, and reaching the function through it is what keeps
+    a ``monkeypatch`` of ``living_ink.cli.caches.all_caches`` applying.
+    """
+
+    def test_no_library_module_imports_the_front_end(self):
+        offenders = {}
+        for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+            if path.name == "__main__.py" or "cli" in path.relative_to(PACKAGE_ROOT).parts:
+                continue
+            named = [name for name in module_imports(path) if name.split(".")[0] == "cli"]
+            if named:
+                offenders[str(path.relative_to(PACKAGE_ROOT))] = named
+        assert offenders == {}
+
+    def test_a_cli_submodule_never_imports_the_package_itself(self):
+        submodules = {
+            path.stem if path.name != "__init__.py" else path.parent.name
+            for path in (PACKAGE_ROOT / "cli").rglob("*.py")
+        }
+        offenders = {}
+        for path, imported in (
+            (path, cli_self_imports(path)) for path in sorted((PACKAGE_ROOT / "cli").rglob("*.py"))
+        ):
+            if path.name == "__init__.py" and path.parent.name == "cli":
+                continue
+            named = [
+                f"{module}.{name}" if name else module
+                for module, name in imported
+                if module == "living_ink.cli" and name not in submodules
+            ]
+            if named:
+                offenders[str(path.relative_to(PACKAGE_ROOT))] = named
+        assert offenders == {}

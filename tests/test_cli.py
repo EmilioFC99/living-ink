@@ -18,9 +18,9 @@ from living_ink.cli import (
     StatusCommand,
     SyncCommand,
     WatchCommand,
-    _describe_connected_device,
     main,
 )
+from living_ink.cli.status import _describe_connected_device
 from living_ink.config import ConfigurationMissing, find_repo_root, get_config_path
 from living_ink.settings import SOURCE_CONFIG, SOURCE_ENV
 from living_ink.setup_wizard import WizardResult
@@ -128,7 +128,9 @@ def test_cmd_sync_ssh_flag_resolves_to_ssh(tmp_path, monkeypatch):
     assert pipeline.settings.preferred_connection == "ssh"
 
 
-@patch("living_ink.cli._describe_connected_device", return_value="reMarkable 2 (1404\u00d71872)")
+@patch(
+    "living_ink.cli.status._describe_connected_device", return_value="reMarkable 2 (1404\u00d71872)"
+)
 @patch("living_ink.setup_wizard.verify_remarkable_ssh", return_value=(True, "Connected"))
 @patch("living_ink.setup_wizard.verify_ai_provider", return_value=(True, "OK"))
 def test_cmd_status_ssh_mode(mock_verify_ai, mock_verify_ssh, mock_device, tmp_path, capsys):
@@ -718,7 +720,7 @@ class TestWatchCommand:
         args = argparse.Namespace(interval=interval)
         with (
             patch.object(SyncCommand, "execute_sync", side_effect=side_effects) as sync,
-            patch("living_ink.cli.time.sleep") as sleep,
+            patch("living_ink.cli.commands.watch.time.sleep") as sleep,
         ):
             code = WatchCommand().run(args)
         return code, sync, sleep
@@ -756,7 +758,7 @@ class TestWatchCommand:
         with (
             patch.object(SyncCommand, "execute_sync", side_effect=ConfigurationMissing("nope")),
             patch("builtins.input", side_effect=AssertionError("must not prompt")),
-            patch("living_ink.cli.time.sleep"),
+            patch("living_ink.cli.commands.watch.time.sleep"),
         ):
             assert WatchCommand().run(args) == 1
 
@@ -770,7 +772,7 @@ class TestWatchCommand:
         args = argparse.Namespace(interval=30)
         with (
             patch.object(SyncCommand, "execute_sync", return_value=True),
-            patch("living_ink.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch("living_ink.cli.commands.watch.time.sleep", side_effect=KeyboardInterrupt),
         ):
             assert WatchCommand().run(args) == 0
 
@@ -1000,13 +1002,13 @@ class TestCacheCommand:
         The render cache is redirected alongside it so the command never reads
         the developer's own.
         """
-        from living_ink import cli as cli_module
         from living_ink.cache import RenderCache, TranscriptCache
+        from living_ink.cli import caches as caches_module
 
         built = TranscriptCache(tmp_path / "transcripts")
         renders = RenderCache(tmp_path / "renders")
-        monkeypatch.setattr(cli_module, "transcript_cache", lambda: built)
-        monkeypatch.setattr(cli_module, "render_cache", lambda: renders)
+        monkeypatch.setattr(caches_module, "transcript_cache", lambda: built)
+        monkeypatch.setattr(caches_module, "render_cache", lambda: renders)
         return built
 
     def _run(self, capsys, **flags):
@@ -1033,11 +1035,11 @@ class TestCacheCommand:
         assert str(cache.root) in out
 
     def test_a_disabled_cache_says_so(self, cache, tmp_path, monkeypatch, capsys):
-        from living_ink import cli as cli_module
         from living_ink.cache import TranscriptCache
+        from living_ink.cli import caches as caches_module
 
         off = TranscriptCache(tmp_path / "t", enabled=False)
-        monkeypatch.setattr(cli_module, "transcript_cache", lambda: off)
+        monkeypatch.setattr(caches_module, "transcript_cache", lambda: off)
         _, out = self._run(capsys)
         assert "disabled" in out
 
@@ -1213,7 +1215,9 @@ class TestSyncStatusFlag:
 
         defaults = {"status": True, "all": False, "json": False}
         args = argparse.Namespace(**{**defaults, **flags})
-        with patch("living_ink.cli.compare_with_device", return_value=(rows, orphans or [], None)):
+        with patch(
+            "living_ink.cli.inventory.compare_with_device", return_value=(rows, orphans or [], None)
+        ):
             code = SyncCommand().run(args)
         return code, capsys.readouterr().out
 
@@ -1282,7 +1286,7 @@ class TestSyncStatusFlag:
         from living_ink.cli import SyncCommand
 
         args = argparse.Namespace(status=True, all=False, json=False)
-        with patch("living_ink.cli.compare_with_device", return_value=([], [], None)):
+        with patch("living_ink.cli.inventory.compare_with_device", return_value=([], [], None)):
             with patch.object(SyncCommand, "execute_sync") as mock_sync:
                 SyncCommand().run(args)
         mock_sync.assert_not_called()
@@ -1293,7 +1297,8 @@ class TestSyncStatusFlag:
 
         args = argparse.Namespace(status=True, all=False, json=False)
         with patch(
-            "living_ink.cli.compare_with_device", side_effect=ConfigurationMissing("no config")
+            "living_ink.cli.inventory.compare_with_device",
+            side_effect=ConfigurationMissing("no config"),
         ):
             with patch.object(SyncCommand, "_handle_missing_config") as mock_wizard:
                 code = SyncCommand().run(args)
@@ -1322,7 +1327,7 @@ class TestComparisonPaging:
 
     def _page(self, capsys, rows, answers, interactive=True):
         """Page through `rows`, feeding `answers` to each prompt."""
-        from living_ink.cli import _print_paged
+        from living_ink.cli.inventory import _print_paged
 
         with patch("sys.stdout.isatty", return_value=interactive):
             with patch("sys.stdin.isatty", return_value=interactive):

@@ -505,6 +505,10 @@ def cli(monkeypatch, capsys, tmp_path):
     from living_ink import cli as cli_module
     from living_ink import pipeline as pipeline_module
     from living_ink import setup_wizard as wizard_module
+    from living_ink.cli import caches as caches_module
+    from living_ink.cli import inventory as inventory_module
+    from living_ink.cli import status as status_module
+    from living_ink.cli.commands import watch as watch_module
 
     state_db = tmp_path / "state.db"
     state_db.write_bytes(b"")
@@ -583,8 +587,8 @@ def cli(monkeypatch, capsys, tmp_path):
 
     monkeypatch.setattr(pipeline_module, "SyncPipeline", _RecordingPipeline)
     monkeypatch.setattr(wizard_module, "run_wizard", _run_wizard)
-    monkeypatch.setattr(cli_module, "collect_status", _collect_status)
-    monkeypatch.setattr(cli_module, "compare_with_device", _compare_with_device)
+    monkeypatch.setattr(status_module, "collect_status", _collect_status)
+    monkeypatch.setattr(inventory_module, "compare_with_device", _compare_with_device)
 
     def _spy(module, name: str, label: str) -> None:
         """Record entry into a subsystem, then let the real one run.
@@ -602,7 +606,7 @@ def cli(monkeypatch, capsys, tmp_path):
 
         monkeypatch.setattr(module, name, wrapper)
 
-    _spy(cli_module, "all_caches", "all_caches")
+    _spy(caches_module, "all_caches", "all_caches")
     _spy(pipeline_module, "get_state_store", "get_state_store")
 
     def _state_db_path() -> Path:
@@ -614,7 +618,7 @@ def cli(monkeypatch, capsys, tmp_path):
         recorder.note("state_db_path")
         return recorder.state_db
 
-    monkeypatch.setattr(cli_module, "state_db_path", _state_db_path)
+    monkeypatch.setattr(caches_module, "state_db_path", _state_db_path)
 
     def _no_network(*args, **kwargs):
         """Fail the test rather than let a command reach the network."""
@@ -651,7 +655,7 @@ def cli(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(socket, "socket", _no_network)
     monkeypatch.setattr(subprocess, "run", _no_subprocess)
     monkeypatch.setattr(subprocess, "Popen", _no_subprocess)
-    monkeypatch.setattr(cli_module.time, "sleep", _no_waiting)
+    monkeypatch.setattr(watch_module.time, "sleep", _no_waiting)
 
     def _run(*argv: str, fails_with: BaseException | None = None) -> Invocation:
         """Run the CLI once and describe what happened.
@@ -1304,8 +1308,8 @@ class TestStatusReportsWhatItWasGiven:
         Returns:
             A tuple of the config path and the values written.
         """
-        from living_ink import cli as cli_module
         from living_ink import setup_wizard as wizard_module
+        from living_ink.cli import status as status_module
 
         vault = tmp_path / "MyVault"
         (vault / ".obsidian").mkdir(parents=True)
@@ -1348,7 +1352,7 @@ class TestStatusReportsWhatItWasGiven:
         )
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "ok"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "ok"))
-        monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
+        monkeypatch.setattr(status_module, "_describe_connected_device", lambda *a, **kw: "")
         monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
 
         return config, values
@@ -1736,16 +1740,16 @@ class TestSetupWritesOnlyWhatItWasTold:
         still passes.
         """
         from living_ink import api as api_module
-        from living_ink import cli as cli_module
         from living_ink import setup_wizard as wizard_module
+        from living_ink.cli import status as status_module
 
         wizard()
-        monkeypatch.setattr(cli_module, "_describe_connected_device", lambda *a, **kw: "")
+        monkeypatch.setattr(status_module, "_describe_connected_device", lambda *a, **kw: "")
         monkeypatch.setattr(api_module, "resolve_stored_token", lambda **kwargs: "")
         monkeypatch.setattr(wizard_module, "verify_remarkable_token", lambda token: (True, "OK"))
         monkeypatch.setattr(wizard_module, "verify_ai_provider", lambda *a, **kw: (True, "OK"))
 
-        report = cli_module.collect_status(tmp_path / "config" / "config.yml")
+        report = status_module.collect_status(tmp_path / "config" / "config.yml")
 
         assert report.config_found is True
         assert report.config_error is None
