@@ -30,7 +30,6 @@ from living_ink.destinations import (
 )
 from living_ink.pipeline import (
     DocumentJob,
-    SyncOptions,
     SyncPipeline,
     log,
 )
@@ -120,47 +119,9 @@ class MockDestination(Destination):
         )
 
 
-class TestSyncOptions:
-    """Tests for the SyncOptions value object."""
-
-    def test_defaults_are_all_deferrals(self):
-        """A bare SyncOptions overrides nothing."""
-        opts = SyncOptions()
-        assert opts.notebook is None
-        assert opts.sync_pdfs is None
-        assert opts.sync_epubs is None
-        assert opts.all_types is False
-        assert opts.keep_temp is False
-
-    def test_from_args_maps_unset_store_true_flags_to_none(self):
-        """Unset --sync-pdfs/--sync-epubs must defer to config, not disable them."""
-        import argparse as _argparse
-
-        args = _argparse.Namespace(
-            notebook="Book", limit=3, sync_pdfs=False, sync_epubs=True, keep_temp=True
-        )
-        opts = SyncOptions.from_args(args)
-        assert opts.notebook == "Book"
-        assert opts.limit == 3
-        assert opts.sync_pdfs is None
-        assert opts.sync_epubs is True
-        assert opts.keep_temp is True
-        # Fields absent from the namespace fall back to the dataclass defaults.
-        assert opts.cloud is False
-
-    def test_merged_with_ignores_none_and_does_not_mutate(self):
-        """merged_with returns a new object and skips None overrides."""
-        base = SyncOptions(notebook="Original", limit=5)
-        derived = base.merged_with(limit=1, notebook=None)
-        assert derived.limit == 1
-        assert derived.notebook == "Original"
-        assert base.limit == 5
-        assert derived is not base
-
-
 def test_sync_pipeline_init_defaults():
     """SyncPipeline initializes with standard configuration and data paths."""
-    pipeline = SyncPipeline(SyncOptions(keep_temp=True))
+    pipeline = SyncPipeline(keep_temp=True)
     assert pipeline.keep_temp is True
     assert pipeline.config_path.name == "config.yml"
     assert pipeline.data_dir.exists()
@@ -176,7 +137,7 @@ def test_sync_pipeline_custom_destinations():
 
 def test_sync_pipeline_properties_all_types():
     """SyncPipeline(all_types=True) enables sync_pdfs and sync_epubs."""
-    pipeline = SyncPipeline(SyncOptions(all_types=True))
+    pipeline = SyncPipeline(all_types=True)
     assert pipeline.all_types is True
     assert pipeline.sync_pdfs is True
     assert pipeline.sync_epubs is True
@@ -184,11 +145,11 @@ def test_sync_pipeline_properties_all_types():
 
 def test_sync_pipeline_properties_ssh_and_cloud():
     """SyncPipeline sets connection properties and synchronizes environment."""
-    pipeline_ssh = SyncPipeline(SyncOptions(ssh=True))
+    pipeline_ssh = SyncPipeline(ssh=True)
     assert pipeline_ssh.preferred_connection == "ssh"
     assert pipeline_ssh.use_ssh is True
 
-    pipeline_cloud = SyncPipeline(SyncOptions(cloud=True))
+    pipeline_cloud = SyncPipeline(cloud=True)
     assert pipeline_cloud.preferred_connection == "cloud"
     assert pipeline_cloud.use_ssh is False
 
@@ -197,25 +158,25 @@ def test_the_type_flags_become_selection_criteria():
     """The flags narrow the run by naming source types, nothing more."""
     from living_ink.sources import SOURCE_REGISTRY
 
-    default = SyncPipeline(SyncOptions(sync_pdfs=False, sync_epubs=False), destinations=[])
+    default = SyncPipeline(sync_pdfs=False, sync_epubs=False, destinations=[])
     assert default._criteria().types == frozenset({"notebook"})
 
-    with_pdfs = SyncPipeline(SyncOptions(sync_pdfs=True, sync_epubs=False), destinations=[])
+    with_pdfs = SyncPipeline(sync_pdfs=True, sync_epubs=False, destinations=[])
     assert with_pdfs._criteria().types == frozenset({"notebook", "pdf"})
 
-    everything = SyncPipeline(SyncOptions(all_types=True), destinations=[])
+    everything = SyncPipeline(all_types=True, destinations=[])
     assert everything._criteria().types == frozenset(SOURCE_REGISTRY)
 
 
 def test_the_per_run_cap_becomes_the_selection_limit():
     """`--limit` narrows a sweep, and says so in the criteria rather than later."""
-    pipe = SyncPipeline(SyncOptions(limit=2), destinations=[MockDestination()])
+    pipe = SyncPipeline(limit=2, destinations=[MockDestination()])
     assert pipe._criteria().limit == 2
 
 
 def test_a_named_notebook_is_neither_capped_nor_second_guessed():
     """Naming one document is not a sweep, so the sweep's cap does not apply."""
-    criteria = SyncPipeline(SyncOptions(notebook="Notes", limit=1), destinations=[])._criteria()
+    criteria = SyncPipeline(notebook="Notes", limit=1, destinations=[])._criteria()
 
     assert criteria.target == "Notes"
     assert criteria.limit is None
@@ -236,9 +197,7 @@ def test_sync_pipeline_run_no_notebooks():
 
 def test_sync_pipeline_run_targeted_not_found():
     """SyncPipeline.run returns False when a targeted notebook is not in the library."""
-    pipeline = SyncPipeline(
-        SyncOptions(notebook="NonExistentBook"), destinations=[MockDestination()]
-    )
+    pipeline = SyncPipeline(notebook="NonExistentBook", destinations=[MockDestination()])
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
             mock_client = MagicMock()
@@ -256,7 +215,7 @@ def test_sync_pipeline_run_targeted_user_cancelled():
         "VissibleName": "Meeting Notes",
         "hash": "h1",
     }
-    pipeline = SyncPipeline(SyncOptions(notebook="Meeting Notes"), destinations=[MockDestination()])
+    pipeline = SyncPipeline(notebook="Meeting Notes", destinations=[MockDestination()])
 
     with patch("living_ink.pipeline.validate_environment"):
         with patch.object(pipeline, "connect") as mock_connect:
@@ -676,7 +635,7 @@ class TestDryRun:
 
     def test_nothing_is_published(self, tmp_path):
         dest = MockDestination("MockDest")
-        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        pipeline_obj = SyncPipeline(dry_run=True, destinations=[dest])
 
         with patch("living_ink.pipeline.add_to_processed_log") as recorded:
             assert pipeline_obj._publish(self._job(tmp_path), [dest]) is True
@@ -686,7 +645,7 @@ class TestDryRun:
 
     def test_it_reports_where_the_transcript_landed(self, tmp_path, capsys):
         dest = MockDestination("MockDest")
-        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        pipeline_obj = SyncPipeline(dry_run=True, destinations=[dest])
         job = self._job(tmp_path)
 
         pipeline_obj._publish(job, [dest])
@@ -698,7 +657,7 @@ class TestDryRun:
     def test_it_says_how_much_of_an_existing_note_would_be_rewritten(self, tmp_path, capsys):
         """The whole-note promise is what a user needs before the run, not after."""
         dest = MockDestination("MockDest")
-        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        pipeline_obj = SyncPipeline(dry_run=True, destinations=[dest])
 
         pipeline_obj._publish(self._job(tmp_path), [dest])
 
@@ -706,7 +665,7 @@ class TestDryRun:
 
     def test_a_page_level_destination_promises_something_different(self, tmp_path, capsys):
         dest = MockDestination("MockDest")
-        pipeline_obj = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        pipeline_obj = SyncPipeline(dry_run=True, destinations=[dest])
 
         with patch.object(type(dest), "merge_unit", MergeUnit.PAGE):
             pipeline_obj._publish(self._job(tmp_path), [dest])
@@ -726,13 +685,8 @@ class TestDryRun:
         recorded.assert_called_once()
 
     def test_dry_run_keeps_the_artifacts_it_points_at(self):
-        assert SyncPipeline(options=SyncOptions(dry_run=True)).keep_temp is True
-        assert SyncPipeline(options=SyncOptions()).keep_temp is False
-
-    def test_the_flag_reaches_the_options(self):
-        args = SimpleNamespace(dry_run=True)
-        assert SyncOptions.from_args(args).dry_run is True
-        assert SyncOptions.from_args(SimpleNamespace()).dry_run is False
+        assert SyncPipeline(dry_run=True).keep_temp is True
+        assert SyncPipeline().keep_temp is False
 
 
 class TestOrderedDurability:
@@ -2398,7 +2352,7 @@ class TestOneDocumentCannotEndTheRun:
         pipeline.reset_state_store()
 
     def _pipeline(self, dry_run=False):
-        pipe = SyncPipeline(SyncOptions(dry_run=dry_run), destinations=[MockDestination()])
+        pipe = SyncPipeline(dry_run=dry_run, destinations=[MockDestination()])
         pipe.report = RunReport()
         return pipe
 
@@ -2577,7 +2531,7 @@ class TestInterruptedRuns:
         connection — turned run-recording into an ``AttributeError`` that hid
         whatever had actually gone wrong.
         """
-        pipe = SyncPipeline(SyncOptions(), destinations=[])
+        pipe = SyncPipeline(destinations=[])
         monkeypatch.setattr(
             pipe, "_execute", lambda: (_ for _ in ()).throw(RuntimeError("no tablet"))
         )
@@ -3102,7 +3056,7 @@ class TestThePreviewAndTheRunAgree:
         The cap defers rather than settles, so a low one here would look like a
         disagreement with a preview that is not capped at all.
         """
-        return SyncPipeline(SyncOptions(limit=limit), destinations=[dest])
+        return SyncPipeline(limit=limit, destinations=[dest])
 
     def _settle(self, store, pipe, dest, doc_id, version):
         """Record the publication a successful run would have left behind."""

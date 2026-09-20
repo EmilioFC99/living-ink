@@ -12,7 +12,7 @@ import pytest
 
 from living_ink import pipeline
 from living_ink.destinations import MergeUnit
-from living_ink.pipeline import DocumentJob, SyncOptions, SyncPipeline
+from living_ink.pipeline import DocumentJob, SyncPipeline
 from tests.builders import make_page
 from tests.fakes import FakeApiDestination
 
@@ -107,7 +107,7 @@ class TestExternalIdRoundTrip:
 
     def test_a_dry_run_records_nothing_so_the_next_run_is_still_the_first(self, tmp_path):
         dest = FakeApiDestination()
-        pipe = SyncPipeline(options=SyncOptions(dry_run=True), destinations=[dest])
+        pipe = SyncPipeline(dry_run=True, destinations=[dest])
         pipe._publish(make_job(tmp_path), [dest])
 
         assert dest.seen_existing_id == []
@@ -128,7 +128,7 @@ class TestUnpublishThroughThePipeline:
 
     def test_pruning_deletes_exactly_the_object_that_was_published(self, tmp_path):
         dest = FakeApiDestination()
-        pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
+        pipe = SyncPipeline(prune=True, destinations=[dest])
         pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan(
@@ -140,7 +140,7 @@ class TestUnpublishThroughThePipeline:
 
     def test_an_orphan_with_no_id_is_left_alone(self, tmp_path):
         dest = FakeApiDestination()
-        pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
+        pipe = SyncPipeline(prune=True, destinations=[dest])
         pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan("nb-1", {"FakeApiDestination": {"external_id": None, "target": None}})
@@ -151,7 +151,7 @@ class TestUnpublishThroughThePipeline:
     def test_the_document_is_forgotten_either_way(self, tmp_path):
         """Keeping the row would only report the same orphan on every run."""
         dest = FakeApiDestination()
-        pipe = SyncPipeline(options=SyncOptions(prune=True), destinations=[dest])
+        pipe = SyncPipeline(prune=True, destinations=[dest])
         pipe._publish(make_job(tmp_path), [dest])
 
         pipe._prune_orphan("nb-1", {"FakeApiDestination": {"external_id": None, "target": None}})

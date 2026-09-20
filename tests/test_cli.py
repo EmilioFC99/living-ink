@@ -320,14 +320,14 @@ def test_sync_command_execution(tmp_path):
             code = cmd.run(args)
             assert code == 0
             mock_init.assert_called_once()
-            opts = mock_init.call_args.kwargs["options"]
-            assert opts.notebook == "MyNotes"
-            assert opts.limit == 5
-            assert opts.ssh is True
-            assert opts.sync_pdfs is True
+            opts = mock_init.call_args.kwargs
+            assert opts["notebook"] == "MyNotes"
+            assert opts["limit"] == 5
+            assert opts["ssh"] is True
+            assert opts["sync_pdfs"] is True
             # An unset store-true flag must defer to config, not force False.
-            assert opts.sync_epubs is None
-            assert opts.keep_temp is True
+            assert opts["sync_epubs"] is None
+            assert opts["keep_temp"] is True
             mock_run.assert_called_once()
 
 

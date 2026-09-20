@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from living_ink.destinations import ObsidianDestination
-from living_ink.pipeline import SyncOptions, SyncPipeline
+from living_ink.pipeline import SyncPipeline
 from living_ink.providers import TextRepairProvider
 from tests.fixtures import build_corpus as corpus_ids
 from tests.fixtures.transport import CorpusTransport
@@ -169,14 +169,15 @@ def e2e(tmp_path, corpus_root, monkeypatch):
             """Run one full sync into the vault.
 
             Args:
-                **options: Fields for :class:`~living_ink.pipeline.SyncOptions`.
+                **options: Per-run arguments for
+                    :class:`~living_ink.pipeline.SyncPipeline`.
 
             Returns:
                 Whether the run reported success.
             """
             destination = ObsidianDestination(vault_path=str(vault))
             pipe = SyncPipeline(
-                SyncOptions(**options),
+                **options,
                 data_dir=data_dir,
                 destinations=[destination],
             )

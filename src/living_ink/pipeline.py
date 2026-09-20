@@ -753,94 +753,6 @@ def select_notebook_interactive(
         print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
 
 
-@dataclass(frozen=True)
-class SyncOptions:
-    """Per-run choices for a single sync, separate from the persisted config.
-
-    These are the knobs a caller sets at invocation time — the CLI flags, in
-    practice. Config supplies the defaults; a field left at ``None`` means
-    "no override, use whatever config says". The boolean flags default to
-    ``False`` rather than ``None`` because they are store-true switches with no
-    meaningful third state.
-
-    Kept frozen so a pipeline's options cannot drift underneath it mid-run; use
-    :meth:`merged_with` to derive a variant.
-
-    Attributes:
-        notebook: Target a single notebook by name, folder path, or document ID.
-        limit: Maximum number of notebooks to process. None or 0 means "use config".
-        ssh: Force the USB SSH transport.
-        cloud: Force the reMarkable Cloud transport.
-        preferred_connection: Explicit transport preference ('ssh' or 'cloud'),
-            used when neither ``ssh`` nor ``cloud`` is set.
-        sync_pdfs: Include PDF documents. None means "use config".
-        sync_epubs: Include EPUB documents. None means "use config".
-        all_types: Include every document type; overrides sync_pdfs/sync_epubs.
-        keep_temp: Preserve rendered PNGs and OCR transcripts for debugging.
-        dry_run: Do everything except publish, so a run can be inspected first.
-        prune: Delete notes whose notebook is gone from the tablet, instead of
-            only reporting them.
-        json_output: Print the run summary as JSON instead of a table.
-    """
-
-    notebook: Optional[str] = None
-    limit: Optional[int] = None
-    ssh: bool = False
-    cloud: bool = False
-    preferred_connection: Optional[str] = None
-    sync_pdfs: Optional[bool] = None
-    sync_epubs: Optional[bool] = None
-    all_types: bool = False
-    keep_temp: bool = False
-    dry_run: bool = False
-    prune: bool = False
-    json_output: bool = False
-
-    @classmethod
-    def from_args(cls, args: Any) -> "SyncOptions":
-        """Build options from a parsed argparse namespace.
-
-        This is the single place that knows CLI flag names, so adding a flag
-        means touching the parser and this method — not the pipeline internals.
-
-        Note:
-            ``--sync-pdfs`` / ``--sync-epubs`` are store-true flags, so an unset
-            flag is mapped to None ("defer to config") rather than to False
-            ("explicitly disable"), which would silently override the config.
-
-        Args:
-            args: Namespace produced by the sync subparser.
-
-        Returns:
-            A populated SyncOptions.
-        """
-        return cls(
-            notebook=getattr(args, "notebook", None),
-            limit=getattr(args, "limit", None),
-            ssh=getattr(args, "ssh", False),
-            cloud=getattr(args, "cloud", False),
-            sync_pdfs=getattr(args, "sync_pdfs", False) or None,
-            sync_epubs=getattr(args, "sync_epubs", False) or None,
-            all_types=getattr(args, "all_types", False),
-            keep_temp=getattr(args, "keep_temp", False),
-            dry_run=getattr(args, "dry_run", False),
-            prune=getattr(args, "prune", False),
-            json_output=getattr(args, "json", False),
-        )
-
-    def merged_with(self, **overrides: Any) -> "SyncOptions":
-        """Return a copy with the supplied non-None fields replaced.
-
-        Args:
-            **overrides: Field names and values. None values are ignored so
-                callers can pass through optional arguments unconditionally.
-
-        Returns:
-            A new SyncOptions; the receiver is unchanged.
-        """
-        return replace(self, **{k: v for k, v in overrides.items() if v is not None})
-
-
 class _StopProcessing(Exception):
     """Raised by a stage when there is nothing left to do for a document.
 
@@ -989,27 +901,56 @@ class SyncPipeline:
 
     def __init__(
         self,
-        options: Optional[SyncOptions] = None,
+        *,
+        notebook: Optional[str] = None,
+        limit: Optional[int] = None,
+        ssh: bool = False,
+        cloud: bool = False,
+        sync_pdfs: Optional[bool] = None,
+        sync_epubs: Optional[bool] = None,
+        all_types: bool = False,
+        keep_temp: bool = False,
+        dry_run: bool = False,
+        prune: bool = False,
+        json_output: bool = False,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
     ):
-        """Initialize the SyncPipeline by resolving options against configuration.
+        """Initialize the SyncPipeline by resolving this run's choices once.
 
-        Every per-run knob arrives in ``options``; config supplies the defaults
-        that the options do not override. The resolution happens once, here, so
-        that by the time :meth:`run` is called the pipeline's state is settled.
+        The per-run knobs used to arrive as a ``SyncOptions`` value object that
+        this method then merged against config with a hand-written precedence
+        ladder — a second implementation of the one in
+        :meth:`living_ink.settings.Settings._pick`, and the two had already
+        disagreed about what a zero ``--limit`` means. The settings-backed
+        knobs are now handed to :meth:`Settings.resolve` as its ``flags``
+        layer, so "a flag outranks the environment outranks the file" is
+        written down in exactly one place. What is left here is the handful of
+        choices that shape a single run and have no persisted form at all.
+
+        Keyword-only on purpose: every one of these is a bare boolean or a bare
+        string at the call site, and a positional ``True`` says nothing about
+        which switch it flipped.
 
         Args:
-            options: Per-run overrides. Defaults to an all-defaults SyncOptions,
-                i.e. "do exactly what the config says".
+            notebook: Target a single document by name, folder path, or id.
+            limit: Most documents to process. 0 or None defers to config.
+            ssh: Force the USB transport for this run.
+            cloud: Force the reMarkable Cloud transport for this run.
+            sync_pdfs: Include annotated PDFs. None defers to config.
+            sync_epubs: Include annotated EPUBs. None defers to config.
+            all_types: Include every registered source type, whatever the
+                config and the two flags above say.
+            keep_temp: Preserve rendered PNGs and transcripts for debugging.
+            dry_run: Do everything except publish.
+            prune: Delete notes whose document is gone from the tablet.
+            json_output: Print the run report as JSON instead of a table.
             config_path: Path to YAML config file. Defaults to standard config path.
             data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
         ensure_runtime_dirs()
-        self.options = options or SyncOptions()
-        opts = self.options
 
         # Filled in by _learn_device once the transport is up. Until then the
         # named default stands in, so nothing downstream has to handle None.
@@ -1017,12 +958,12 @@ class SyncPipeline:
 
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
-        self.dry_run = opts.dry_run
-        self.prune = opts.prune
-        self.json_output = opts.json_output
+        self.dry_run = dry_run
+        self.prune = prune
+        self.json_output = json_output
         # A dry run's whole output is the transcripts it leaves behind, so it
         # implies --keep-temp; purging them would delete what it points at.
-        self.keep_temp = opts.keep_temp or opts.dry_run
+        self.keep_temp = keep_temp or dry_run
 
         if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)
@@ -1037,42 +978,28 @@ class SyncPipeline:
                 destinations if destinations is not None else list(get_default_destinations())
             )
 
-        # Config and environment are merged once, here; the CLI options layered
-        # on top are the only thing that outranks them.
-        base = Settings.resolve(self.raw_config)
+        self.target_notebook = notebook.strip() if notebook else None
+        self.all_types = all_types
 
-        # 1. Connection properties
-        if opts.ssh:
-            preferred, use_ssh = "ssh", True
-        elif opts.cloud:
-            preferred, use_ssh = "cloud", False
-        elif opts.preferred_connection:
-            preferred = opts.preferred_connection.strip().lower()
-            use_ssh = preferred == "ssh"
-        else:
-            preferred, use_ssh = base.preferred_connection, base.use_ssh
-
-        # 2. Document types and limits
-        self.target_notebook = opts.notebook.strip() if opts.notebook else None
-        self.all_types = opts.all_types
-
-        if opts.all_types:
-            sync_pdfs = sync_epubs = True
-        else:
-            sync_pdfs = base.sync_pdfs if opts.sync_pdfs is None else opts.sync_pdfs
-            sync_epubs = base.sync_epubs if opts.sync_epubs is None else opts.sync_epubs
-
-        limit = (
-            opts.limit if opts.limit is not None and opts.limit > 0 else base.max_notebooks_per_run
-        )
-
-        self.settings = replace(
-            base,
-            preferred_connection=preferred,
-            use_ssh=use_ssh,
-            sync_pdfs=sync_pdfs,
-            sync_epubs=sync_epubs,
-            max_notebooks_per_run=limit,
+        # None means "this flag was not given", which is what lets config and
+        # the environment be heard; a False here would be an explicit "off"
+        # and would silently overrule the file. ``--all-types`` is the one
+        # switch that does overrule it, which is why it resolves to True
+        # rather than to None.
+        self.settings = Settings.resolve(
+            self.raw_config,
+            flags={
+                "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
+                "use_ssh": True if ssh else False if cloud else None,
+                "sync_pdfs": True if all_types else sync_pdfs,
+                "sync_epubs": True if all_types else sync_epubs,
+                # Not greater than zero is "no override", never "process none":
+                # ``--limit 0`` is what the parser hands over when the flag was
+                # left off entirely.
+                "max_notebooks_per_run": limit if limit and limit > 0 else None,
+                "prune": prune or None,
+                "output_json": json_output or None,
+            },
         )
 
         # Opened by run(); every state row written during that run carries it,

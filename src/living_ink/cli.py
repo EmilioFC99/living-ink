@@ -35,6 +35,43 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only; both are imported lazi
 logger = logging.getLogger(__name__)
 
 
+def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    """Translate a parsed ``sync`` namespace into pipeline keyword arguments.
+
+    This is the single place that knows CLI flag names, so adding a flag means
+    touching the parser and this function — never the pipeline internals. It
+    lives in the front end rather than on the pipeline because ``dest=`` names
+    are an argparse fact: a library caller constructs the pipeline directly and
+    should not have to know that ``--json`` arrives as ``args.json``.
+
+    Note:
+        ``--pdf`` / ``--epub`` are store-true flags, so an unset flag maps to
+        None ("defer to config") rather than to False ("explicitly disable"),
+        which would silently override the config file.
+
+    Args:
+        args: Namespace produced by the sync subparser. Read with ``getattr``
+            defaults throughout, because ``watch`` reuses the same parser and a
+            test may hand over a bare namespace.
+
+    Returns:
+        Keyword arguments for :class:`~living_ink.pipeline.SyncPipeline`.
+    """
+    return {
+        "notebook": getattr(args, "notebook", None),
+        "limit": getattr(args, "limit", None),
+        "ssh": getattr(args, "ssh", False),
+        "cloud": getattr(args, "cloud", False),
+        "sync_pdfs": getattr(args, "sync_pdfs", False) or None,
+        "sync_epubs": getattr(args, "sync_epubs", False) or None,
+        "all_types": getattr(args, "all_types", False),
+        "keep_temp": getattr(args, "keep_temp", False),
+        "dry_run": getattr(args, "dry_run", False),
+        "prune": getattr(args, "prune", False),
+        "json_output": getattr(args, "json", False),
+    }
+
+
 class BaseCommand(ABC):
     """Abstract base class for all Living Ink CLI commands.
 
@@ -274,10 +311,10 @@ class SyncCommand(BaseCommand):
         if cfg_path.exists():
             os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
 
-        from living_ink.pipeline import SyncOptions, SyncPipeline
+        from living_ink.pipeline import SyncPipeline
 
         pipeline = SyncPipeline(
-            options=SyncOptions.from_args(args),
+            **sync_arguments(args),
             config_path=cfg_path if cfg_path.exists() else None,
         )
         return pipeline.run()
