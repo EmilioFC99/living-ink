@@ -43,7 +43,7 @@ from living_ink.core.selection import (
     SelectionCriteria,
     select,
 )
-from living_ink.core.stages import Transcriber, prepare_pages, write_transcript
+from living_ink.core.stages import Transcriber, judge_pages, prepare_pages, write_transcript
 from living_ink.core.temp import DocumentWorkspace, page_number, purge_all
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
@@ -1315,8 +1315,9 @@ class SyncPipeline:
 
         The stages run in a fixed order and pass state through a
         :class:`DocumentJob`: acquire pages, collect tags, preprocess images,
-        OCR, write transcripts, publish. A stage that finds nothing left to do
-        raises :class:`_StopProcessing` carrying the verdict to report.
+        OCR, write transcripts, judge what came back, publish. A stage that
+        finds nothing left to do raises :class:`_StopProcessing` carrying the
+        verdict to report.
 
         Args:
             candidate: What the selection pass decided about this document —
@@ -1336,6 +1337,7 @@ class SyncPipeline:
             self._preprocess_images(job)
             self._ocr_pages(job)
             self._write_transcripts(job)
+            self._judge_pages(job)
             success = self._publish(job, candidate.pending)
         except _StopProcessing as stop:
             if stop.reason:
@@ -2020,7 +2022,33 @@ class SyncPipeline:
         )
         log(f"Cleaned OCR text saved to {job.workspace.transcript}")
 
-    # ── Stage 7: publish ─────────────────────────────────────────────────
+    # ── Stage 7: the verdict on what came back ───────────────────────────
+
+    def _judge_pages(self, job: DocumentJob) -> None:
+        """Stop the document here if nothing worth publishing came back.
+
+        After the transcript rather than before it: a user debugging a run that
+        published nothing needs to see what the model actually returned, and
+        the artifact is the only place that says.
+
+        Args:
+            job: The document, with its pages transcribed.
+
+        Raises:
+            _StopProcessing: If every page failed, or if the document is blank
+                and ``sync.skip_empty`` is on. Neither applies to a PDF or EPUB
+                that yielded its own text layer, which is content whatever the
+                annotations did.
+        """
+        blocked = judge_pages(
+            job.pages,
+            skip_empty=self.settings.skip_empty,
+            has_text=bool(job.extracted_doc_text and job.extracted_doc_text.strip()),
+        )
+        if blocked:
+            raise _StopProcessing(blocked.success, f"{job.notebook}: {blocked.reason}")
+
+    # ── Stage 8: publish ─────────────────────────────────────────────────
 
     def _build_document(self, job: DocumentJob) -> Document:
         """Turn a finished job into the destination-neutral document.

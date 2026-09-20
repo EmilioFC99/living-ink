@@ -17,5 +17,13 @@ import the pipeline to say one line to the user has not been extracted at all.
 from living_ink.core.stages.preprocess import prepare_pages, preprocess_image
 from living_ink.core.stages.transcribe import Transcriber
 from living_ink.core.stages.transcript import write_transcript
+from living_ink.core.stages.verdict import Blocked, judge_pages
 
-__all__ = ["Transcriber", "prepare_pages", "preprocess_image", "write_transcript"]
+__all__ = [
+    "Blocked",
+    "Transcriber",
+    "judge_pages",
+    "prepare_pages",
+    "preprocess_image",
+    "write_transcript",
+]
