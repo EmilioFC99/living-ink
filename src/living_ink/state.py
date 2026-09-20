@@ -20,12 +20,18 @@ The schema is deliberately small. Blobs — PNGs, transcripts, downloads — sta
 on the filesystem where they already are; this database holds keys and
 timestamps, never page content.
 
+There is no importer for those files. A one-shot migration ran on every open
+for the lifetime of a format that never shipped a stable release, and a 1.0
+that reads a pre-1.0 file on the strength of its *name* will happily adopt
+whatever a stray ``processed_notebooks_x.json`` in the data directory says. A
+fresh database costs one re-sync; the publications it writes are the real
+history from then on.
+
 Notable invariant: ``publications.first_published_at`` is written once and
 never updated, so it can back a truthful ``created`` date on a published note
 even after that note has been re-synced a hundred times.
 """
 
-import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -1168,58 +1174,3 @@ class StateStore:
             if needle in (name, path):
                 matches.append(document)
         return matches
-
-
-def import_legacy_json(store: StateStore, data_dir: Path) -> int:
-    """Fold any ``processed_notebooks_*.json`` files into the database.
-
-    Run once, on first open. Each imported file is renamed with a
-    ``.migrated`` suffix rather than deleted, so a user who downgrades still
-    has their state and an unexpected failure is recoverable.
-
-    Timestamps are taken from the file's own mtime. It is not when the note
-    was really first published, but it is an upper bound and a great deal
-    better than pretending everything was published during the migration.
-
-    Args:
-        store: Open state store to write into.
-        data_dir: Directory the JSON state files live in.
-
-    Returns:
-        Number of publication records imported.
-    """
-    data_dir = Path(data_dir)
-    if not data_dir.is_dir():
-        return 0
-
-    imported = 0
-    for path in sorted(data_dir.glob("processed_notebooks_*.json")):
-        destination = path.stem[len("processed_notebooks_") :]
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            # A corrupt file was already treated as empty by the old loader;
-            # leave it in place so the user can see it rather than renaming
-            # away the evidence.
-            continue
-
-        if isinstance(raw, list):
-            # The oldest format: a bare list of ids, with no version at all.
-            raw = {doc_id: 0 for doc_id in raw}
-        if not isinstance(raw, dict):
-            continue
-
-        stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(
-            timespec="seconds"
-        )
-        for doc_id, version in raw.items():
-            # An empty recipe on purpose: the JSON never recorded one, so the
-            # honest answer is "unknown", and unknown must read as pending.
-            store.record_publication(
-                str(doc_id), destination, version, recipe="", published_at=stamp, run_id=None
-            )
-            imported += 1
-
-        path.rename(path.with_suffix(".json.migrated"))
-
-    return imported

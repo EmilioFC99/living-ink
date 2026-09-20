@@ -125,7 +125,6 @@ def test_sync_pipeline_init_defaults():
     pipeline = SyncPipeline(keep_temp=True)
     assert pipeline.keep_temp is True
     assert pipeline.config_path.name == "config.yml"
-    assert pipeline.data_dir.exists()
 
 
 def test_sync_pipeline_custom_destinations():
@@ -720,7 +719,6 @@ class TestOrderedDurability:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory, and drop it afterwards."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -1179,7 +1177,6 @@ class TestProcessedLog:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         return tmp_path
@@ -1226,16 +1223,6 @@ class TestProcessedLog:
 
         assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v2"}
 
-    def test_legacy_json_state_is_imported_once(self, tmp_path, monkeypatch):
-        self._state_dir(tmp_path, monkeypatch)
-        legacy = tmp_path / "processed_notebooks_ObsidianDestination.json"
-        legacy.write_text('{"doc-1": 7}', encoding="utf-8")
-
-        assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "7"}
-        # Renamed rather than deleted, so a downgrade still has the state.
-        assert not legacy.exists()
-        assert (tmp_path / "processed_notebooks_ObsidianDestination.json.migrated").exists()
-
 
 class TestOpeningTheStoreSweepsDeadDestinations:
     """A destination that no longer ships loses its rows on the first open.
@@ -1250,7 +1237,6 @@ class TestOpeningTheStoreSweepsDeadDestinations:
     def _state_dir(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory, before and after."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -1341,7 +1327,6 @@ class TestExternalIdRoundTrip:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -1372,7 +1357,6 @@ class TestOutcomeRecording:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -3349,7 +3333,6 @@ class TestThePreviewAndTheRunAgree:
     def store(self, tmp_path, monkeypatch):
         """A real state store on a throwaway database."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield pipeline.get_state_store()

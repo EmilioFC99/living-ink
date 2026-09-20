@@ -343,12 +343,12 @@ class TestObsidianFailureReporting:
 
 
 # =========================================================================
-# State File Management & Migration
+# State File Management
 # =========================================================================
 
 
 class TestStateLocation:
-    """Sync state lives in the data directory, and older layouts are absorbed."""
+    """Sync state lives in the data directory and nowhere else."""
 
     def _at(self, tmp_path, monkeypatch):
         """Point the state layer at a temp directory and drop any cached store."""
@@ -356,7 +356,6 @@ class TestStateLocation:
 
         (tmp_path / "data").mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path / "data")
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         return pipeline
@@ -365,17 +364,6 @@ class TestStateLocation:
         pipeline = self._at(tmp_path, monkeypatch)
         try:
             assert pipeline.get_state_db_path() == tmp_path / "data" / "state.db"
-        finally:
-            pipeline.reset_state_store()
-
-    def test_legacy_state_beside_the_checkout_is_imported(self, tmp_path, monkeypatch):
-        """State written before it moved under the data directory still counts."""
-        pipeline = self._at(tmp_path, monkeypatch)
-        legacy = tmp_path / "processed_notebooks_ObsidianDestination.json"
-        legacy.write_text('{"doc1": 1}', encoding="utf-8")
-        try:
-            assert pipeline.load_processed_log("ObsidianDestination") == {"doc1": "1"}
-            assert not legacy.exists()
         finally:
             pipeline.reset_state_store()
 

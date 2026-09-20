@@ -1311,9 +1311,7 @@ class TestForcingARepublish:
         """
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(
-            **intent(["sync", "--notebook", "Standup"]), destinations=[]
-        )
+        pipe = SyncPipeline(**intent(["sync", "--notebook", "Standup"]), destinations=[])
         assert pipe._criteria().force is True
 
 

@@ -1403,7 +1403,6 @@ class TestInfoReportsTheStores:
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         opened = pipeline.get_state_store()
@@ -1554,7 +1553,6 @@ class TestInfoWatchPanel:
         from living_ink import pipeline
 
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield pipeline.get_state_store()

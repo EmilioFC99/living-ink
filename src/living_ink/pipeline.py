@@ -21,7 +21,6 @@ from living_ink.clean import vision_ocr_available
 from living_ink.config import (
     ConfigurationMissing,
     apply_status,
-    find_repo_root,
     get_config_path,
     get_data_dir,
     get_logs_dir,
@@ -75,8 +74,6 @@ if TYPE_CHECKING:  # pragma: no cover - names for annotations only
     # pipeline's neighbours without a cycle.
     from living_ink.sources import PageRef, RenderContext, SourceBundle, SourceType
 
-
-ROOT = find_repo_root()
 
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
@@ -352,30 +349,19 @@ def get_state_store() -> "state.StateStore":
     """Return the shared state store, opening it on first use.
 
     Cached rather than built at import time, so importing this module still
-    touches no disk. The one-time import of the old per-destination JSON files
-    happens here, on the first open after an upgrade.
+    touches no disk.
 
-    So does the sweep of publication rows belonging to a destination this build
-    no longer ships. This is the layer that can do it: ``state`` must not know
-    what a destination is, and the registry only exists once ``destinations``
-    has been imported. It runs after the legacy import, so a row that arrives
-    from an old JSON file naming a deleted destination is swept in the same
-    pass rather than surviving until the next run.
+    The sweep of publication rows belonging to a destination this build no
+    longer ships happens here, on the first open. This is the layer that can do
+    it: ``state`` must not know what a destination is, and the registry only
+    exists once ``destinations`` has been imported.
 
     Returns:
         The process-wide open StateStore.
     """
     global _state_store
     if _state_store is None:
-        # Legacy state lived beside the checkout before it moved under the
-        # data directory; sweep both so an upgrade from either layout keeps
-        # its history instead of re-OCRing every notebook.
-        db_path = get_state_db_path()
-        store = state.StateStore(db_path)
-        for source in (DATA_DIR, ROOT):
-            imported = state.import_legacy_json(store, source)
-            if imported:
-                log(f"📦 Imported {imported} sync records from {source} into {db_path.name}.")
+        store = state.StateStore(get_state_db_path())
         for name, count in store.forget_unknown_destinations(registered_state_keys()).items():
             log(f"🧹 Forgot {count} publication record(s) for {name}, which no longer exists.")
         _state_store = store

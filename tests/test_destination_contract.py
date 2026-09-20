@@ -47,7 +47,6 @@ class TestExternalIdRoundTrip:
     def _state(self, tmp_path, monkeypatch):
         """Point the state store at a temp directory for the duration."""
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -120,7 +119,6 @@ class TestUnpublishThroughThePipeline:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
@@ -170,7 +168,6 @@ class TestTheDocumentThatArrives:
     @pytest.fixture(autouse=True)
     def _state(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
-        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
         monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
         pipeline.reset_state_store()
         yield
