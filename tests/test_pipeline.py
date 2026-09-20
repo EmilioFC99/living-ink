@@ -2678,6 +2678,36 @@ class TestOneDocumentCannotEndTheRun:
             pipe._process_one(self._candidate("doc-1", "Notes"), MagicMock())
 
 
+class TestRenderedPagesAreWrittenAtomically:
+    """A half-written PNG is indistinguishable from a finished one."""
+
+    def test_the_page_arrives_whole_or_not_at_all(self, tmp_path, monkeypatch):
+        """``rendered_pages()`` trusts the filename, so the filename must lie."""
+        job = MagicMock()
+        job.workspace = DocumentWorkspace(tmp_path, "doc-1").ensure()
+        seen = []
+        real_replace = os.replace
+
+        def watch(src, dst):
+            # What is on disk under the final name at the moment of the rename.
+            seen.append(job.workspace.rendered_pages())
+            real_replace(src, dst)
+
+        monkeypatch.setattr(pipeline.os, "replace", watch)
+        SyncPipeline._save_page(MagicMock(), job, 1, b"PNG-bytes")
+
+        assert seen == [[]]
+        assert job.workspace.page_image(1).read_bytes() == b"PNG-bytes"
+
+    def test_no_temp_file_is_left_behind(self, tmp_path):
+        job = MagicMock()
+        job.workspace = DocumentWorkspace(tmp_path, "doc-1").ensure()
+
+        SyncPipeline._save_page(MagicMock(), job, 1, b"PNG-bytes")
+
+        assert [p.name for p in job.workspace.pages_dir.iterdir()] == ["page-1.png"]
+
+
 class TestInterruptedRuns:
     """Ctrl+C is not a failure, and the run did not do nothing."""
 

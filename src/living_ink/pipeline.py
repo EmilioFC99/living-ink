@@ -1942,9 +1942,18 @@ class SyncPipeline:
             log(f"{reused} of {len(refs)} pages were already rendered; reused as-is.")
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
-        """Write one rendered page image into the white-background directory."""
+        """Write one rendered page image into the workspace, atomically.
+
+        Written to a sibling and renamed, because ``rendered_pages()`` decides
+        a page is already rendered from the filename alone. A direct write
+        interrupted half way leaves a valid-looking PNG holding nothing, and
+        the next run feeds it to the preprocessor and to OCR — publishing
+        either a crash or somebody's idea of what half an image says.
+        """
         out_img = job.workspace.page_image(page)
-        out_img.write_bytes(data)
+        tmp = out_img.with_suffix(out_img.suffix + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, out_img)
         log(f"{label}: {out_img}")
 
     # ── Stage 3: tags ────────────────────────────────────────────────────
