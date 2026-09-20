@@ -87,6 +87,47 @@ def isolated_home(tmp_path_factory, monkeypatch):
     yield home
 
 
+@pytest.fixture(autouse=True)
+def completions_stay_home(monkeypatch):
+    """Keep the completion installer inside the fake home, and out of real shells.
+
+    Three things in :mod:`living_ink.setup_wizard` reach past a test on
+    purpose, and ``isolated_home`` does not cover any of them.
+    ``completion_dirs`` names ``/opt/homebrew/share/zsh/site-functions``,
+    which on a developer's Mac exists and is writable — so any test that
+    reaches the wizard's commit step installs into the machine running the
+    suite. ``completion_is_live`` spawns the user's *interactive* shell, which
+    sources their entire rc: correct in production, and a minute of wall clock
+    in a fifteen-second suite. And ``detect_shell`` reads ``$SHELL``, so the
+    same test takes a different branch on a laptop and on CI.
+
+    All three are pinned here. The directory list is *filtered* rather than
+    replaced, so the candidates a test sees are the real ones minus the system
+    paths — a shell whose only home-relative fallback is removed would break
+    this fixture rather than quietly pass. Tests that want the real functions
+    patch them back, which is what ``tests/test_completions_install.py`` does.
+
+    Args:
+        monkeypatch: Pytest's environment and attribute patcher.
+    """
+    from living_ink import setup_wizard
+
+    real_dirs = setup_wizard.completion_dirs
+
+    def under_the_fake_home(shell: str):
+        """Return only the candidate directories inside the redirected home."""
+        home = Path.home()
+        return tuple(
+            (directory, searched)
+            for directory, searched in real_dirs(shell)
+            if home == directory or home in directory.parents
+        )
+
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(setup_wizard, "completion_dirs", under_the_fake_home)
+    monkeypatch.setattr(setup_wizard, "completion_is_live", lambda shell: True)
+
+
 def pytest_configure(config):
     """Register the markers the fixture corpus uses.
 

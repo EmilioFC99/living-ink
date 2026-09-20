@@ -17,6 +17,7 @@ import os
 import platform
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -467,6 +468,349 @@ def uninstall_launch_agent() -> Tuple[bool, str]:
         return True, "Background sync LaunchAgent removed."
     except OSError as e:
         return False, f"Failed to uninstall LaunchAgent: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Shell completions
+# ---------------------------------------------------------------------------
+
+#: What each shell calls the file it loads a completion from.
+COMPLETION_FILENAMES = {"zsh": "_living-ink", "bash": "living-ink", "fish": "living-ink.fish"}
+
+#: Wrapped around the lines added to an rc file so removing them later is exact
+#: rather than a guess about where the block ended. ``uninstall`` matches on
+#: these two strings; changing either orphans the block in every rc file that
+#: already has one.
+RC_START = "# living-ink tab completion — added by `living-ink setup`"
+RC_END = "# end living-ink tab completion"
+
+#: How long to wait for a shell to answer the probe. An interactive shell runs
+#: the user's whole rc, which can source a version manager or two.
+PROBE_TIMEOUT = 15
+
+
+@dataclass(frozen=True)
+class CompletionTarget:
+    """Where one shell's completion script goes, and whether that is enough.
+
+    Attributes:
+        shell: The shell this was resolved for.
+        path: The file to write.
+        searched: Whether the shell reads this directory on its own. False
+            means the script sits there inert until a line in an rc file
+            points at it.
+    """
+
+    shell: str
+    path: Path
+    searched: bool
+
+
+def detect_shell() -> Optional[str]:
+    """Name the user's shell, if completions can be written for it.
+
+    Returns:
+        ``"zsh"``, ``"bash"``, ``"fish"``, or None for anything else —
+        including an unset ``$SHELL``, which is what a container gives you.
+    """
+    name = Path(os.environ.get("SHELL", "")).name
+    return name if name in COMPLETION_FILENAMES else None
+
+
+def completion_dirs(shell: str) -> Tuple[Tuple[Path, bool], ...]:
+    """List where a shell's completions may go, best first.
+
+    Computed per call rather than declared at module scope, because every
+    entry is relative to ``$HOME`` and a constant would bind whatever it was
+    at import.
+
+    Args:
+        shell: One of the keys of :data:`COMPLETION_FILENAMES`.
+
+    Returns:
+        Pairs of directory and whether the shell searches it unprompted. The
+        searched ones come first: an install that edits nothing the user owns
+        is the whole point, and only the fallbacks need a line in an rc file.
+    """
+    home = Path.home()
+    return {
+        "zsh": (
+            (Path("/opt/homebrew/share/zsh/site-functions"), True),
+            (Path("/usr/local/share/zsh/site-functions"), True),
+            (home / ".zfunc", False),
+        ),
+        "bash": (
+            (Path("/opt/homebrew/etc/bash_completion.d"), True),
+            (Path("/usr/local/etc/bash_completion.d"), True),
+            (home / ".bash_completion.d", False),
+        ),
+        # fish has one answer and always reads it, so there is nothing to
+        # choose and no rc line this could ever need.
+        "fish": ((home / ".config" / "fish" / "completions", True),),
+    }.get(shell, ())
+
+
+def completion_target(shell: str) -> Optional[CompletionTarget]:
+    """Choose where this shell's completion script should be written.
+
+    A directory that exists wins over one that would have to be created:
+    creating ``/usr/local/share/zsh/site-functions`` on a machine that has no
+    such thing is inventing a convention rather than following one. Only a
+    directory under ``$HOME`` may be created, because the others belong to a
+    package manager.
+
+    Args:
+        shell: One of the keys of :data:`COMPLETION_FILENAMES`.
+
+    Returns:
+        Where to write, or None if this shell has nowhere writable.
+    """
+    filename = COMPLETION_FILENAMES.get(shell)
+    candidates = completion_dirs(shell)
+    if not filename or not candidates:
+        return None
+
+    for directory, searched in candidates:
+        if directory.is_dir() and os.access(directory, os.W_OK):
+            return CompletionTarget(shell, directory / filename, searched)
+
+    home = Path.home()
+    for directory, searched in candidates:
+        if home == directory or home in directory.parents:
+            return CompletionTarget(shell, directory / filename, searched)
+    return None
+
+
+def completion_is_live(shell: str) -> bool:
+    """Ask the shell whether it would complete ``living-ink`` right now.
+
+    The only honest test, and the reason this feature is not just a file
+    write. Whether the script is on the search path and whether the shell's
+    completion system was ever started are two different questions, and macOS
+    answers no to the second: neither ``/etc/zshrc`` nor ``/etc/zprofile``
+    runs ``compinit``, so a correctly installed script stays inert and Tab
+    does nothing — indistinguishable, from the user's side, from a bad
+    install.
+
+    Args:
+        shell: One of the keys of :data:`COMPLETION_FILENAMES`.
+
+    Returns:
+        True if the shell named a completion for ``living-ink``. False for
+        anything else, including a shell that could not be run at all: the
+        cost of being wrong is offering help that was not needed.
+    """
+    probes = {
+        "zsh": (["zsh", "-i", "-c"], "print -r -- ${_comps[living-ink]:-}"),
+        "bash": (["bash", "-i", "-c"], "complete -p living-ink 2>/dev/null"),
+        "fish": (["fish", "-c"], "complete -C 'living-ink sy'"),
+    }
+    if shell not in probes:
+        return False
+
+    argv, script = probes[shell]
+    try:
+        result = subprocess.run(
+            [*argv, script],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(result.stdout.strip())
+
+
+def completion_rc_snippet(target: CompletionTarget) -> str:
+    """Return the rc lines that make a written script findable.
+
+    Args:
+        target: Where the script was written.
+
+    Returns:
+        The block to append, already wrapped in its markers, or "" when the
+        shell needs nothing — which is every fish install, and every zsh
+        install on a machine whose completion system is already running.
+    """
+    if target.shell == "zsh":
+        lines = [] if target.searched else [f"fpath+=({target.path.parent})"]
+        # Unconditional, and after the fpath line: this is called only when the
+        # probe said nothing completes, and on macOS the missing `compinit` is
+        # the usual reason. Running it twice costs a little startup time and
+        # breaks nothing, which is the cheaper way to be wrong.
+        lines.append("autoload -Uz compinit && compinit")
+    elif target.shell == "bash":
+        lines = [f"source {target.path}"]
+    else:
+        return ""
+    return "\n".join([RC_START, *lines, RC_END])
+
+
+def shell_rc_path(shell: str) -> Optional[Path]:
+    """Name the file a shell reads at the start of an interactive session.
+
+    Args:
+        shell: One of the keys of :data:`COMPLETION_FILENAMES`.
+
+    Returns:
+        The rc file, or None for a shell that needs no edit. macOS starts
+        every terminal as a login shell, which is why bash reads
+        ``.bash_profile`` there and ``.bashrc`` everywhere else.
+    """
+    home = Path.home()
+    if shell == "zsh":
+        return home / ".zshrc"
+    if shell == "bash":
+        return home / (".bash_profile" if platform.system() == "Darwin" else ".bashrc")
+    return None
+
+
+def install_completions(
+    shell: Optional[str] = None, repo_dir: Optional[Path] = None
+) -> Tuple[bool, str, Optional[CompletionTarget]]:
+    """Write the completion script for this shell.
+
+    This asks nobody. The file is Living Ink's own, in a directory meant for
+    exactly it, and ``uninstall`` takes it back unconditionally — the same
+    tier as the launch agent and the caches. The one part that needs consent
+    is a line in an rc file the user owns, which is
+    :func:`enable_completions_in_rc` and a separate decision.
+
+    Args:
+        shell: Which shell to install for. None detects it from ``$SHELL``.
+        repo_dir: Project root, passed through when building the parser the
+            script is generated from.
+
+    Returns:
+        Tuple of (success, message, where it went). The target is None when
+        there was nowhere to write, so a caller can tell "no completions
+        here" from "installed, and now unfindable".
+    """
+    # Imported here, not at module scope: this module is what the CLI's setup
+    # command imports, so reaching back up to the app at import time is a
+    # cycle. The completions module gives the same answer for the same reason.
+    from living_ink.cli import completions
+    from living_ink.cli.app import LivingInkCLI
+
+    shell = shell or detect_shell()
+    if not shell:
+        return False, "Could not tell which shell you use, so no completions were installed", None
+
+    target = completion_target(shell)
+    if target is None:
+        return False, f"Found nowhere writable to install {shell} completions", None
+
+    try:
+        target.path.parent.mkdir(parents=True, exist_ok=True)
+        script = completions.render(LivingInkCLI(root=repo_dir).build_parser(), shell)
+        target.path.write_text(script, encoding="utf-8")
+    except OSError as e:
+        return False, f"Could not write {shell} completions: {e}", None
+    return True, f"Tab completion for {shell} installed to {target.path}", target
+
+
+def enable_completions_in_rc(target: CompletionTarget) -> Tuple[bool, str]:
+    """Append the lines that make an installed script take effect.
+
+    The one part of this that touches a file the user owns, so the one part a
+    caller has to ask about first. Idempotent: a second run finds its own
+    marker and changes nothing, which matters because ``setup`` is a command
+    people re-run.
+
+    Args:
+        target: Where the script was written.
+
+    Returns:
+        Tuple of (success, message).
+    """
+    snippet = completion_rc_snippet(target)
+    rc = shell_rc_path(target.shell)
+    if not snippet or rc is None:
+        return True, f"{target.shell} needs no changes to find it"
+
+    try:
+        existing = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        if RC_START in existing:
+            return True, f"{rc} already points at it"
+        # One blank line above the block so it reads as a block, and none at
+        # all when the file is new — a config whose first line is blank looks
+        # like something went wrong.
+        prefix = ("\n" if existing.endswith("\n") else "\n\n") if existing else ""
+        with rc.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{snippet}\n")
+    except OSError as e:
+        return False, f"Could not update {rc}: {e}"
+    return True, f"Added the completion lines to {rc}"
+
+
+def uninstall_completions(shell: Optional[str] = None) -> List[str]:
+    """Remove the completion script, and any rc block that was added for it.
+
+    Both halves are removed, and neither is a question: this only ever undoes
+    what :func:`install_completions` and :func:`enable_completions_in_rc` did,
+    and the rc block is found by the markers they wrote rather than by
+    matching on what the lines look like.
+
+    Args:
+        shell: Which shell to clean up. None does every shell that has a file,
+            because the shell a user had at ``setup`` is not necessarily the
+            one they have now.
+
+    Returns:
+        One line per thing removed, for the caller to print. Empty if there
+        was nothing installed.
+    """
+    removed: List[str] = []
+    for name in [shell] if shell else list(COMPLETION_FILENAMES):
+        for directory, _searched in completion_dirs(name):
+            script = directory / COMPLETION_FILENAMES[name]
+            try:
+                if script.is_file():
+                    script.unlink()
+                    removed.append(f"Removed {script}")
+            except OSError as e:
+                removed.append(f"Could not remove {script}: {e}")
+
+        rc = shell_rc_path(name)
+        if rc is None or not rc.exists():
+            continue
+        try:
+            text = rc.read_text(encoding="utf-8")
+            trimmed = _without_rc_block(text)
+            if trimmed != text:
+                rc.write_text(trimmed, encoding="utf-8")
+                removed.append(f"Removed the completion lines from {rc}")
+        except OSError as e:
+            removed.append(f"Could not update {rc}: {e}")
+    return removed
+
+
+def _without_rc_block(text: str) -> str:
+    """Strip the marked completion block out of an rc file's contents.
+
+    Args:
+        text: The whole file.
+
+    Returns:
+        The same text with the first ``RC_START``..``RC_END`` block removed,
+        along with the one blank line :func:`enable_completions_in_rc` wrote
+        above it — otherwise installing and uninstalling a few times leaves a
+        growing stack of blank lines in somebody's ``.zshrc``. An unterminated
+        block is left alone: the end marker is what proves where Living Ink's
+        lines stop, and deleting to the end of a shell config on a guess is
+        not a recovery.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.strip() == RC_START), None)
+    if start is None:
+        return text
+    end = next((i for i, line in enumerate(lines[start:], start) if line.strip() == RC_END), None)
+    if end is None:
+        return text
+    if start and not lines[start - 1].strip():
+        start -= 1
+    return "".join(lines[:start] + lines[end + 1 :])
 
 
 def install_cli_command(

@@ -13,6 +13,7 @@ answer, and that nothing reaches disk before the summary is confirmed.
 """
 
 import stat
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import patch
 
@@ -541,3 +542,105 @@ class TestWhatTheWizardWrites:
         run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
         problems = validate_config(read_config_file(saved_config(tmp_path)))
         assert [p for p in problems if p.level == ERROR] == []
+
+
+class TestTabCompletion:
+    """The script is installed without asking; the rc line is asked about.
+
+    The split is the whole design. Writing ``_living-ink`` into a directory
+    that exists to hold exactly that is Living Ink's own business, the same
+    tier as the launch agent — autocomplete is something a CLI is expected to
+    have, not a favour to request. Appending to ``.zshrc`` is an edit to a file
+    the user owns, and it only happens at all on a machine where the script
+    would otherwise sit inert.
+    """
+
+    def test_a_shell_that_already_completes_is_asked_nothing(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """The common case: the script goes in and the wizard says no more.
+
+        ``conftest.completions_stay_home`` reports every shell as live, which
+        is why none of the other flow tests in this file see the question.
+        """
+        _result, script = run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
+
+        assert not [q for q in script.asked if "add them to" in q.lower()]
+        assert (Path.home() / ".zfunc" / "_living-ink").is_file()
+
+    def test_a_dead_shell_is_offered_the_lines_and_takes_them(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """Saying yes appends the marked block, and only on confirmation."""
+        from living_ink import setup_wizard
+
+        monkeypatch.setattr(setup_wizard, "completion_is_live", lambda shell: False)
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+
+        _result, script = run_wizard(
+            monkeypatch, tmp_path, {**CLOUD_ONLY, "add them to": True}, vault
+        )
+
+        assert [q for q in script.asked if "add them to" in q.lower()]
+        assert setup_wizard.RC_START in rc.read_text(encoding="utf-8")
+
+    def test_declining_still_installs_the_script(self, monkeypatch, tmp_path, vault, probes):
+        """No is the answer to the rc edit, not to completions.
+
+        A user who does not want their shell config touched still gets the
+        file, so pointing a shell at it later is one line they write
+        themselves rather than a second run of ``setup``.
+        """
+        from living_ink import setup_wizard
+
+        monkeypatch.setattr(setup_wizard, "completion_is_live", lambda shell: False)
+        rc = Path.home() / ".zshrc"
+        rc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+
+        run_wizard(monkeypatch, tmp_path, {**CLOUD_ONLY, "add them to": False}, vault)
+
+        assert (Path.home() / ".zfunc" / "_living-ink").is_file()
+        assert rc.read_text(encoding="utf-8") == "export PATH=/usr/bin\n"
+
+    def test_nothing_is_installed_before_the_summary_is_confirmed(
+        self, monkeypatch, tmp_path, vault, probes
+    ):
+        """Declining the summary leaves no script, the same as every other write.
+
+        The completion script is written by ``commit`` for exactly this
+        reason: a question asked in the flow is not permission to act on it
+        before the user has approved the whole thing.
+        """
+        from living_ink import setup_wizard
+
+        monkeypatch.setattr(setup_wizard, "completion_is_live", lambda shell: False)
+
+        result, _script = run_wizard(
+            monkeypatch,
+            tmp_path,
+            {**CLOUD_ONLY, "add them to": True, "save this configuration": False},
+            vault,
+        )
+
+        assert result.saved is False
+        assert not (Path.home() / ".zfunc").exists()
+        assert not (Path.home() / ".zshrc").exists()
+
+    def test_a_failed_install_does_not_fail_the_wizard(self, monkeypatch, tmp_path, vault, probes):
+        """Completions are the least important thing setup does.
+
+        A read-only completions directory reports one dim line and the config
+        is still written — the alternative is a user losing an API key they
+        just typed to a shell convenience.
+        """
+        from living_ink import setup_wizard
+
+        monkeypatch.setattr(
+            setup_wizard, "install_completions", lambda **kw: (False, "Could not write", None)
+        )
+
+        result, _script = run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
+
+        assert result.saved is True
+        assert saved_config(tmp_path).exists()
