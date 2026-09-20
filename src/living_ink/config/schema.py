@@ -47,6 +47,13 @@ LIST = "list"
 #: Marker for a credential. Never written to ``config.yml``, never displayed
 #: unmasked, and resolved from the credentials directory rather than the file.
 SECRET = "secret"
+#: Marker for a five-field cron expression. Read like :data:`TEXT` — this
+#: package validates shape, not semantics, because parsing cron means
+#: ``croniter`` and :mod:`living_ink.config` imports nothing. What the kind
+#: buys is the editor: a menu row that offers the common schedules and shows
+#: the next few times each one would fire, instead of a text box in which
+#: ``0 9 1 * *`` and ``0 9 * * 1`` look equally plausible.
+CRON = "cron"
 
 # ---------------------------------------------------------------------------
 # Status
@@ -203,9 +210,11 @@ class Setting:
             the same thing in two forms nothing can mechanically convert
             between, so the user is told the new spelling rather than guessed
             at.
-        commands: Which commands get the flag. ``watch`` gets none: a
-            supervised process is restarted without its arguments, so a flag
-            would stop applying without saying so.
+        commands: Which commands get the flag. ``watch`` gets no *behaviour*
+            flag: a supervised process is restarted without its arguments, so
+            a flag would stop applying without saying so. The output ones are
+            the exception — they change how this process prints, not what a
+            scheduled run does.
         secret: Mask this value everywhere it is displayed.
         group: Section the ``config`` menu files this setting under, for a
             setting with no :attr:`key` to derive one from. Every credential is
@@ -674,7 +683,7 @@ SETTINGS: Tuple[Setting, ...] = (
     Setting(
         field="watch_schedule",
         key="watch.schedule",
-        kind=TEXT,
+        kind=CRON,
         default=None,
         help="When the scheduled sync runs, as a cron expression.",
         env="LIVING_INK_WATCH_SCHEDULE",
@@ -750,6 +759,10 @@ SETTINGS: Tuple[Setting, ...] = (
         help="Print the run report as one JSON document instead of a table.",
         env="LIVING_INK_OUTPUT_JSON",
         flag="--json",
+        # The one flag ``watch`` accepts, because it does not change what a
+        # run does — it changes how this process prints, and a supervisor that
+        # restarts without it loses nothing a scheduled run needed.
+        commands=("sync", "watch"),
     ),
     # ── Environment-only until 1.0 ─────────────────────────────────────────
     #
