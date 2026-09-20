@@ -16,7 +16,8 @@ Three rules the callers depend on:
 * **A widget returns ``None`` when the user cancels**, never a default and
   never a partial value. ``questionary`` swallows Ctrl+C into ``None``, so a
   ``None`` that falls through as a value is a silent misconfiguration —
-  :func:`required` is the one-line way to refuse it.
+  :func:`required` is the one-line way to refuse it. Ctrl+D is the same act
+  and ``questionary`` does *not* catch it, which is what :func:`_ask` is for.
 * **:class:`Cancelled` is a :class:`KeyboardInterrupt`.** A cancel at question
   seven of a wizard is the user leaving, and it has to reach ``main`` as the
   same exit 130 as a Ctrl+C during a sync. Subclassing means every existing
@@ -39,6 +40,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
 import questionary
 from prompt_toolkit.styles import Style
+from questionary.prompts.common import InquirerControl
 
 #: What a validator may return: ``True`` for fine, or the message to show.
 Validator = Callable[[str], Union[bool, str]]
@@ -55,6 +57,11 @@ NO_TTY_MESSAGE = (
 #: One theme for every widget. Cyan for the question, green for the answer the
 #: user settled on, and dim for the hints — the same three the console report
 #: has always used, so the wizard and the run do not look like two products.
+#:
+#: ``selected`` and ``highlighted`` are deliberately different colours, and in
+#: a ``select`` they mean two different things at once: ``questionary`` marks
+#: the ``default`` row as selected for the whole life of the prompt, so green
+#: is "the value you arrived with" and cyan is "where the cursor is now".
 THEME = Style(
     [
         ("qmark", "fg:#00afaf bold"),
@@ -72,7 +79,7 @@ THEME = Style(
 
 
 class Cancelled(KeyboardInterrupt):
-    """The user pressed Ctrl+C or Escape at a prompt.
+    """The user pressed Ctrl+C or Ctrl+D at a prompt.
 
     A :class:`KeyboardInterrupt` on purpose: leaving a wizard halfway is the
     same act as interrupting a sync, and it must exit 130 rather than looking
@@ -102,6 +109,12 @@ class Choice:
 #: harness (§17.6) fills it with a ``prompt_toolkit`` pipe so the real widgets
 #: can be driven by scripted keystrokes; production never touches it.
 _DRIVER: dict[str, Any] = {}
+
+#: How many choices a ``questionary`` list can carry shortcuts for. Read from
+#: the library rather than written as ``36``, because the number is theirs:
+#: it is the length of their digits-then-letters table, and
+#: :func:`questionary.select` raises rather than degrading past it.
+SHORTCUT_LIMIT = len(InquirerControl.SHORTCUT_KEYS)
 
 
 @contextmanager
@@ -245,6 +258,27 @@ def dim(value: str) -> str:
     return _c(value, "2")
 
 
+def _ask(question: Any) -> Any:
+    """Run a widget and turn either way out of it into ``None``.
+
+    ``questionary`` catches Ctrl+C and returns None, but nothing catches the
+    ``EOFError`` that prompt_toolkit raises on Ctrl+D at an empty buffer — so
+    the four text-entry widgets used to end a wizard in a traceback while the
+    two list widgets swallowed the key. Both keys mean the same thing, and the
+    module promises one answer for it.
+
+    Args:
+        question: A built ``questionary`` question, not yet asked.
+
+    Returns:
+        The user's answer, or None if they cancelled either way.
+    """
+    try:
+        return question.ask()
+    except EOFError:
+        return None
+
+
 def required(value: Optional[Any]) -> Any:
     """Return an answer, or refuse to continue without one.
 
@@ -280,40 +314,58 @@ def select(
     """
     options = [_as_questionary_choice(choice) for choice in choices]
     selected = next((option for option in options if option.value == default), None)
-    return questionary.select(
-        message,
-        choices=options,
-        default=selected,
-        style=THEME,
-        # Typing the number still works, so muscle memory and the arrow keys
-        # both land — which is the whole reason the shortcuts are on.
-        use_shortcuts=True,
-        **_DRIVER,
-    ).ask()
+    # Past the library's own table there are no keys left to assign, and it
+    # raises rather than dropping the extras — a menu with one row per setting
+    # is the size that finds this. Arrow keys work either way.
+    shortcuts = len(options) <= SHORTCUT_LIMIT
+    return _ask(
+        questionary.select(
+            message,
+            choices=options,
+            default=selected,
+            style=THEME,
+            # Typing the number still works, so muscle memory and the arrow
+            # keys both land — which is the whole reason the shortcuts are on.
+            use_shortcuts=shortcuts,
+            # ``j`` and ``k`` are the 20th and 21st shortcuts, and questionary
+            # registers its vi navigation *after* the shortcut bindings, so
+            # prompt_toolkit's last-match-wins would move the cursor instead of
+            # picking the row the list is visibly offering under that letter.
+            use_jk_keys=not shortcuts,
+            **_DRIVER,
+        )
+    )
 
 
 def checkbox(
     message: str,
     choices: Sequence[Choice],
     *,
-    selected: Sequence[str] = (),
+    selected: Optional[Sequence[str]] = None,
 ) -> Optional[tuple]:
     """Ask for any number of several options.
 
     Args:
         message: The question.
         choices: The options, in the order they should appear.
-        selected: Values to start ticked, overriding ``Choice.enabled``.
+        selected: Values to start ticked, overriding ``Choice.enabled``
+            entirely. ``None`` means "no opinion, use the choices' own flags";
+            ``()`` means "start with nothing ticked", and the two are different
+            answers — a caller passing the currently-enabled set has to be able
+            to say that the set is empty.
 
     Returns:
         The chosen values as a tuple — empty when the user ticked nothing,
         which is a real answer — or None if they cancelled.
     """
     options = [
-        _as_questionary_choice(choice, checked=choice.value in selected or choice.enabled)
+        _as_questionary_choice(
+            choice,
+            checked=choice.enabled if selected is None else choice.value in selected,
+        )
         for choice in choices
     ]
-    answer = questionary.checkbox(message, choices=options, style=THEME, **_DRIVER).ask()
+    answer = _ask(questionary.checkbox(message, choices=options, style=THEME, **_DRIVER))
     return None if answer is None else tuple(answer)
 
 
@@ -328,7 +380,7 @@ def confirm(message: str, *, default: bool = False) -> Optional[bool]:
         The answer, or None if the user cancelled. ``False`` and ``None`` are
         not the same: one declined, the other left.
     """
-    return questionary.confirm(message, default=default, style=THEME, **_DRIVER).ask()
+    return _ask(questionary.confirm(message, default=default, style=THEME, **_DRIVER))
 
 
 def text(
@@ -347,13 +399,15 @@ def text(
     Returns:
         The entered text, or None if the user cancelled.
     """
-    return questionary.text(
-        message,
-        default=default,
-        validate=validate,
-        style=THEME,
-        **_DRIVER,
-    ).ask()
+    return _ask(
+        questionary.text(
+            message,
+            default=default,
+            validate=validate,
+            style=THEME,
+            **_DRIVER,
+        )
+    )
 
 
 def password(message: str, *, validate: Optional[Validator] = None) -> Optional[str]:
@@ -372,7 +426,7 @@ def password(message: str, *, validate: Optional[Validator] = None) -> Optional[
     Returns:
         The entered secret, or None if the user cancelled.
     """
-    return questionary.password(message, validate=validate, style=THEME, **_DRIVER).ask()
+    return _ask(questionary.password(message, validate=validate, style=THEME, **_DRIVER))
 
 
 def path(message: str, *, default: str = "", must_exist: bool = False) -> Optional[str]:
@@ -403,13 +457,15 @@ def path(message: str, *, default: str = "", must_exist: bool = False) -> Option
             return "That path does not exist."
         return True
 
-    return questionary.path(
-        message,
-        default=default,
-        validate=_validate,
-        style=THEME,
-        **_DRIVER,
-    ).ask()
+    return _ask(
+        questionary.path(
+            message,
+            default=default,
+            validate=_validate,
+            style=THEME,
+            **_DRIVER,
+        )
+    )
 
 
 def _as_questionary_choice(choice: Choice, *, checked: Optional[bool] = None) -> questionary.Choice:

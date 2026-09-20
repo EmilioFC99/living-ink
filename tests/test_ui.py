@@ -565,3 +565,135 @@ class TestDrivenBy:
         with outer.plugged_in(DOWN + ENTER):
             assert inner.answer("y", lambda: ui.confirm("Inner?")) is True
             assert ui.select("Outer?", CHOICES) == "beta"
+
+
+class TestCtrlDIsAlsoACancel:
+    """Ctrl+D leaves a prompt, and it has to leave it the same way Ctrl+C does.
+
+    ``questionary`` catches only ``KeyboardInterrupt``; ``prompt_toolkit``
+    raises ``EOFError`` on Ctrl+D at an empty buffer, and nothing in the library
+    catches that. So the four text-entry widgets used to end the run in a
+    traceback while the two list widgets swallowed the key — two answers to one
+    keystroke, and the traceback was the one a user leaving a wizard got.
+
+    The list widgets are here too. They absorb the key rather than acting on
+    it, which makes them *look* fine, but the assertion worth pinning is that
+    all six agree, not that four of them were fixed.
+    """
+
+    #: The end-of-transmission byte a terminal sends for Ctrl+D.
+    CTRL_D = "\x04"
+
+    @pytest.mark.parametrize(
+        "name,ask",
+        [
+            ("confirm", lambda: ui.confirm("Sync now?")),
+            ("password", lambda: ui.password("API key")),
+            ("text", lambda: ui.text("Model")),
+            ("path", lambda: ui.path("Vault")),
+        ],
+    )
+    def test_a_text_widget_treats_it_as_a_cancel(self, keyboard, name, ask):
+        assert keyboard.answer(self.CTRL_D, ask) is None
+
+    def test_it_reaches_the_caller_as_the_same_cancelled_as_ctrl_c(self, keyboard):
+        """The point of the fix: one ``except KeyboardInterrupt`` covers both."""
+        with pytest.raises(ui.Cancelled):
+            ui.required(keyboard.answer(self.CTRL_D, lambda: ui.text("Model")))
+        with pytest.raises(ui.Cancelled):
+            ui.required(keyboard.answer(CTRL_C, lambda: ui.text("Model")))
+
+
+class TestALongListStillAsksTheQuestion:
+    """A select with more rows than there are shortcut keys must not crash.
+
+    ``questionary`` assigns shortcuts from a fixed table of ten digits and
+    twenty-six letters, and past it raises ``ValueError`` — at construction,
+    before ``ask()``, so it does not even arrive as a cancel. The config menu is
+    exactly the list that finds this: one row per setting is already close to
+    the limit and the schema only grows.
+    """
+
+    @staticmethod
+    def many(count: int) -> tuple:
+        """Return ``count`` distinct choices.
+
+        Args:
+            count: How many to build.
+
+        Returns:
+            A tuple of choices whose values and labels differ.
+        """
+        return tuple(ui.Choice(f"v{i}", f"Row number {i}") for i in range(count))
+
+    def test_the_cap_is_read_from_the_library_rather_than_hardcoded(self):
+        """A library bump that changes the table must not need an edit here."""
+        assert ui.SHORTCUT_LIMIT == 36
+
+    @pytest.mark.parametrize("count", [1, 36, 37, 80])
+    def test_a_list_of_any_length_answers(self, keyboard, count):
+        answer = keyboard.answer(ENTER, lambda: ui.select("Pick", self.many(count)))
+        assert answer == "v0"
+
+    def test_the_arrow_keys_still_work_past_the_cap(self, keyboard):
+        """Shortcuts are what is dropped; navigation is not."""
+        answer = keyboard.answer(DOWN + ENTER, lambda: ui.select("Pick", self.many(40)))
+        assert answer == "v1"
+
+    def test_a_default_past_the_cap_still_places_the_pointer(self, keyboard):
+        answer = keyboard.answer(ENTER, lambda: ui.select("Pick", self.many(40), default="v25"))
+        assert answer == "v25"
+
+
+class TestTheAdvertisedShortcutIsTheOneThatFires:
+    """Typing the letter a row is labelled with picks that row.
+
+    ``j`` and ``k`` are the twentieth and twenty-first shortcuts, and
+    ``questionary`` registers its vi navigation *after* the shortcut bindings.
+    ``prompt_toolkit`` fires the last binding that matches, so on a list that
+    long the two keys moved the cursor instead of choosing the rows the screen
+    was visibly offering under them — a menu that lies about its own labels.
+    """
+
+    def test_a_digit_picks_the_row_it_labels(self, keyboard):
+        assert keyboard.answer("3" + ENTER, lambda: ui.select("Pick", CHOICES)) == "gamma"
+
+    def test_the_twentieth_row_is_reachable_by_its_letter(self, keyboard):
+        rows = TestALongListStillAsksTheQuestion.many(30)
+        # Ten digits come first, so the twentieth row is labelled ``j``.
+        assert keyboard.answer("j" + ENTER, lambda: ui.select("Pick", rows)) == "v19"
+
+    def test_the_twenty_first_row_is_reachable_by_its_letter(self, keyboard):
+        rows = TestALongListStillAsksTheQuestion.many(30)
+        assert keyboard.answer("k" + ENTER, lambda: ui.select("Pick", rows)) == "v20"
+
+    def test_vi_navigation_comes_back_once_there_are_no_shortcuts_to_steal(self, keyboard):
+        """Past the cap the labels are gone, so ``j`` is free to mean "down"."""
+        rows = TestALongListStillAsksTheQuestion.many(40)
+        assert keyboard.answer("j" + ENTER, lambda: ui.select("Pick", rows)) == "v1"
+
+
+class TestSelectedOverridesTheChoicesOwnFlags:
+    """``selected=`` is an override, and ``()`` is a different answer from ``None``.
+
+    The two were ``or``-ed together, so a caller handing back "these are the
+    ones currently on" could never turn a choice that declared itself enabled
+    *off*. That is precisely the config-menu case: the set comes from the
+    config file, and the choice's own flag is the shipped default it is meant
+    to replace.
+    """
+
+    ONE_ON = (ui.Choice("alpha", "First"), ui.Choice("beta", "Second", enabled=True))
+
+    def test_no_opinion_leaves_the_choices_own_flags_alone(self, keyboard):
+        assert keyboard.answer(ENTER, lambda: ui.checkbox("Pick", self.ONE_ON)) == ("beta",)
+
+    def test_an_empty_override_turns_everything_off(self, keyboard):
+        answer = keyboard.answer(ENTER, lambda: ui.checkbox("Pick", self.ONE_ON, selected=()))
+        assert answer == ()
+
+    def test_an_override_replaces_the_flags_rather_than_adding_to_them(self, keyboard):
+        answer = keyboard.answer(
+            ENTER, lambda: ui.checkbox("Pick", self.ONE_ON, selected=("alpha",))
+        )
+        assert answer == ("alpha",)
