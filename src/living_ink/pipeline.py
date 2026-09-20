@@ -443,7 +443,15 @@ def load_processed_log(dest_name: str):
 
 
 def add_to_processed_log(
-    dest_name: str, doc_id, version, run_id=None, external_id=None, target=None
+    dest_name: str,
+    doc_id,
+    version,
+    *,
+    recipe: str,
+    pages_failed: int = 0,
+    run_id=None,
+    external_id=None,
+    target=None,
 ):
     """Record that a document reached a destination.
 
@@ -451,13 +459,25 @@ def add_to_processed_log(
         dest_name: Destination class name.
         doc_id: reMarkable document id.
         version: Device version or content hash that was published.
+        recipe: Digest of everything other than the document that shaped the
+            output, so a prompt edit or a settings change makes it pending
+            again even though the tablet's version is unchanged.
+        pages_failed: How many pages did not transcribe, so a partial publish
+            stays pending and the next run retries it.
         run_id: Run that published it, when one is in progress.
         external_id: Identifier the destination gave the note, so the next
             sync replaces that exact note rather than one sharing its title.
         target: Where the note landed, so a later run can tell it has moved.
     """
     get_state_store().record_publication(
-        doc_id, dest_name, version, run_id=run_id, external_id=external_id, target=target
+        doc_id,
+        dest_name,
+        version,
+        recipe=recipe,
+        pages_failed=pages_failed,
+        run_id=run_id,
+        external_id=external_id,
+        target=target,
     )
 
 
@@ -2441,11 +2461,15 @@ class SyncPipeline:
                     job.published_to.append(dest.state_key)
                     if result.detail:
                         log(f"   {result.detail}")
-                    # Update state for THIS destination immediately.
+                    # Update state for THIS destination immediately, and after
+                    # the note is on disk: a row recorded first would claim a
+                    # note a crash never wrote, and that document is never
+                    # retried. The other order costs one redundant republish.
                     add_to_processed_log(
                         dest.state_key,
                         job.notebook_id,
                         job.version,
+                        recipe=self._recipe_for(job, dest),
                         run_id=self.run_id,
                         external_id=result.external_id,
                         target=result.target,
@@ -2468,6 +2492,26 @@ class SyncPipeline:
 
             log(traceback.format_exc())
             return False
+
+    def _recipe_for(self, job: DocumentJob, dest: Destination) -> str:
+        """Digest the inputs that shaped what this destination was just given.
+
+        Recorded beside the version so the next run can tell that the document
+        is unchanged but the way it would be produced is not.
+
+        Args:
+            job: The processed job, for its source type.
+            dest: The destination the note went to.
+
+        Returns:
+            The recipe digest. An unrecognised ``doc_type`` resolves to the
+            fallback source, which is the same source that rendered the pages,
+            so the digest still describes what actually happened.
+        """
+        from living_ink.core.recipe import document_recipe
+        from living_ink.sources import source_for_name
+
+        return document_recipe(source_for_name(job.doc_type), dest, self.settings)
 
     def _report_dry_run(self, job: DocumentJob, doc: Document, targets: List[Destination]) -> None:
         """Say what a real run would have published, and where to read it.

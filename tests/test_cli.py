@@ -892,7 +892,7 @@ class TestStateCommand:
         pipeline.reset_state_store()
         opened = pipeline.get_state_store()
         opened.record_document("id-1", name="Journal", folder="Personal", version="v1")
-        opened.record_publication("id-1", "ObsidianDestination", "v1")
+        opened.record_publication("id-1", "ObsidianDestination", "v1", recipe="")
         yield opened
         pipeline.reset_state_store()
 
@@ -946,7 +946,7 @@ class TestStateCommand:
         assert code == 0
 
     def test_forget_can_target_one_destination(self, store, capsys):
-        store.record_publication("id-1", "FakeApiDestination", "v1")
+        store.record_publication("id-1", "FakeApiDestination", "v1", recipe="")
 
         self._run(capsys, forget="id-1", destination="ObsidianDestination")
 

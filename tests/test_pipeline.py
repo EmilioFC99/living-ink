@@ -4,6 +4,7 @@ import dataclasses
 import datetime
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -766,6 +767,88 @@ class TestDryRun:
         assert SyncOptions.from_args(SimpleNamespace()).dry_run is False
 
 
+class TestOrderedDurability:
+    """The note is written before the row that claims it. Never the reverse.
+
+    Reversed, a crash between the two leaves a ``publications`` row pointing at
+    a note that does not exist: the document matches on version for ever, is
+    never pending again, and the content is silently gone. In this order the
+    same crash costs one redundant republish, which the transcript cache makes
+    nearly free.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory, and drop it afterwards."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _job(self, tmp_path) -> DocumentJob:
+        transcript = tmp_path / "Notes_clean.txt"
+        transcript.write_text("### Page 1\n\nHello\n", encoding="utf-8")
+        return make_job(clean_out_txt=transcript)
+
+    def _row(self, dest):
+        return pipeline.get_state_store().get_publication("nb-1", dest.state_key)
+
+    def test_a_successful_publish_records_the_row(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is True
+        assert self._row(dest)["version"] == "hash-1"
+
+    def test_a_state_write_that_fails_leaves_the_note_and_keeps_it_pending(self, tmp_path):
+        """The note is out; the row is not. The next run republishes it."""
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        def explode(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch("living_ink.pipeline.add_to_processed_log", side_effect=explode):
+            assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+
+        assert len(dest.published) == 1
+        assert self._row(dest) is None
+
+    def test_a_publish_that_fails_records_nothing(self, tmp_path):
+        """Nothing was written, so nothing may claim it was."""
+        dest = MockDestination("MockDest")
+        dest.publish_ok = False
+        pipe = SyncPipeline(destinations=[dest])
+
+        assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+        assert self._row(dest) is None
+
+    def test_a_publish_that_raises_records_nothing(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        with patch.object(dest, "publish", side_effect=OSError("disk full")):
+            assert pipe._publish(self._job(tmp_path), {"nb-1": [dest]}) is False
+
+        assert self._row(dest) is None
+
+    def test_the_recipe_reaches_the_row(self, tmp_path):
+        """A recorded row carries what produced it, not only which version."""
+        from living_ink.core.recipe import document_recipe
+        from living_ink.sources import source_for_name
+
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        pipe._publish(self._job(tmp_path), {"nb-1": [dest]})
+
+        expected = document_recipe(source_for_name("notebook"), dest, pipe.settings)
+        assert self._row(dest)["recipe"] == expected
+        assert expected != ""
+
+
 class TestEveryRunReadsItsPages:
     """A leftover transcript on disk is not a shortcut around the OCR stages.
 
@@ -1053,25 +1136,25 @@ class TestProcessedLog:
 
     def test_entries_round_trip(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-2", "v9")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-2", "v9", recipe="")
         assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v9"}
 
     def test_republishing_updates_rather_than_duplicating(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v2")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v2", recipe="")
         assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v2"}
 
     def test_destinations_do_not_share_state(self, tmp_path, monkeypatch):
         """A notebook can be published to one destination and pending for another."""
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         assert pipeline.load_processed_log("NotionDestination") == {}
 
     def test_state_survives_a_restart(self, tmp_path, monkeypatch):
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
         pipeline.reset_state_store()
         assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1"}
 
@@ -1080,10 +1163,10 @@ class TestProcessedLog:
         from living_ink import state
 
         self._state_dir(tmp_path, monkeypatch)
-        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1")
+        pipeline.add_to_processed_log("ObsidianDestination", "doc-1", "v1", recipe="")
 
         with state.StateStore(pipeline.get_state_db_path()) as other:
-            other.record_publication("doc-2", "ObsidianDestination", "v2")
+            other.record_publication("doc-2", "ObsidianDestination", "v2", recipe="")
 
         assert pipeline.load_processed_log("ObsidianDestination") == {"doc-1": "v1", "doc-2": "v2"}
 
@@ -1127,7 +1210,7 @@ class TestOpeningTheStoreSweepsDeadDestinations:
         from living_ink import state
 
         with state.StateStore(pipeline.get_state_db_path()) as store:
-            store.record_publication(doc_id, destination, "v1")
+            store.record_publication(doc_id, destination, "v1", recipe="")
 
     def test_the_registry_is_what_counts_as_known(self):
         """Every shipped destination's declared key, not its class name."""
@@ -1278,14 +1361,18 @@ class TestExternalIdRoundTrip:
         pipeline.reset_state_store()
 
     def test_an_id_is_stored_with_the_publication(self):
-        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
+        pipeline.add_to_processed_log(
+            "FakeApiDestination", "doc-1", "v1", external_id="obj-7", recipe=""
+        )
         record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
         assert record["external_id"] == "obj-7"
 
     def test_a_later_sync_without_an_id_keeps_the_old_one(self):
         """A destination that fails to report an id must not erase the record."""
-        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v1", external_id="obj-7")
-        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v2")
+        pipeline.add_to_processed_log(
+            "FakeApiDestination", "doc-1", "v1", external_id="obj-7", recipe=""
+        )
+        pipeline.add_to_processed_log("FakeApiDestination", "doc-1", "v2", recipe="")
 
         record = pipeline.get_state_store().get_publication("doc-1", "FakeApiDestination")
         assert record["external_id"] == "obj-7"
@@ -2182,7 +2269,7 @@ class TestOrphanedNotebooks:
     def _published(self, doc_id="nb-1", name="Old Notes", dest="MockDestination"):
         store = pipeline.get_state_store()
         store.record_document(doc_id, name=name)
-        store.record_publication(doc_id, dest, "v1", target=f"{name}.md")
+        store.record_publication(doc_id, dest, "v1", target=f"{name}.md", recipe="")
 
     def _pipeline(self, dest, prune=False, dry_run=False):
         pipe = SyncPipeline.__new__(SyncPipeline)
@@ -2875,8 +2962,8 @@ class TestThePreviewAndTheRunAgree:
         return {row["id"]: row["status"] for row in rows}
 
     def test_the_run_processes_exactly_what_the_preview_flagged(self, store):
-        store.record_publication("doc-changed", "MockDestination", "old")
-        store.record_publication("doc-settled", "MockDestination", "h3")
+        store.record_publication("doc-changed", "MockDestination", "old", recipe="")
+        store.record_publication("doc-settled", "MockDestination", "h3", recipe="")
 
         processed, _, _ = self._sync(store)
         flagged = [doc_id for doc_id, status in self._preview(store).items() if status.needs_sync]
@@ -2884,7 +2971,7 @@ class TestThePreviewAndTheRunAgree:
 
     def test_a_settled_document_is_left_alone_by_both(self, store):
         for item in self.ITEMS:
-            store.record_publication(item["ID"], "MockDestination", item["hash"])
+            store.record_publication(item["ID"], "MockDestination", item["hash"], recipe="")
 
         processed, needs_update, _ = self._sync(store)
         assert processed == []
@@ -2892,7 +2979,7 @@ class TestThePreviewAndTheRunAgree:
         assert not any(status.needs_sync for status in self._preview(store).values())
 
     def test_the_run_names_the_destination_that_is_owed(self, store):
-        store.record_publication("doc-settled", "MockDestination", "h3")
+        store.record_publication("doc-settled", "MockDestination", "h3", recipe="")
 
         _, needs_update, dest = self._sync(store)
         assert needs_update["doc-new"] == [dest]

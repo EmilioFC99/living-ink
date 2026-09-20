@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from living_ink import state
 from living_ink.state import (
     SCHEMA_VERSION,
     STATUS_CHANGED,
@@ -41,7 +42,7 @@ class TestSchema:
     def test_reopening_does_not_reset_anything(self, tmp_path):
         path = tmp_path / "state.db"
         with StateStore(path) as first:
-            first.record_publication("doc-1", "Obsidian", "v1")
+            first.record_publication("doc-1", "Obsidian", "v1", recipe="")
         with StateStore(path) as second:
             assert second.published_versions("Obsidian") == {"doc-1": "v1"}
 
@@ -58,7 +59,7 @@ class TestSchema:
             StateStore(path)
 
     def test_the_database_is_intact(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
         assert store.integrity_check() == "ok"
 
     def test_a_column_is_added_even_at_the_current_schema_version(self, tmp_path):
@@ -90,7 +91,7 @@ class TestSchema:
         """The per-open column check must not disturb existing rows."""
         path = tmp_path / "state.db"
         with StateStore(path) as first:
-            first.record_publication("doc-1", "Obsidian", "v1")
+            first.record_publication("doc-1", "Obsidian", "v1", recipe="")
 
         with StateStore(path) as second:
             assert second.published_versions("Obsidian") == {"doc-1": "v1"}
@@ -101,16 +102,16 @@ class TestPublications:
     """The table that replaces processed_notebooks_<destination>.json."""
 
     def test_a_publication_round_trips(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
         assert store.published_versions("Obsidian") == {"doc-1": "v1"}
 
     def test_destinations_are_independent(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
         assert store.published_versions("NotionDestination") == {}
 
     def test_republishing_merges_on_the_natural_key(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
-        store.record_publication("doc-1", "Obsidian", "v2")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
+        store.record_publication("doc-1", "Obsidian", "v2", recipe="")
 
         assert store.published_versions("Obsidian") == {"doc-1": "v2"}
         rows = store.dump()["publications"]
@@ -119,9 +120,9 @@ class TestPublications:
     def test_the_first_publication_time_is_never_overwritten(self, store):
         """It is the only truthful source for a note's `created` date."""
         store.record_publication(
-            "doc-1", "Obsidian", "v1", published_at="2020-01-01T00:00:00+00:00"
+            "doc-1", "Obsidian", "v1", published_at="2020-01-01T00:00:00+00:00", recipe=""
         )
-        store.record_publication("doc-1", "Obsidian", "v2")
+        store.record_publication("doc-1", "Obsidian", "v2", recipe="")
 
         record = store.get_publication("doc-1", "Obsidian")
         assert record["first_published_at"] == "2020-01-01T00:00:00+00:00"
@@ -129,36 +130,64 @@ class TestPublications:
 
     def test_an_external_id_survives_an_update_that_omits_it(self, store):
         """Most republish calls do not know the far-side id; they must not erase it."""
-        store.record_publication("doc-1", "Notion", "v1", external_id="note-42")
-        store.record_publication("doc-1", "Notion", "v2")
+        store.record_publication("doc-1", "Notion", "v1", external_id="note-42", recipe="")
+        store.record_publication("doc-1", "Notion", "v2", recipe="")
 
         assert store.get_publication("doc-1", "Notion")["external_id"] == "note-42"
 
-    def test_a_content_hash_survives_an_update_that_omits_it(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1", content_hash="abc123")
-        store.record_publication("doc-1", "Obsidian", "v2")
+    def test_the_recipe_is_recorded_beside_the_version(self, store):
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="abc123")
+        assert store.get_publication("doc-1", "Obsidian")["recipe"] == "abc123"
 
-        assert store.get_publication("doc-1", "Obsidian")["content_hash"] == "abc123"
+    def test_a_republish_overwrites_the_recipe(self, store):
+        """Unlike external_id, the recipe is always known and always current."""
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="abc123")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="def456")
+
+        assert store.get_publication("doc-1", "Obsidian")["recipe"] == "def456"
+
+    def test_the_recipe_has_no_default(self):
+        """A row silently recorded as '' would republish for ever."""
+        with pytest.raises(TypeError):
+            StateStore.record_publication(None, "doc-1", "Obsidian", "v1")
+
+    def test_pages_failed_defaults_to_none_lost(self, store):
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="r")
+        assert store.get_publication("doc-1", "Obsidian")["pages_failed"] == 0
+
+    def test_pages_failed_is_recorded_and_cleared(self, store):
+        """A partial publish is recorded; the retry that completes it clears it."""
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="r", pages_failed=3)
+        assert store.get_publication("doc-1", "Obsidian")["pages_failed"] == 3
+
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="r")
+        assert store.get_publication("doc-1", "Obsidian")["pages_failed"] == 0
+
+    def test_the_content_hash_column_is_gone(self, store):
+        """It was NULL in every row ever written, and named for the live column's job."""
+        columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(publications)")}
+        assert "content_hash" not in columns
+        assert {"recipe", "pages_failed", "profile"} <= columns
 
     def test_versions_are_stored_as_text(self, store):
         """Device versions are integers, cloud hashes are strings; comparison is textual."""
-        store.record_publication("doc-1", "Obsidian", 7)
+        store.record_publication("doc-1", "Obsidian", 7, recipe="")
         assert store.published_versions("Obsidian") == {"doc-1": "7"}
 
     def test_an_unknown_publication_is_none(self, store):
         assert store.get_publication("nope", "Obsidian") is None
 
     def test_forgetting_one_destination(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
-        store.record_publication("doc-1", "Notion", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
+        store.record_publication("doc-1", "Notion", "v1", recipe="")
 
         assert store.forget("doc-1", "Obsidian") == 1
         assert store.published_versions("Obsidian") == {}
         assert store.published_versions("Notion") == {"doc-1": "v1"}
 
     def test_forgetting_every_destination(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
-        store.record_publication("doc-1", "Notion", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
+        store.record_publication("doc-1", "Notion", "v1", recipe="")
 
         assert store.forget("doc-1") == 2
         assert store.dump()["publications"] == []
@@ -195,7 +224,7 @@ class TestRuns:
 
     def test_a_publication_remembers_its_run(self, store):
         run_id = store.start_run()
-        store.record_publication("doc-1", "Obsidian", "v1", run_id=run_id)
+        store.record_publication("doc-1", "Obsidian", "v1", run_id=run_id, recipe="")
         assert store.get_publication("doc-1", "Obsidian")["run_id"] == run_id
 
 
@@ -257,8 +286,8 @@ class TestConcurrency:
     def test_two_connections_both_land(self, tmp_path):
         path = tmp_path / "state.db"
         with StateStore(path) as first, StateStore(path) as second:
-            first.record_publication("doc-1", "Obsidian", "v1")
-            second.record_publication("doc-2", "Obsidian", "v2")
+            first.record_publication("doc-1", "Obsidian", "v1", recipe="")
+            second.record_publication("doc-2", "Obsidian", "v2", recipe="")
 
             assert first.published_versions("Obsidian") == {"doc-1": "v1", "doc-2": "v2"}
 
@@ -267,7 +296,7 @@ class TestConcurrency:
 
         def write(start):
             for index in range(start, start + 25):
-                store.record_publication(f"doc-{index}", "Obsidian", "v1")
+                store.record_publication(f"doc-{index}", "Obsidian", "v1", recipe="")
 
         threads = [threading.Thread(target=write, args=(base,)) for base in (0, 100, 200)]
         for thread in threads:
@@ -278,7 +307,7 @@ class TestConcurrency:
         assert len(store.published_versions("Obsidian")) == 75
 
     def test_a_failed_write_rolls_back(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1")
+        store.record_publication("doc-1", "Obsidian", "v1", recipe="")
         with pytest.raises(sqlite3.Error):
             with store._write() as conn:
                 conn.execute("DELETE FROM publications")
@@ -411,7 +440,7 @@ class TestUpgradingAnOlderDatabase:
         conn.close()
 
         with StateStore(path) as store:
-            store.record_publication("doc-1", "Obsidian", "v2", target="Work/Notes.md")
+            store.record_publication("doc-1", "Obsidian", "v2", target="Work/Notes.md", recipe="")
             assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
 
     def test_existing_rows_survive_the_upgrade(self, tmp_path):
@@ -439,27 +468,147 @@ class TestUpgradingAnOlderDatabase:
             assert store.get_document("doc-1")["last_error"] == "boom"
 
 
+class TestRebuildingPublications:
+    """The one change here that is not a column addition.
+
+    SQLite cannot alter a primary key in place, so ``profile`` cannot arrive
+    through ``_ADDED_COLUMNS`` — that would give the column with the old key
+    still in force, which looks applied and is not. These cover the rebuild
+    that replaces it, and the rows it has to carry across intact.
+    """
+
+    def _old_database(self, path, rows=()):
+        """Build a database with the pre-rebuild publications table."""
+        conn = sqlite3.connect(str(path))
+        conn.executescript(
+            """
+            CREATE TABLE publications (
+                doc_id             TEXT NOT NULL,
+                destination        TEXT NOT NULL,
+                version            TEXT,
+                external_id        TEXT,
+                target             TEXT,
+                content_hash       TEXT,
+                first_published_at TEXT NOT NULL,
+                last_published_at  TEXT NOT NULL,
+                run_id             INTEGER,
+                PRIMARY KEY (doc_id, destination)
+            );
+            PRAGMA user_version=4;
+            """
+        )
+        for row in rows:
+            conn.execute(
+                "INSERT INTO publications (doc_id, destination, version, external_id, target,"
+                " content_hash, first_published_at, last_published_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+        conn.commit()
+        conn.close()
+
+    def test_the_primary_key_gains_the_profile(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._old_database(path)
+
+        with StateStore(path) as store:
+            key = [
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(publications)")
+                if row["pk"]
+            ]
+        assert key == ["doc_id", "destination", "profile"]
+
+    def test_every_row_is_carried_across(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._old_database(
+            path,
+            [
+                ("doc-1", "Obsidian", "v1", "x-1", "Work/Notes.md", None, "2020-01-01", "2021-0"),
+                ("doc-2", "Obsidian", "v2", None, None, None, "2020-02-02", "2021-0"),
+            ],
+        )
+
+        with StateStore(path) as store:
+            first = store.get_publication("doc-1", "Obsidian")
+            assert first["version"] == "v1"
+            assert first["external_id"] == "x-1"
+            assert first["target"] == "Work/Notes.md"
+            assert first["first_published_at"] == "2020-01-01"
+            assert store.get_publication("doc-2", "Obsidian")["version"] == "v2"
+
+    def test_a_carried_row_is_pending_exactly_once(self, tmp_path):
+        """'' mismatches any real digest, so the first 1.0 run self-heals."""
+        path = tmp_path / "state.db"
+        self._old_database(path, [("doc-1", "Obsidian", "v1", None, None, None, "2020", "2020")])
+
+        with StateStore(path) as store:
+            assert store.get_publication("doc-1", "Obsidian")["recipe"] == ""
+            store.record_publication("doc-1", "Obsidian", "v1", recipe="real")
+            assert store.get_publication("doc-1", "Obsidian")["recipe"] == "real"
+
+    def test_the_destination_index_is_rebuilt_too(self, tmp_path):
+        """DROP TABLE takes its indexes with it."""
+        path = tmp_path / "state.db"
+        self._old_database(path)
+
+        with StateStore(path) as store:
+            names = {
+                row["name"]
+                for row in store._conn.execute("PRAGMA index_list(publications)")
+                if row["name"] == "publications_by_destination"
+            }
+        assert names == {"publications_by_destination"}
+
+    def test_a_rebuilt_database_is_not_rebuilt_again(self, tmp_path):
+        path = tmp_path / "state.db"
+        self._old_database(path, [("doc-1", "Obsidian", "v1", None, None, None, "2020", "2020")])
+
+        with StateStore(path) as store:
+            store.record_publication("doc-1", "Obsidian", "v2", recipe="kept")
+        with StateStore(path) as store:
+            assert store.get_publication("doc-1", "Obsidian")["recipe"] == "kept"
+
+    def test_a_failed_rebuild_leaves_the_old_table_intact(self, tmp_path, monkeypatch):
+        """One transaction: a crash halfway must not lose the table."""
+        path = tmp_path / "state.db"
+        self._old_database(path, [("doc-1", "Obsidian", "v1", None, None, None, "2020", "2020")])
+
+        broken = list(state._REBUILD_PUBLICATIONS[:2]) + ["THIS IS NOT SQL"]
+        monkeypatch.setattr(state, "_REBUILD_PUBLICATIONS", tuple(broken))
+        with pytest.raises(sqlite3.Error):
+            StateStore(path)
+
+        conn = sqlite3.connect(str(path))
+        try:
+            rows = conn.execute("SELECT doc_id, version FROM publications").fetchall()
+            assert rows == [("doc-1", "v1")]
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        finally:
+            conn.close()
+
+
 class TestPublicationTargets:
     """Where a note landed is recorded, so a later run can tell it has moved."""
 
     def test_the_target_is_stored(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md", recipe="")
         assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
 
     def test_republishing_elsewhere_updates_the_target(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
-        store.record_publication("doc-1", "Obsidian", "v2", target="Archive/Notes.md")
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md", recipe="")
+        store.record_publication("doc-1", "Obsidian", "v2", target="Archive/Notes.md", recipe="")
         assert store.get_publication("doc-1", "Obsidian")["target"] == "Archive/Notes.md"
 
     def test_a_caller_that_does_not_know_the_target_does_not_erase_it(self, store):
         """A partial record must never turn a known location into an unknown one."""
-        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
-        store.record_publication("doc-1", "Obsidian", "v2")
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md", recipe="")
+        store.record_publication("doc-1", "Obsidian", "v2", recipe="")
         assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
 
     def test_each_destination_keeps_its_own_target(self, store):
-        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md")
-        store.record_publication("doc-1", "Notion", "v1", target="Inbox/Notes")
+        store.record_publication("doc-1", "Obsidian", "v1", target="Work/Notes.md", recipe="")
+        store.record_publication("doc-1", "Notion", "v1", target="Inbox/Notes", recipe="")
         assert store.get_publication("doc-1", "Obsidian")["target"] == "Work/Notes.md"
         assert store.get_publication("doc-1", "Notion")["target"] == "Inbox/Notes"
 
@@ -576,8 +725,8 @@ class TestSyncOverview:
 
     def test_a_document_published_everywhere_is_up_to_date(self, store):
         store.record_document("doc-1", name="Notes", version="v1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "NotionDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "NotionDestination", "v1", recipe="")
 
         row = store.sync_overview(["ObsidianDestination", "NotionDestination"])[0]
         assert row["status"] is STATUS_UP_TO_DATE
@@ -585,8 +734,8 @@ class TestSyncOverview:
 
     def test_one_lagging_destination_makes_it_changed(self, store):
         store.record_document("doc-1", version="v2")
-        store.record_publication("doc-1", "ObsidianDestination", "v2")
-        store.record_publication("doc-1", "NotionDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v2", recipe="")
+        store.record_publication("doc-1", "NotionDestination", "v1", recipe="")
 
         row = store.sync_overview(["ObsidianDestination", "NotionDestination"])[0]
         assert row["status"] is STATUS_CHANGED
@@ -603,21 +752,21 @@ class TestSyncOverview:
     def test_a_disabled_destination_is_not_counted_as_missing(self, store):
         """Turning a destination off must not make the whole library pending."""
         store.record_document("doc-1", version="v1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         row = store.sync_overview(["ObsidianDestination"])[0]
         assert row["status"] is STATUS_UP_TO_DATE
 
     def test_a_failure_outranks_being_up_to_date(self, store):
         store.record_document("doc-1", version="v1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
         store.record_failure("doc-1", "boom")
 
         assert store.sync_overview(["ObsidianDestination"])[0]["status"] is STATUS_FAILED
 
     def test_published_versions_are_reported_per_destination(self, store):
         store.record_document("doc-1", version="v2")
-        store.record_publication("doc-1", "ObsidianDestination", "v2")
+        store.record_publication("doc-1", "ObsidianDestination", "v2", recipe="")
 
         row = store.sync_overview(["ObsidianDestination"])[0]
         assert row["published"] == {"ObsidianDestination": "v2"}
@@ -634,7 +783,7 @@ class TestSyncOverview:
     def test_every_document_appears_once(self, store):
         for index in range(3):
             store.record_document(f"doc-{index}", version="v1")
-            store.record_publication(f"doc-{index}", "ObsidianDestination", "v1")
+            store.record_publication(f"doc-{index}", "ObsidianDestination", "v1", recipe="")
 
         overview = store.sync_overview(["ObsidianDestination"])
         assert len({row["id"] for row in overview}) == 3
@@ -644,9 +793,9 @@ class TestAllPublications:
     """One query, because the inventory needs all of them at once."""
 
     def test_rows_are_grouped_by_document(self, store):
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "NotionDestination", "v1")
-        store.record_publication("doc-2", "ObsidianDestination", "v3")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "NotionDestination", "v1", recipe="")
+        store.record_publication("doc-2", "ObsidianDestination", "v3", recipe="")
 
         grouped = store.all_publications()
         assert set(grouped) == {"doc-1", "doc-2"}
@@ -702,7 +851,7 @@ class TestForgetting:
 
     def test_publications_are_removed(self, store):
         store.record_document("doc-1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         assert store.forget("doc-1") == 1
         assert store.published_versions("ObsidianDestination") == {}
@@ -732,8 +881,8 @@ class TestForgetting:
 
     def test_forgetting_one_destination_leaves_the_others(self, store):
         store.record_document("doc-1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "NotionDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "NotionDestination", "v1", recipe="")
 
         store.forget("doc-1", "ObsidianDestination")
 
@@ -759,8 +908,8 @@ class TestForgettingADestinationThatIsGone:
     """
 
     def test_a_destination_that_no_longer_exists_loses_its_rows(self, store):
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1", recipe="")
 
         assert store.forget_unknown_destinations(["ObsidianDestination"]) == {
             "AppleNotesDestination": 1
@@ -768,8 +917,8 @@ class TestForgettingADestinationThatIsGone:
         assert store.published_versions("AppleNotesDestination") == {}
 
     def test_the_destinations_that_remain_are_untouched(self, store):
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1", recipe="")
 
         store.forget_unknown_destinations(["ObsidianDestination"])
 
@@ -777,21 +926,21 @@ class TestForgettingADestinationThatIsGone:
 
     def test_it_counts_every_document_the_dead_destination_held(self, store):
         for doc in ("doc-1", "doc-2", "doc-3"):
-            store.record_publication(doc, "AppleNotesDestination", "v1")
+            store.record_publication(doc, "AppleNotesDestination", "v1", recipe="")
 
         assert store.forget_unknown_destinations(["ObsidianDestination"]) == {
             "AppleNotesDestination": 3
         }
 
     def test_nothing_to_forget_reports_nothing(self, store):
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         assert store.forget_unknown_destinations(["ObsidianDestination"]) == {}
 
     def test_it_is_safe_to_run_on_every_open(self, store):
         """It runs once per process, so running it twice must be a no-op."""
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1", recipe="")
 
         store.forget_unknown_destinations(["ObsidianDestination"])
 
@@ -805,8 +954,8 @@ class TestForgettingADestinationThatIsGone:
         republishes nothing. Passing the enabled list here instead of the
         registry would silently make every toggle a full re-sync.
         """
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
-        store.record_publication("doc-1", "NotionDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
+        store.record_publication("doc-1", "NotionDestination", "v1", recipe="")
 
         store.forget_unknown_destinations(["ObsidianDestination", "NotionDestination"])
 
@@ -814,7 +963,7 @@ class TestForgettingADestinationThatIsGone:
 
     def test_an_empty_registry_deletes_nothing(self, store):
         """No destination at all is a failed import, not a mass retirement."""
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         with pytest.raises(ValueError, match="no destination is registered"):
             store.forget_unknown_destinations([])
@@ -825,7 +974,7 @@ class TestForgettingADestinationThatIsGone:
         """The rows that go are the ones naming the destination, and no others."""
         store.record_document("doc-1", name="Notes")
         store.record_page("doc-1", 0, source_hash="abc")
-        store.record_publication("doc-1", "AppleNotesDestination", "v1")
+        store.record_publication("doc-1", "AppleNotesDestination", "v1", recipe="")
 
         store.forget_unknown_destinations(["ObsidianDestination"])
 
@@ -838,7 +987,7 @@ class TestMaintenance:
 
     def test_counts_report_every_table(self, store):
         store.record_document("doc-1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         counts = store.counts()
         assert counts["documents"] == 1
@@ -849,7 +998,7 @@ class TestMaintenance:
         assert store.integrity_check() == "ok"
 
     def test_vacuum_leaves_the_data_alone(self, store):
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         store.vacuum()
 
@@ -879,7 +1028,7 @@ class TestCompareWithListing:
 
     def test_a_newer_version_on_the_tablet_is_changed(self, store):
         store.record_document("doc-1", version="v1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         rows, _ = store.compare_with_listing([self._entry(version="v2")], ["ObsidianDestination"])
         assert rows[0]["status"] is STATUS_CHANGED
@@ -887,7 +1036,7 @@ class TestCompareWithListing:
     def test_the_listing_decides_the_version_not_the_database(self, store):
         """The database's version is what a past run saw, not what is there now."""
         store.record_document("doc-1", version="v9")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
 
         rows, _ = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
         assert rows[0]["status"] is STATUS_UP_TO_DATE
@@ -908,7 +1057,7 @@ class TestCompareWithListing:
 
     def test_a_published_document_absent_from_the_listing_is_an_orphan(self, store):
         store.record_document("doc-gone", name="Deleted", version="v1")
-        store.record_publication("doc-gone", "ObsidianDestination", "v1")
+        store.record_publication("doc-gone", "ObsidianDestination", "v1", recipe="")
 
         rows, orphans = store.compare_with_listing([self._entry()], ["ObsidianDestination"])
         assert [row["id"] for row in orphans] == ["doc-gone"]
@@ -923,7 +1072,7 @@ class TestCompareWithListing:
 
     def test_a_recorded_failure_outranks_the_listing(self, store):
         store.record_document("doc-1", version="v1")
-        store.record_publication("doc-1", "ObsidianDestination", "v1")
+        store.record_publication("doc-1", "ObsidianDestination", "v1", recipe="")
         store.record_failure("doc-1", "boom")
 
         rows, _ = store.compare_with_listing([self._entry()], ["ObsidianDestination"])

@@ -48,10 +48,19 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle: transport does not need st
     from living_ink.transport import DeviceInfo
 
 #: Bumped whenever the schema changes; drives the migration ladder in _migrate.
-SCHEMA_VERSION = 4
+#: 5 rebuilt ``publications`` onto a three-part key. A column addition does not
+#: need a bump — :data:`_ADDED_COLUMNS` runs on every open — but a primary key
+#: cannot be altered in place, so that one does.
+SCHEMA_VERSION = 5
 
 #: Name of the database inside the data directory.
 DB_FILENAME = "state.db"
+
+#: The only profile 1.0 writes. Named sync profiles are out of scope, but the
+#: column and the key they need are here from the start: adding a column later
+#: is free, and changing a primary key later means rebuilding the table under
+#: every real user's ``created`` dates. One constant string buys that away.
+DEFAULT_PROFILE = "default"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -80,14 +89,16 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS publications (
     doc_id             TEXT NOT NULL,
     destination        TEXT NOT NULL,
+    profile            TEXT NOT NULL DEFAULT 'default',
     version            TEXT,
+    recipe             TEXT NOT NULL DEFAULT '',
+    pages_failed       INTEGER NOT NULL DEFAULT 0,
     external_id        TEXT,
     target             TEXT,
-    content_hash       TEXT,
     first_published_at TEXT NOT NULL,
     last_published_at  TEXT NOT NULL,
     run_id             INTEGER REFERENCES runs(id),
-    PRIMARY KEY (doc_id, destination)
+    PRIMARY KEY (doc_id, destination, profile)
 );
 
 CREATE INDEX IF NOT EXISTS publications_by_destination
@@ -133,6 +144,49 @@ _ADDED_COLUMNS = {
         "measured": "INTEGER NOT NULL DEFAULT 1",
     },
 }
+
+#: How an older ``publications`` table reaches its current shape. Not an ALTER,
+#: because the change that forces the rebuild is the primary key, and SQLite
+#: cannot alter one in place. ``recipe`` and ``pages_failed`` ride along rather
+#: than going through :data:`_ADDED_COLUMNS`: one rebuild that lands all three
+#: is strictly less risk than a rebuild plus two ALTERs that must not race it.
+#:
+#: One statement per entry rather than one script, because
+#: ``Cursor.executescript`` can commit an open transaction before it runs, and
+#: the whole point here is that these five either all land or none do.
+_REBUILD_PUBLICATIONS = (
+    """
+    CREATE TABLE publications_new (
+        doc_id             TEXT NOT NULL,
+        destination        TEXT NOT NULL,
+        profile            TEXT NOT NULL DEFAULT 'default',
+        version            TEXT,
+        recipe             TEXT NOT NULL DEFAULT '',
+        pages_failed       INTEGER NOT NULL DEFAULT 0,
+        external_id        TEXT,
+        target             TEXT,
+        first_published_at TEXT NOT NULL,
+        last_published_at  TEXT NOT NULL,
+        run_id             INTEGER REFERENCES runs(id),
+        PRIMARY KEY (doc_id, destination, profile)
+    )
+    """,
+    # recipe takes its '' default for every carried-over row, so each one
+    # mismatches any real digest and the first run on the new scheme
+    # re-publishes exactly once, then settles. content_hash is not carried:
+    # it was NULL in every row ever written.
+    """
+    INSERT INTO publications_new
+        (doc_id, destination, profile, version, external_id, target,
+         first_published_at, last_published_at, run_id)
+    SELECT doc_id, destination, 'default', version, external_id, target,
+           first_published_at, last_published_at, run_id
+    FROM publications
+    """,
+    "DROP TABLE publications",
+    "ALTER TABLE publications_new RENAME TO publications",
+    "CREATE INDEX IF NOT EXISTS publications_by_destination ON publications (destination)",
+)
 
 
 @dataclass(frozen=True)
@@ -321,7 +375,12 @@ class StateStore:
             # until something writes to it — a live sync died on exactly that
             # ("table device has no column named measured"). Four PRAGMA
             # table_info calls are not worth a class of silent breakage.
+            # After the ALTERs, so the SELECT below can name every column the
+            # old table was supposed to have; before the version stamp, so a
+            # crash mid-rebuild leaves the database claiming the old version
+            # and the next open tries again.
             self._add_missing_columns()
+            self._rebuild_publications()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def _add_missing_columns(self) -> None:
@@ -336,6 +395,35 @@ class StateStore:
             for name, decl in columns.items():
                 if name not in present:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+    def _rebuild_publications(self) -> None:
+        """Move an old ``publications`` table onto the three-part primary key.
+
+        A no-op on a database that already has ``profile``, which covers every
+        fresh one: :data:`_SCHEMA` declares the current shape, so the rebuild
+        only ever meets a table written by an earlier version.
+
+        :meth:`_add_missing_columns` cannot do this. It issues
+        ``ALTER TABLE ... ADD COLUMN`` and nothing else, so putting ``profile``
+        through it would give the column with the *old* key still in force — a
+        change that looks applied and is not, and the one shape this whole
+        method exists to avoid.
+
+        One transaction, so a crash halfway leaves the old table intact rather
+        than a ``publications_new`` nobody reads and no ``publications`` at all.
+        """
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(publications)")}
+        if not columns or "profile" in columns:
+            return
+
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in _REBUILD_PUBLICATIONS:
+                self._conn.execute(statement)
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
 
     def close(self) -> None:
         """Close the underlying connection."""
@@ -551,8 +639,8 @@ class StateStore:
             A dict of the publication's columns, or None if never published.
         """
         row = self._conn.execute(
-            "SELECT * FROM publications WHERE doc_id = ? AND destination = ?",
-            (doc_id, destination),
+            "SELECT * FROM publications WHERE doc_id = ? AND destination = ? AND profile = ?",
+            (doc_id, destination, DEFAULT_PROFILE),
         ).fetchone()
         return dict(row) if row else None
 
@@ -562,28 +650,45 @@ class StateStore:
         destination: str,
         version: Any,
         *,
+        recipe: str,
+        pages_failed: int = 0,
         external_id: Optional[str] = None,
         target: Optional[str] = None,
-        content_hash: Optional[str] = None,
         run_id: Optional[int] = None,
         published_at: Optional[str] = None,
     ) -> None:
         """Record that a document reached a destination.
 
-        Merged on the natural key ``(doc_id, destination)``, so re-publishing
-        updates rather than duplicating. ``first_published_at`` survives every
-        update — it is the only record of when the note came into existence.
+        Merged on the natural key, so re-publishing updates rather than
+        duplicating. ``first_published_at`` survives every update — it is the
+        only record of when the note came into existence, and what makes the
+        ``created`` date a destination writes stable across republishes.
+
+        A row is assembled from two sides and half of it is not on
+        :class:`~living_ink.core.document.PublishResult`. The destination
+        supplies ``target`` and ``external_id``; the caller supplies
+        ``version``, ``recipe`` and ``pages_failed``, because all three are
+        facts about the run rather than about where the note landed — a
+        destination has no way to know the tablet's content hash or how many
+        pages the OCR stage lost.
 
         Args:
             doc_id: reMarkable document id.
-            destination: Destination class name.
+            destination: The destination's ``state_key``.
             version: Device version or content hash that was published.
+            recipe: Digest of everything other than the document that shaped
+                the output (see :mod:`living_ink.core.recipe`). Required, and
+                deliberately without a default: a row silently recorded with
+                the empty default would never match a real digest again, so the
+                document would republish on every run for ever.
+            pages_failed: How many pages did not transcribe. A non-zero count
+                keeps the document pending so the next run retries, while the
+                pages that did work are already published.
             external_id: Identifier on the far side, where the destination has
                 one (the id an API hands back, for instance).
             target: Where the note landed, in whatever terms the destination
                 names its notes — a vault-relative path, a folder and title.
                 Recorded so a later run can tell that a note has moved.
-            content_hash: Hash of what was sent, for change detection.
             run_id: Run that published it.
             published_at: Override the timestamp; for migration of old state.
         """
@@ -592,26 +697,29 @@ class StateStore:
             conn.execute(
                 """
                 INSERT INTO publications
-                    (doc_id, destination, version, external_id, target, content_hash,
-                     first_published_at, last_published_at, run_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(doc_id, destination) DO UPDATE SET
+                    (doc_id, destination, profile, version, recipe, pages_failed,
+                     external_id, target, first_published_at, last_published_at, run_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id, destination, profile) DO UPDATE SET
                     version = excluded.version,
+                    recipe = excluded.recipe,
+                    pages_failed = excluded.pages_failed,
                     -- Only overwrite these when the caller actually knows
                     -- them, so a partial record never erases a full one.
                     external_id = COALESCE(excluded.external_id, publications.external_id),
                     target = COALESCE(excluded.target, publications.target),
-                    content_hash = COALESCE(excluded.content_hash, publications.content_hash),
                     last_published_at = excluded.last_published_at,
                     run_id = excluded.run_id
                 """,
                 (
                     doc_id,
                     destination,
+                    DEFAULT_PROFILE,
                     None if version is None else str(version),
+                    recipe,
+                    pages_failed,
                     external_id,
                     target,
-                    content_hash,
                     stamp,
                     stamp,
                     run_id,
@@ -1059,8 +1167,10 @@ def import_legacy_json(store: StateStore, data_dir: Path) -> int:
             timespec="seconds"
         )
         for doc_id, version in raw.items():
+            # An empty recipe on purpose: the JSON never recorded one, so the
+            # honest answer is "unknown", and unknown must read as pending.
             store.record_publication(
-                str(doc_id), destination, version, published_at=stamp, run_id=None
+                str(doc_id), destination, version, recipe="", published_at=stamp, run_id=None
             )
             imported += 1
 
