@@ -268,14 +268,6 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         # validating.
         check_config(yaml_config, cfg_path)
 
-    # Legacy Fallback
-    try:
-        from dotenv import load_dotenv
-
-        load_dotenv()
-    except ImportError:
-        pass
-
     # Last, so that everything above sees the file as the user wrote it and
     # everything downstream sees only spellings this build still knows: dead
     # sections are gone and deprecated keys have been copied onto their
@@ -898,7 +890,6 @@ class SyncPipeline:
         scheduled_fire_time: Optional[str] = None,
         flags: Optional[Dict[str, Any]] = None,
         config_path: Optional[Path] = None,
-        data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
     ):
         """Initialize the SyncPipeline by resolving this run's choices once.
@@ -955,7 +946,6 @@ class SyncPipeline:
                 library caller's explicit argument is never quietly overruled
                 by a mapping it did not build.
             config_path: Path to YAML config file. Defaults to standard config path.
-            data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
         ensure_runtime_dirs()
@@ -965,7 +955,6 @@ class SyncPipeline:
         self.device = default_reading()
 
         self.config_path = config_path or get_config_path()
-        self.data_dir = data_dir or DATA_DIR
         self.dry_run = dry_run
         # Not implied by dry_run any more. One flag quietly turning on another
         # is a third concept where the product needs one, and the transcripts

@@ -2090,7 +2090,7 @@ class TestThePreviewNarrowsExactlyLikeTheRun:
         from living_ink.pipeline import SyncPipeline
 
         args = LivingInkCLI().build_parser().parse_args(argv)
-        pipe = SyncPipeline(**sync_arguments(args), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**sync_arguments(args), destinations=[])
         return pipe._criteria()
 
     @pytest.mark.parametrize(
