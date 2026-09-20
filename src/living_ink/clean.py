@@ -13,8 +13,6 @@ Vision OCR:
 Backward compatibility:
     - ``repair_text_with_openai()`` still works as the public API entry point.
     - If no provider is configured, falls back to ``NoneProvider`` (raw text).
-    - Legacy ``OPENAI_API_KEY`` env var is respected if ``ai`` config section
-      is absent.
 
 Example:
     >>> from living_ink.clean import configure, repair_text_with_openai, ocr_and_repair
@@ -25,7 +23,6 @@ Example:
 
 import hashlib
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -88,9 +85,9 @@ def _read_prompt_instructions() -> str:
 def configure(settings: Settings) -> None:
     """Initialize the AI provider from the run's resolved settings.
 
-    Should be called once at startup (from ``living_ink.pipeline`` or ``SyncPipeline``).
-    If not called, ``repair_text_with_openai()`` will attempt to
-    auto-configure from legacy env vars.
+    Should be called once at startup (from ``living_ink.pipeline`` or
+    ``SyncPipeline``). If not called, there is no AI pass at all —
+    ``repair_text_with_openai()`` returns its input unchanged.
 
     Args:
         settings: The run's settings. Carries both the provider configuration
@@ -119,27 +116,22 @@ def repair_enabled() -> bool:
 
 
 def _get_provider() -> TextRepairProvider:
-    """Get the configured provider, with lazy initialization fallback.
-
-    If ``configure()`` was never called (e.g., direct script usage),
-    attempts to build a provider from legacy environment variables.
+    """Get the configured provider, defaulting to no AI at all.
 
     Returns:
-        The active ``TextRepairProvider`` instance.
+        The active ``TextRepairProvider`` instance, or :class:`NoneProvider`
+        if ``configure()`` was never called.
     """
     global _provider
     if _provider is not None:
         return _provider
 
-    # Lazy fallback: try legacy env var configuration
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if api_key:
-        logger.info("Auto-configuring from OPENAI_API_KEY env var (legacy mode).")
-        _provider = get_provider(Settings(ai_provider="openai", ai_api_key=api_key))
-    else:
-        logger.info("No AI provider configured. Text cleanup disabled.")
-        _provider = NoneProvider()
-
+    # No environment fallback. A caller that never ran ``configure()`` has no
+    # settings, and guessing OpenAI from a stray ``OPENAI_API_KEY`` sends
+    # handwriting to a provider nobody chose. ``Settings.from_env()`` is the
+    # supported way to configure without a config file.
+    logger.info("No AI provider configured. Text cleanup disabled.")
+    _provider = NoneProvider()
     return _provider
 
 

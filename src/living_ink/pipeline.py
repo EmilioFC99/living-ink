@@ -195,12 +195,14 @@ def _migrate_config_ai_key(yaml_config: Dict[str, Any], cfg_path: Path) -> None:
 
 
 def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load configuration from YAML and export the credentials third parties read.
+    """Load configuration from YAML and configure the AI provider from it.
 
-    Only settings that another library picks up from the environment on its own
-    are exported (``OPENAI_API_KEY``). Living Ink's own settings are not: they
-    are resolved from this dictionary by :class:`living_ink.settings.Settings`
-    and passed explicitly.
+    Nothing is exported to the environment. This used to copy a legacy
+    ``openai.api_key`` into ``OPENAI_API_KEY`` for a third-party SDK to find,
+    but no SDK here reads it — every provider is handed its key explicitly —
+    so all the export achieved was putting a plaintext credential into the
+    environment that the SSH transport's subprocesses and the wizard's
+    ``$EDITOR`` inherit.
 
     Args:
         config_path: Path to YAML config file. Defaults to get_config_path().
@@ -239,14 +241,10 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             if isinstance(rm_section, dict):
                 register_secret(str(rm_section.get("device_token", "")).strip())
 
-            # 1. OpenAI
-            if "openai" in yaml_config and "api_key" in yaml_config["openai"]:
-                os.environ.setdefault(
-                    "OPENAI_API_KEY", str(yaml_config["openai"]["api_key"]).strip()
-                )
-
-            # 2. AI Provider — configured from the settings this config
-            #    resolves to, which is where the stored key is read from.
+            # The AI provider, configured from the settings this config
+            # resolves to, which is where the stored key is read from. A legacy
+            # ``openai.api_key`` reaches it as a ``legacy_keys`` layer of
+            # ``ai_api_key``, not through the environment.
             _migrate_config_ai_key(yaml_config, cfg_path)
             configure_ai_provider(Settings.resolve(yaml_config, config_path=cfg_path))
 
