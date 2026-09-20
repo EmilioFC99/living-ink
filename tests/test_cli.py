@@ -1534,3 +1534,137 @@ class TestSyncPreviewFlag:
         mock_wizard.assert_not_called()
         assert code == 1
         assert "living-ink setup" in capsys.readouterr().err
+
+
+class TestThePreviewNarrowsExactlyLikeTheRun:
+    """``--preview`` answers "what would *this exact command* do".
+
+    It used to answer a different question — "where does everything stand" —
+    and build its own :class:`SelectionCriteria` holding nothing but the
+    configured exclusions. So ``sync --preview --pdf`` previewed notebooks,
+    ``--limit 1`` previewed forty documents, ``--tag`` was ignored outright,
+    and ``--ssh`` was read from a ``dest`` the generated parser had stopped
+    using, so a forced transport silently did nothing. Each of those is a
+    preview predicting something the run does not do, in the one feature whose
+    entire purpose is to say what will happen.
+    """
+
+    def _probe(self, monkeypatch, tmp_path, argv, config=None):
+        """Run the real comparison against stubbed seams and report what it asked.
+
+        Args:
+            monkeypatch: Pytest's patcher.
+            tmp_path: Throwaway directory for the state database.
+            argv: The command line, without the program name.
+            config: The config file's contents, if any.
+
+        Returns:
+            ``(criteria, settings, client, passed_client)`` — what the
+            classifier was handed.
+        """
+        from living_ink import api as api_module
+        from living_ink import pipeline as pipeline_module
+        from living_ink.cli import LivingInkCLI, inventory
+        from living_ink.core import selection as selection_module
+        from living_ink.core.selection import Selection
+        from living_ink.state import StateStore
+
+        client = MagicMock()
+        client.get_meta_items.return_value = []
+        client.get_device_info.return_value = None
+
+        seen = {}
+
+        def _select(collection, criteria, store, destinations, *, settings, client=None):
+            seen.update(criteria=criteria, settings=settings, client=client)
+            return Selection()
+
+        store = StateStore(tmp_path / "state.db")
+        monkeypatch.setattr(selection_module, "select", _select)
+        monkeypatch.setattr(api_module, "get_rmapi", lambda settings: client)
+        monkeypatch.setattr(inventory, "get_config_path", lambda root=None: tmp_path / "none.yml")
+        monkeypatch.setattr(pipeline_module, "get_default_config", lambda: config or {})
+        monkeypatch.setattr(pipeline_module, "get_default_destinations", lambda: [])
+        monkeypatch.setattr(pipeline_module, "get_state_store", lambda: store)
+
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        try:
+            inventory.compare_with_device(args)
+        finally:
+            store.close()
+        return seen["criteria"], seen["settings"], client, seen["client"]
+
+    def _run_criteria(self, tmp_path, argv, config=None):
+        """Return the criteria the run itself would build for the same argv."""
+        from living_ink.cli import LivingInkCLI
+        from living_ink.cli.commands.sync import sync_arguments
+        from living_ink.pipeline import SyncPipeline
+
+        args = LivingInkCLI().build_parser().parse_args(argv)
+        pipe = SyncPipeline(**sync_arguments(args), data_dir=tmp_path, destinations=[])
+        return pipe._criteria()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["sync", "--preview"], id="bare"),
+            pytest.param(["sync", "--preview", "--pdf"], id="type"),
+            pytest.param(["sync", "--preview", "--limit", "3"], id="limit"),
+            pytest.param(["sync", "--preview", "--tag", "work"], id="tag"),
+            pytest.param(["sync", "--preview", "--source-path", "Journal/"], id="path"),
+            pytest.param(["sync", "--preview", "--source-regex", r"^Work/"], id="regex"),
+            pytest.param(["sync", "--preview", "--notebook", "Standup"], id="target"),
+            pytest.param(["sync", "--preview", "--force"], id="force"),
+            pytest.param(["sync", "--preview", "--exclude", "Templates"], id="exclude"),
+        ],
+    )
+    def test_it_builds_the_criteria_the_run_would_build(self, monkeypatch, tmp_path, argv):
+        """The strongest form of the promise: the two objects are equal.
+
+        Compared whole rather than field by field, so a criterion added later
+        is covered here the day it lands instead of the day somebody
+        remembers to extend a list.
+        """
+        criteria, _, _, _ = self._probe(monkeypatch, tmp_path, argv)
+
+        assert criteria == self._run_criteria(tmp_path, argv)
+
+    def test_the_configured_answer_still_shows_through(self, monkeypatch, tmp_path):
+        """A preview with no flags previews the config, not the schema defaults."""
+        config = {"sync": {"types": ["pdf"], "limit": 4, "tags": ["work"]}}
+
+        criteria, _, _, _ = self._probe(monkeypatch, tmp_path, ["sync", "--preview"], config)
+
+        assert criteria.types == frozenset({"pdf"})
+        assert criteria.limit == 4
+        assert criteria.tags == frozenset({"work"})
+
+    def test_a_forced_transport_reaches_the_preview(self, monkeypatch, tmp_path):
+        """``--ssh`` was looked for under a ``dest`` that no longer exists.
+
+        The flag arrives as ``preferred_connection`` — the settings field the
+        generated parser names — so reading ``args.ssh`` found nothing and the
+        preview quietly used the configured preference instead.
+        """
+        config = {"remarkable": {"preferred_connection": "cloud"}}
+
+        _, settings, _, _ = self._probe(
+            monkeypatch, tmp_path, ["sync", "--preview", "--ssh"], config
+        )
+
+        assert settings.preferred_connection == "ssh"
+
+        _, unflagged, _, _ = self._probe(monkeypatch, tmp_path, ["sync", "--preview"], config)
+
+        assert unflagged.preferred_connection == "cloud"
+
+    def test_the_classifier_is_given_the_transport(self, monkeypatch, tmp_path):
+        """Without it the type is guessed from the title and no tag can be read.
+
+        ``_keep_tagged`` drops nothing when it has no client — a filter that
+        cannot run must not silently exclude everything — so a clientless
+        preview would list documents ``--tag`` excludes from the run.
+        """
+        _, _, client, passed = self._probe(monkeypatch, tmp_path, ["sync", "--preview"])
+
+        assert passed is client

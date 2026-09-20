@@ -42,6 +42,7 @@ from living_ink.core.selection import (
     Candidate,
     Selection,
     SelectionCriteria,
+    criteria_for,
     select,
 )
 from living_ink.core.stages import Transcriber, judge_pages, prepare_pages, write_transcript
@@ -1117,34 +1118,22 @@ class SyncPipeline:
             _logger.info("Device: %s", reading.describe())
 
     def _criteria(self) -> SelectionCriteria:
-        """Translate this run's resolved options into what narrows it.
+        """Return what narrows this run.
 
-        The one place the pipeline's long-standing attribute names are turned
-        into the vocabulary :mod:`living_ink.core.selection` speaks, so the
-        preview and the run can be handed the same object.
+        Delegated rather than assembled here: the preview builds the same
+        object from the same settings and the same four flags, and two call
+        sites spelling one rule in their own words is how a preview starts
+        predicting something the run does not do.
 
         Returns:
             The criteria for this run.
         """
-        return SelectionCriteria(
+        return criteria_for(
+            self.settings,
             target=self.target_notebook,
             source_path=self.source_path,
             source_regex=self.source_regex,
-            types=frozenset(self.sync_types),
-            # Both come from the config file and had no reader at all, so
-            # ``config`` and ``info`` reported Templates and Quick Sheets as
-            # excluded while every run rendered and transcribed them at cost.
-            exclude=frozenset(self.settings.sync_exclude or ()),
-            tags=frozenset(self.settings.sync_tags or ()),
-            # A named notebook is not part of a sweep, so the sweep's cap does
-            # not apply to it — and applying it would deal the second of two
-            # same-named matches into ``deferred``, where the prompt that asks
-            # the user which one they meant can no longer see it.
-            limit=None if self.target_notebook else self.limit,
-            # Naming a notebook is asking for that notebook, whether or not the
-            # comparison thinks it is current — the one thing that behaved like
-            # --force before --force existed, and still does without it.
-            force=self.force or bool(self.target_notebook),
+            force=self.force,
         )
 
     def select_documents(self, listing: Sequence[Any], client: Any) -> Optional[Selection]:

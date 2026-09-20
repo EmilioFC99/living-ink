@@ -122,6 +122,61 @@ class SelectionCriteria:
                 raise ValueError(f"invalid path regex {self.source_regex!r}: {exc}") from exc
 
 
+def criteria_for(
+    settings: Settings,
+    *,
+    target: Optional[str] = None,
+    source_path: Optional[str] = None,
+    source_regex: Optional[str] = None,
+    force: bool = False,
+) -> SelectionCriteria:
+    """Build a run's criteria from its settings and its four run-shaping flags.
+
+    Here rather than on the pipeline for the same reason :func:`select` is the
+    only classifier: the preview has to narrow the run exactly as the run
+    narrows itself, and it cannot do that by assembling a second
+    :class:`SelectionCriteria` from the same fields in its own words. The four
+    keywords are the filters with no persisted form — everything else is read
+    off ``settings``, which is where a flag has already been merged over the
+    environment and the file.
+
+    Args:
+        settings: The run's resolved settings.
+        target: A document named on the command line, by id, title or path.
+        source_path: Case-insensitive substring of the document's full path.
+        source_regex: Case-sensitive pattern over that same path.
+        force: Publish whatever the comparison concludes.
+
+    Returns:
+        What narrows this run.
+
+    Raises:
+        ValueError: If a path and a regex were both given, or the regex does
+            not compile.
+    """
+    named = target.strip() if target else None
+    return SelectionCriteria(
+        target=named,
+        source_path=source_path.strip() if source_path else None,
+        source_regex=source_regex or None,
+        types=frozenset(settings.sync_types or ()),
+        # Both come from the config file and had no reader at all, so
+        # ``config`` and ``info`` reported Templates and Quick Sheets as
+        # excluded while every run rendered and transcribed them at cost.
+        exclude=frozenset(settings.sync_exclude or ()),
+        tags=frozenset(settings.sync_tags or ()),
+        # A named document is not part of a sweep, so the sweep's cap does not
+        # apply to it — and applying it would deal the second of two
+        # same-named matches into ``deferred``, where the prompt that asks the
+        # user which one they meant can no longer see it.
+        limit=None if named else (settings.max_notebooks_per_run or None),
+        # Naming a document is asking for that document, whether or not the
+        # comparison thinks it is current — the one thing that behaved like
+        # ``--force`` before ``--force`` existed, and still does without it.
+        force=force or bool(named),
+    )
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One document a run will work on, with the facts the stages need.

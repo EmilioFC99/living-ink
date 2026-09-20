@@ -5,7 +5,6 @@ only turns the selection into rows a person or a JSON consumer can read.
 """
 
 import argparse
-import dataclasses
 import logging
 import os
 from pathlib import Path
@@ -53,13 +52,20 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
     feature whose entire purpose is to say what will happen. Everything below
     is presentation: order the answer by the listing and name the status.
 
-    Metadata only. ``get_meta_items()`` is one listing call, and no client is
-    passed to the classifier, so the document type comes from the listing's own
-    file index rather than a round trip per document.
+    Every flag ``sync`` takes is honoured, because ``--preview`` answers "what
+    would *this exact command* do" and a flag that changed the selection but
+    not the preview would make the preview a lie. That is why the flags arrive
+    through :func:`~living_ink.cli.commands.sync.sync_arguments` — the one
+    place that knows CLI spellings — and are resolved by the same
+    :meth:`Settings.resolve` call the run makes, rather than being read off the
+    namespace here. ``--ssh`` was previously looked for under a ``dest`` the
+    generated parser stopped using, so a forced transport was silently ignored.
+
+    Nothing is downloaded, rendered or transcribed: the cost of a preview is
+    one listing call plus whatever the filters the user typed have to read.
 
     Args:
-        args: Parsed sync arguments; ``--ssh`` / ``--cloud`` select the
-            transport, otherwise the configured preference wins.
+        args: Parsed sync arguments, exactly as ``sync`` receives them.
         root: Optional repository root, for locating the config.
 
     Returns:
@@ -71,18 +77,16 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
         ConfigurationMissing: If configuration is absent or unusable.
     """
     from living_ink.api import get_rmapi
-    from living_ink.core.selection import SelectionCriteria, select
+    from living_ink.cli.commands.sync import sync_arguments
+    from living_ink.core.selection import criteria_for, select
     from living_ink.pipeline import get_default_config, get_default_destinations, get_state_store
 
     cfg_path = get_config_path(root)
     if cfg_path.exists():
         os.environ.setdefault("LIVING_INK_CONFIG_DIR", str(cfg_path.parent))
 
-    settings = Settings.resolve(get_default_config())
-    if getattr(args, "ssh", False):
-        settings = dataclasses.replace(settings, preferred_connection="ssh")
-    elif getattr(args, "cloud", False):
-        settings = dataclasses.replace(settings, preferred_connection="cloud")
+    asked = sync_arguments(args)
+    settings = Settings.resolve(get_default_config(), flags=asked["flags"])
 
     client = get_rmapi(settings)
 
@@ -101,19 +105,23 @@ def compare_with_device(args: argparse.Namespace, root: Optional[Path] = None):
 
     chosen = select(
         collection,
-        # No limit and no type filter: a preview answers "where does everything
-        # stand", and a document this run's flags would skip still has a state
-        # worth reporting. The limit belongs to the run, not to the question.
-        #
-        # The exclusions are the exception, and they are here because they are
-        # not a flag: a folder the config says is never synced is not pending,
-        # and reporting it as pending is the preview and the run disagreeing.
-        # ``sync.tags`` stays out — applying it means one round trip per
-        # document, which is not what a status question should cost.
-        SelectionCriteria(exclude=frozenset(settings.sync_exclude or ())),
+        criteria_for(
+            settings,
+            target=asked["notebook"],
+            source_path=asked["source_path"],
+            source_regex=asked["source_regex"],
+            force=asked["force"],
+        ),
         store,
         destinations,
         settings=settings,
+        # The same client the run passes, and for the same reason: the
+        # document type and the tag filter are answered by the transport, and
+        # a preview judging them from the title alone would disagree with the
+        # run it exists to predict. SSH batches the type lookup into one round
+        # trip; the Cloud pays per document, which is the cost of an honest
+        # answer and still nothing next to rendering a page.
+        client=client,
     )
 
     return (
