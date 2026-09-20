@@ -306,6 +306,9 @@ def extract_raw_document_from_zip(zip_path: Path, out_path: Path) -> Optional[Pa
 def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
     """Parse a document zip and find all annotated pages with their PDF page index.
 
+    An annotation the user deleted on the tablet is left out, the same way
+    :func:`_get_ordered_rm_files` leaves out a deleted notebook page.
+
     Args:
         zip_path: Path to the document zip file.
 
@@ -345,6 +348,11 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
             for idx, p in enumerate(pages_meta):
                 p_id = p.get("id") if isinstance(p, dict) else str(p)
                 rm_key = f"{p_id}.rm"
+                if page_is_deleted(p):
+                    # Claim it so the orphan sweep below does not hand the same
+                    # annotation back under a synthesised page number.
+                    matched_rm_names.add(rm_key)
+                    continue
                 if rm_key in rm_names:
                     matched_rm_names.add(rm_key)
                     redir_val = None
@@ -790,11 +798,71 @@ def render_rm_file_to_png(
             tmp_raw_path.unlink(missing_ok=True)
 
 
+def page_is_deleted(page: Any) -> bool:
+    """Report whether a ``cPages.pages[]`` entry is a page the user removed.
+
+    Deleting a page on the tablet does not remove it from ``.content`` and does
+    not remove its ``.rm`` file from the zip: it adds a CRDT marker, and every
+    other field stays exactly as it was. So a reader that does not look for the
+    marker renders, transcribes, pays for and publishes a page the tablet is no
+    longer showing — which is what Living Ink did until this existed.
+
+    The marker is a CRDT register, ``{"timestamp": ..., "value": true}``, and
+    its value is what decides. A bare ``true`` and a bare ``1`` are accepted
+    too, because the same field is written flat in the older page format.
+
+    Args:
+        page: One entry from ``cPages.pages``. A non-dict entry is the oldest
+            format, a bare page id, which carries no marker at all.
+
+    Returns:
+        True if the page was deleted on the tablet.
+    """
+    if not isinstance(page, dict):
+        return False
+    marker = page.get("deleted")
+    if isinstance(marker, dict):
+        return bool(marker.get("value"))
+    return bool(marker)
+
+
+def _live_page_ids(pages_meta: List[Any]) -> Tuple[List[str], set]:
+    """Split a ``cPages.pages`` list into the pages that still exist and the rest.
+
+    Args:
+        pages_meta: The raw ``cPages.pages`` list, or the older flat ``pages``
+            list of bare ids.
+
+    Returns:
+        A tuple of the live page ids in document order and the set of deleted
+        page ids. The second is not the complement of the first: a caller that
+        sweeps up ``.rm`` files the page list never mentioned needs to know
+        which ids were mentioned *and* removed, or the file comes back in as an
+        orphan.
+    """
+    live: List[str] = []
+    dead: set = set()
+    for page in pages_meta:
+        page_id = page.get("id") if isinstance(page, dict) else str(page)
+        if page_id is None:
+            continue
+        if page_is_deleted(page):
+            dead.add(page_id)
+        else:
+            live.append(page_id)
+    return live, dead
+
+
 def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
     """Extract and order .rm files from an extracted document directory.
 
     Reads the .content file to determine page order and returns .rm files
     sorted accordingly. Falls back to filesystem order if no page order found.
+
+    Pages the user deleted on the tablet are left out — both from the ordered
+    list and from the sweep of files the page list does not mention, since a
+    deleted page's ``.rm`` file is still in the zip and would otherwise return
+    as an orphan.
 
     Args:
         tmpdir_path: Path to the extracted document directory
@@ -803,22 +871,23 @@ def _get_ordered_rm_files(tmpdir_path: Path) -> List[Path]:
         List of .rm file paths in correct page order
     """
     # Get page order from .content file
-    page_order = []
+    page_order: List[str] = []
+    deleted_ids: set = set()
     for content_file in tmpdir_path.glob("*.content"):
         try:
             data = json.loads(content_file.read_text())
             # New format: cPages.pages array
             if "cPages" in data and "pages" in data["cPages"]:
-                page_order = [p["id"] for p in data["cPages"]["pages"]]
+                page_order, deleted_ids = _live_page_ids(data["cPages"]["pages"])
             # Fallback: pages array directly
             elif "pages" in data and isinstance(data["pages"], list):
-                page_order = data["pages"]
+                page_order, deleted_ids = _live_page_ids(data["pages"])
         except (OSError, *_JSON_ERRORS):
             # Ignore errors reading/parsing .content file; fallback to default page order
             pass
         break
 
-    rm_files = list(tmpdir_path.glob("**/*.rm"))
+    rm_files = [p for p in tmpdir_path.glob("**/*.rm") if p.stem not in deleted_ids]
 
     # Sort rm_files by page order if available
     if page_order:

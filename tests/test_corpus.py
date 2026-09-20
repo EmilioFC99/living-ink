@@ -490,31 +490,45 @@ class TestAgainstTheRealDevice:
 
 
 class TestDefectsTheCorpusFound:
-    """Two bugs that only a real ``.content`` file exposes.
+    """Bugs that only a real ``.content`` file exposes.
 
-    Both are recorded here as the behaviour that ships today, with the correct
-    behaviour named. Each is fixed by a later slice, and the assertion flips
-    when it is.
+    Each is recorded with the correct behaviour named. One still ships as a
+    defect and is pinned as such; the assertion flips when it is fixed.
     """
 
-    def test_a_deleted_page_still_reaches_the_pipeline(self, corpus_transport, tmp_path):
-        """``_get_ordered_rm_files`` ignores the per-page deletion marker.
+    def test_a_deleted_page_does_not_reach_the_pipeline(self, corpus_transport, tmp_path):
+        """A page the user removed is not rendered, transcribed or published.
 
-        A page the user removed stays in ``cPages.pages`` carrying
-        ``deleted``. ``extract._get_ordered_rm_files`` (``extract.py:826``)
-        builds its order from every entry in that array without checking the
-        marker, so a removed page is rendered, transcribed and published.
+        Deleting a page on the tablet leaves it in ``cPages.pages`` carrying a
+        ``deleted`` marker and leaves its ``.rm`` file in the zip. Every field
+        that decides anything looks unchanged, so a reader that does not look
+        for the marker publishes a page the tablet stopped showing — which is
+        what happened until ``extract.page_is_deleted`` existed.
 
         The fixture has three pages with the middle one removed: the tablet
-        shows two.
+        shows two, and so does the count.
         """
         doc = corpus_transport.get_doc(corpus_ids.DOC_DELETED_PAGE)
         archive = tmp_path / "doc.zip"
         archive.write_bytes(corpus_transport.download(doc))
 
         assert len(corpus_transport.page_order(corpus_ids.DOC_DELETED_PAGE)) == 2
-        # Correct behaviour is 2. This pins the defect until it is fixed.
-        assert extract.get_document_page_count(archive) == 3
+        assert extract.get_document_page_count(archive) == 2
+
+    def test_the_deleted_page_is_the_middle_one(self, corpus_transport, tmp_path):
+        """Removing it must not renumber or reorder the two that remain.
+
+        Counting right by dropping the wrong page would pass the test above.
+        """
+        doc = corpus_transport.get_doc(corpus_ids.DOC_DELETED_PAGE)
+        archive = tmp_path / "doc.zip"
+        archive.write_bytes(corpus_transport.download(doc))
+
+        expected = corpus_transport.page_order(corpus_ids.DOC_DELETED_PAGE)
+        with extract._open_document_zip(archive) as extracted:
+            rendered = [p.stem for p in extract._get_ordered_rm_files(extracted)]
+
+        assert rendered == expected
 
     def test_trash_is_a_parent_not_a_deleted_flag(self, corpus_root):
         """A trashed document carries ``parent: "trash"`` and no ``deleted`` key.

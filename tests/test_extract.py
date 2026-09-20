@@ -87,6 +87,130 @@ class TestPageCount:
         assert get_document_page_count(zip_path) == 0
 
 
+class TestADeletedPageIsNotAPage:
+    """Removing a page on the tablet has to remove it from the sync.
+
+    Nothing in the zip gets smaller when a page is deleted: the ``.rm`` file
+    stays, the ``cPages`` entry stays, and every field on it keeps its old
+    value. A single CRDT marker is added, and it is the only evidence there is.
+    """
+
+    def _zip(self, tmp_path, pages, members=None):
+        """Build a document zip with a ``cPages.pages`` list.
+
+        Args:
+            tmp_path: Pytest's per-test directory.
+            pages: The ``cPages.pages`` entries to write.
+            members: Extra zip members. Defaults to one ``.rm`` per page id.
+
+        Returns:
+            Path to the zip.
+        """
+        if members is None:
+            members = {f"doc/{p['id'] if isinstance(p, dict) else p}.rm": b"" for p in pages}
+        return _write_zip(
+            tmp_path / "doc.zip",
+            {"doc.content": json.dumps({"cPages": {"pages": pages}}), **members},
+        )
+
+    def test_the_marked_page_is_dropped(self, tmp_path):
+        zip_path = self._zip(
+            tmp_path,
+            [
+                {"id": "p1"},
+                {"id": "p2", "deleted": {"timestamp": "1:3", "value": True}},
+                {"id": "p3"},
+            ],
+        )
+
+        with _open_document_zip(zip_path) as extracted:
+            assert [p.stem for p in _get_ordered_rm_files(extracted)] == ["p1", "p3"]
+
+    def test_the_count_agrees(self, tmp_path):
+        """``get_document_page_count`` is what the report and the UI print."""
+        zip_path = self._zip(
+            tmp_path,
+            [{"id": "p1"}, {"id": "p2", "deleted": {"timestamp": "1:3", "value": True}}],
+        )
+        assert get_document_page_count(zip_path) == 1
+
+    def test_its_file_does_not_come_back_as_an_orphan(self, tmp_path):
+        """The sweep for unlisted ``.rm`` files is the second way in.
+
+        Dropping the page from the order and then re-adding its file because
+        the order does not mention it is worse than not fixing it at all: the
+        page reappears, at the end, under the wrong number.
+        """
+        zip_path = self._zip(tmp_path, [{"id": "p1"}, {"id": "p2", "deleted": {"value": True}}])
+
+        with _open_document_zip(zip_path) as extracted:
+            assert [p.stem for p in _get_ordered_rm_files(extracted)] == ["p1"]
+
+    def test_a_genuine_orphan_still_gets_through(self, tmp_path):
+        """A file the page list never mentioned is not a deleted page."""
+        zip_path = self._zip(
+            tmp_path,
+            [{"id": "p1"}],
+            members={"doc/p1.rm": b"", "doc/stray.rm": b""},
+        )
+
+        with _open_document_zip(zip_path) as extracted:
+            assert [p.stem for p in _get_ordered_rm_files(extracted)] == ["p1", "stray"]
+
+    @pytest.mark.parametrize(
+        "marker",
+        [
+            {"timestamp": "1:3", "value": False},
+            {"timestamp": "1:3"},
+            {},
+            None,
+            False,
+        ],
+    )
+    def test_a_page_that_is_not_deleted_survives(self, tmp_path, marker):
+        """The register carries a value; only a true one means deleted."""
+        page = {"id": "p1"}
+        if marker is not None:
+            page["deleted"] = marker
+        zip_path = self._zip(tmp_path, [page])
+
+        with _open_document_zip(zip_path) as extracted:
+            assert len(_get_ordered_rm_files(extracted)) == 1
+
+    def test_a_flat_marker_counts_too(self, tmp_path):
+        """The older page format writes the field without the CRDT wrapper."""
+        zip_path = self._zip(tmp_path, [{"id": "p1"}, {"id": "p2", "deleted": True}])
+
+        with _open_document_zip(zip_path) as extracted:
+            assert [p.stem for p in _get_ordered_rm_files(extracted)] == ["p1"]
+
+    def test_the_oldest_format_carries_no_marker_and_is_left_alone(self, tmp_path):
+        """A bare list of page ids has nowhere to put one."""
+        zip_path = _write_zip(
+            tmp_path / "doc.zip",
+            {
+                "doc.content": json.dumps({"pages": ["p1", "p2"]}),
+                "doc/p1.rm": b"",
+                "doc/p2.rm": b"",
+            },
+        )
+
+        with _open_document_zip(zip_path) as extracted:
+            assert [p.stem for p in _get_ordered_rm_files(extracted)] == ["p1", "p2"]
+
+    def test_a_deleted_pdf_annotation_is_dropped(self, tmp_path):
+        """The PDF page map is the second reader of the same array."""
+        pages = [
+            {"id": "p1", "redir": {"value": 0}},
+            {"id": "p2", "redir": {"value": 5}, "deleted": {"value": True}},
+        ]
+        zip_path = self._zip(tmp_path, pages, members={"p1.rm": b"", "p2.rm": b""})
+
+        mapped = extract.get_pdf_annotated_page_map(zip_path)
+
+        assert [entry["page_id"] for entry in mapped] == ["p1"]
+
+
 class TestPageSourceHashes:
     """The render cache keys on these, so they must track the page order."""
 
