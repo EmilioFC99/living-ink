@@ -99,7 +99,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 | credentials | `remarkable.cloud_token` | reMarkable Cloud auth token |
 | credentials | `remarkable.ssh_password` | SSH password, when the tablet has one |
 | `config.yml` | `obsidian.enabled` / `obsidian.vault_path` / `root_folder` | Obsidian destination |
-| `config.yml` | `sync.sync_pdfs` / `sync_epubs` / `max_notebooks_per_run` | What and how much to sync |
+| `config.yml` | `sync.types` / `sync.limit` | What and how much to sync |
 | `config.yml` | `sync.ocr_concurrency` | Pages transcribed at once (default 4; 1 is serial) |
 | `config.yml` | `sync.transcript_cache` | Reuse transcriptions across runs (default `true`) |
 | `config.yml` | `sync.render_cache` | Reuse rendered page images across runs (default `true`) |

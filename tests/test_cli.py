@@ -329,8 +329,7 @@ def test_sync_command_execution(tmp_path):
         notebook="MyNotes",
         max_notebooks_per_run=5,
         preferred_connection="ssh",
-        sync_pdfs=True,
-        all_types=False,
+        sync_types=["pdf"],
         keep_temp=True,
     )
     with patch("living_ink.pipeline.SyncPipeline.__init__", return_value=None) as mock_init:
@@ -344,11 +343,11 @@ def test_sync_command_execution(tmp_path):
             assert opts["flags"] == {
                 "max_notebooks_per_run": 5,
                 "preferred_connection": "ssh",
-                "sync_pdfs": True,
+                "sync_types": ["pdf"],
             }
-            # A flag nobody gave is absent, not False: False would overrule a
-            # config that has EPUBs switched on.
-            assert "sync_epubs" not in opts["flags"]
+            # A flag nobody gave is absent, not empty: an empty list would
+            # overrule a config that names the types it wants.
+            assert "sync_tags" not in opts["flags"]
             mock_run.assert_called_once()
 
 

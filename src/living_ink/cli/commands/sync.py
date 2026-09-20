@@ -49,7 +49,6 @@ def sync_arguments(args: argparse.Namespace) -> dict[str, Any]:
     """
     return {
         "notebook": getattr(args, "notebook", None),
-        "all_types": getattr(args, "all_types", False),
         "keep_temp": getattr(args, "keep_temp", False),
         # The pipeline's own name for "do the work, publish nothing", which is
         # what ``--preview --transcribe`` asks for. ``--preview`` on its own
@@ -89,11 +88,6 @@ class SyncCommand(BaseCommand):
             "--notebook",
             default=None,
             help="Sync a specific notebook by name, folder path (e.g. 'Work/Notes'), or document ID",
-        )
-        parser.add_argument(
-            "--all-types",
-            action="store_true",
-            help="Sync all document types (notebooks, PDFs, and EPUBs)",
         )
         parser.add_argument(
             "--keep-temp",

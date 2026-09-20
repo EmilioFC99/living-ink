@@ -65,6 +65,7 @@ import pytest
 from living_ink.cli import LivingInkCLI, sync_arguments
 from living_ink.cli.flags import flaggable
 from living_ink.config.schema import CHOICE, FLAG, LIST, NUMBER, WHOLE, Setting
+from living_ink.settings import Settings
 
 # ---------------------------------------------------------------------------
 # Table 1 — what each sync flag means
@@ -85,9 +86,6 @@ from living_ink.config.schema import CHOICE, FLAG, LIST, NUMBER, WHOLE, Setting
 SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
     "--ssh": ("flags.preferred_connection", "ssh"),
     "--cloud": ("flags.preferred_connection", "cloud"),
-    "--pdf": ("flags.sync_pdfs", True),
-    "--epub": ("flags.sync_epubs", True),
-    "--all-types": ("all_types", True),
     "--keep-temp": ("keep_temp", True),
     "--prune": ("flags.prune", True),
     "--json": ("flags.output_json", True),
@@ -107,7 +105,6 @@ SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
 #: construction and prove nothing.
 BARE_SYNC: dict[str, Any] = {
     "notebook": None,
-    "all_types": False,
     "keep_temp": False,
     "dry_run": False,
     "flags": {},
@@ -166,10 +163,15 @@ def spellings_of(setting: Setting) -> list[tuple[list[str], Any]]:
         if setting.negated:
             pairs.append(([setting.negated], False))
         return pairs
+    dedicated = [choice for choice in setting.choices if choice.flag]
+    if dedicated:
+        # A choice takes one of its values and a list takes several, so the
+        # same flag spelling yields a bare value for the one and a list of
+        # exactly what was typed for the other.
+        if setting.kind == LIST:
+            return [([choice.flag], [choice.value]) for choice in dedicated]
+        return [([choice.flag], choice.value) for choice in dedicated]
     if setting.kind == CHOICE:
-        dedicated = [choice for choice in setting.choices if choice.flag]
-        if dedicated:
-            return [([choice.flag], choice.value) for choice in dedicated]
         first = setting.choices[0].value
         return [([setting.flag, first], first)]
     raw, parsed = SAMPLE_VALUES.get(setting.kind, DEFAULT_SAMPLE)
@@ -289,7 +291,6 @@ SYNC_SURFACE: set[str] = {
     "--quiet",
     # Hand-registered: one run's shape, with no persisted form.
     "--notebook",
-    "--all-types",
     "--keep-temp",
     "--preview",
     "--transcribe",
@@ -307,6 +308,7 @@ SYNC_SURFACE: set[str] = {
     "--ai-language",
     "--ai-prompt-dir",
     "--ocr-concurrency",
+    "--notebooks",
     "--pdf",
     "--epub",
     "--tag",
@@ -440,7 +442,7 @@ FLAG_COMPATIBILITY: tuple[Combination, ...] = (
     Combination(("sync", "--cloud"), True, "and so is the other"),
     Combination(("sync", "--ssh", "--preview"), True, "the exclusion is to --cloud alone"),
     Combination(("sync", "--preview", "--prune"), True, "a preview of what pruning would remove"),
-    Combination(("sync", "--all-types", "--pdf"), True, "--all-types simply subsumes it"),
+    Combination(("sync", "--notebooks", "--pdf"), True, "the type flags accumulate"),
     Combination(("sync", "--preview", "--all"), True, "--all qualifies --preview"),
     Combination(("sync", "--preview", "--json"), True, "the comparison has a JSON form"),
     Combination(("sync", "--all"), True, "accepted, but inert without --preview"),
@@ -842,21 +844,21 @@ class TestSyncFlagsMapExactly:
             pytest.param(["sync", "--cloud"], with_flags(preferred_connection="cloud"), id="cloud"),
             pytest.param(["sync", "--json"], with_flags(output_json=True), id="json"),
             pytest.param(["sync", "--keep-temp"], {**BARE_SYNC, "keep_temp": True}, id="keep-temp"),
-            pytest.param(["sync", "--all-types"], {**BARE_SYNC, "all_types": True}, id="all-types"),
-            pytest.param(["sync", "--pdf"], with_flags(sync_pdfs=True), id="pdf"),
-            pytest.param(["sync", "--epub"], with_flags(sync_epubs=True), id="epub"),
+            pytest.param(["sync", "--pdf"], with_flags(sync_types=["pdf"]), id="pdf"),
+            pytest.param(
+                ["sync", "--notebooks", "--epub"],
+                with_flags(sync_types=["notebook", "epub"]),
+                id="two-types",
+            ),
             pytest.param(
                 ["sync", "--notebook", "Foo", "--preview", "--transcribe", "--keep-temp"],
                 {**BARE_SYNC, "notebook": "Foo", "dry_run": True, "keep_temp": True},
                 id="scoped-rehearsal",
             ),
             pytest.param(
-                ["sync", "--all-types", "--limit", "2", "--json"],
-                {
-                    **with_flags(max_notebooks_per_run=2, output_json=True),
-                    "all_types": True,
-                },
-                id="everything-two-of-them-as-json",
+                ["sync", "--pdf", "--limit", "2", "--json"],
+                with_flags(sync_types=["pdf"], max_notebooks_per_run=2, output_json=True),
+                id="pdfs-two-of-them-as-json",
             ),
             pytest.param(
                 ["sync", "--tag", "work", "--tag", "ideas,urgent"],
@@ -879,12 +881,12 @@ class TestSyncFlagsMapExactly:
 
         This is the whole reason every generated flag defaults to None.
         :meth:`Settings._pick` tests ``is not None`` and nothing else, so a
-        ``sync_pdfs: False`` here would not read as "unset" — it would read as
-        "the user said no" and overrule a config file that has PDFs switched
+        a ``prune: False`` here would not read as "unset" — it would read as
+        "the user said no" and overrule a config file that has pruning switched
         on, turning an omitted flag into an instruction never given.
         """
         assert intent(["sync"])["flags"] == {}
-        assert "sync_pdfs" not in intent(["sync", "--epub"])["flags"]
+        assert "prune" not in intent(["sync", "--epub"])["flags"]
 
     def test_a_namespace_missing_a_flag_reads_as_the_flag_being_unset(self):
         """A partial namespace is a missing flag, not an AttributeError.
@@ -984,8 +986,8 @@ class TestFlagOrderIsIrrelevant:
             ),
             (["sync", "--ssh", "--json"], ["sync", "--json", "--ssh"]),
             (
-                ["sync", "--limit", "3", "--all-types", "--keep-temp"],
-                ["sync", "--keep-temp", "--limit", "3", "--all-types"],
+                ["sync", "--limit", "3", "--prune", "--keep-temp"],
+                ["sync", "--keep-temp", "--limit", "3", "--prune"],
             ),
         ],
     )
@@ -1073,6 +1075,42 @@ class TestEveryGeneratedFlagSetsItsOwnSetting:
         rather than trusting each declaration, and this is what says so.
         """
         assert [s.field for s in flaggable("sync") if s.secret] == []
+
+
+class TestTheTypeFlagsReplaceRatherThanAdd:
+    """``--pdf`` means PDFs, not "PDFs as well as whatever the file says".
+
+    The three used to be ``--pdf`` / ``--epub`` / ``--all-types``, each a
+    boolean setting of its own, and each strictly additive: a config syncing
+    notebooks could not be narrowed to PDFs by any command line. They are one
+    list setting now, and replacement is not special-cased anywhere — it falls
+    out of the flags being one layer of :meth:`Settings._pick`, which takes the
+    first layer that has an answer and never merges two.
+    """
+
+    def test_one_flag_names_one_type(self):
+        assert intent(["sync", "--pdf"])["flags"]["sync_types"] == ["pdf"]
+
+    def test_the_flags_accumulate_among_themselves(self):
+        """They are one answer being built, not three answers competing."""
+        assert intent(["sync", "--pdf", "--epub"])["flags"]["sync_types"] == ["pdf", "epub"]
+        assert intent(["sync", "--notebooks", "--pdf", "--epub"])["flags"]["sync_types"] == [
+            "notebook",
+            "pdf",
+            "epub",
+        ]
+
+    def test_typing_none_of_them_leaves_the_configured_answer_alone(self):
+        """The reason every generated flag defaults to None, in its sharpest form."""
+        assert "sync_types" not in intent(["sync"])["flags"]
+
+    def test_a_flag_overrules_the_configured_list_instead_of_extending_it(self):
+        """End to end through the resolver, because that is where it happens."""
+        config = {"sync": {"types": ["notebook", "epub"]}}
+        assert Settings.resolve(config, env={}).sync_types == ("notebook", "epub")
+
+        flags = intent(["sync", "--pdf"])["flags"]
+        assert Settings.resolve(config, env={}, flags=flags).sync_types == ("pdf",)
 
 
 class TestForcingBothTransports:
@@ -1288,7 +1326,7 @@ class TestTheShortcutMatchesTheRealThing:
             ["sync"],
             ["sync", "--preview", "--transcribe"],
             ["sync", "--notebook", "Work/Notes", "--limit", "2"],
-            ["sync", "--all-types", "--keep-temp", "--json"],
+            ["sync", "--pdf", "--keep-temp", "--json"],
             ["sync", "--ssh", "--prune"],
             ["sync", "--pdf", "--epub"],
             ["sync", "--ai-model", "gemini-2.5-flash", "--tag", "work,ideas"],
@@ -1369,7 +1407,6 @@ class TestAbbreviationsAreAccepted:
             (["sync", "--prev"], ["sync", "--preview"]),
             (["sync", "--keep"], ["sync", "--keep-temp"]),
             (["sync", "--pru"], ["sync", "--prune"]),
-            (["sync", "--note", "Foo"], ["sync", "--notebook", "Foo"]),
             (["sync", "--li", "4"], ["sync", "--limit", "4"]),
         ],
     )
@@ -1377,7 +1414,7 @@ class TestAbbreviationsAreAccepted:
         """The shortened form resolves to the identical instruction."""
         assert intent(abbreviated) == intent(full)
 
-    @pytest.mark.parametrize("prefix", ["--s", "--ssh-", "--al", "--ai"])
+    @pytest.mark.parametrize("prefix", ["--s", "--ssh-", "--note", "--ai"])
     def test_an_ambiguous_prefix_is_a_usage_error(self, prefix):
         """Several flags match, so argparse refuses to guess.
 
@@ -1385,6 +1422,9 @@ class TestAbbreviationsAreAccepted:
         turned one ``--ai-model`` into six ``--ai-*`` flags, so a prefix that
         would have been unambiguous with a hand-written parser is not, and the
         only warning a user gets is this error rather than the wrong setting.
+        ``--note`` is the cost of the two spellings the product wants: one
+        document is ``--notebook Foo`` and one *type* is ``--notebooks``, and
+        nothing shorter than either can tell them apart.
         """
         parser = LivingInkCLI().build_parser()
         with pytest.raises(SystemExit) as exit_info:
@@ -1392,13 +1432,14 @@ class TestAbbreviationsAreAccepted:
         assert exit_info.value.code == 2
 
     def test_an_exact_match_beats_a_longer_flag_it_prefixes(self):
-        """``--all`` is ``--all``, not an abbreviation of ``--all-types``.
+        """``--notebook`` is ``--notebook``, not a prefix of ``--notebooks``.
 
-        Without the exact-match rule this would be ambiguous, and the two flags
-        mean entirely different things.
+        Without argparse's exact-match rule this would be ambiguous, and the
+        two mean entirely different things: one names a document, the other
+        names a type.
         """
-        assert intent(["sync", "--all"]) == BARE_SYNC
-        assert intent(["sync", "--all-types"])["all_types"] is True
+        assert intent(["sync", "--notebook", "Foo"]) == {**BARE_SYNC, "notebook": "Foo"}
+        assert intent(["sync", "--notebooks"])["flags"]["sync_types"] == ["notebook"]
 
 
 class TestVerbosityIsAcceptedOnBothSides:

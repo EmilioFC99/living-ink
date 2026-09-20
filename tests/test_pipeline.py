@@ -136,14 +136,6 @@ def test_sync_pipeline_custom_destinations():
     assert pipeline.destinations[0] is mock_dest
 
 
-def test_sync_pipeline_properties_all_types():
-    """SyncPipeline(all_types=True) enables sync_pdfs and sync_epubs."""
-    pipeline = SyncPipeline(all_types=True)
-    assert pipeline.all_types is True
-    assert pipeline.sync_pdfs is True
-    assert pipeline.sync_epubs is True
-
-
 def test_sync_pipeline_properties_ssh_and_cloud():
     """SyncPipeline sets connection properties and synchronizes environment."""
     pipeline_ssh = SyncPipeline(ssh=True)
@@ -155,18 +147,13 @@ def test_sync_pipeline_properties_ssh_and_cloud():
     assert pipeline_cloud.use_ssh is False
 
 
-def test_the_type_flags_become_selection_criteria():
-    """The flags narrow the run by naming source types, nothing more."""
-    from living_ink.sources import SOURCE_REGISTRY
-
-    default = SyncPipeline(sync_pdfs=False, sync_epubs=False, destinations=[])
+def test_the_configured_types_become_selection_criteria():
+    """One setting narrows the run by naming source types, nothing more."""
+    default = SyncPipeline(destinations=[])
     assert default._criteria().types == frozenset({"notebook"})
 
-    with_pdfs = SyncPipeline(sync_pdfs=True, sync_epubs=False, destinations=[])
-    assert with_pdfs._criteria().types == frozenset({"notebook", "pdf"})
-
-    everything = SyncPipeline(all_types=True, destinations=[])
-    assert everything._criteria().types == frozenset(SOURCE_REGISTRY)
+    chosen = SyncPipeline(flags={"sync_types": ("pdf", "epub")}, destinations=[])
+    assert chosen._criteria().types == frozenset({"pdf", "epub"})
 
 
 def test_the_per_run_cap_becomes_the_selection_limit():

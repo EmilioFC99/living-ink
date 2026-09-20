@@ -49,6 +49,7 @@ from living_ink.config.schema import (
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_USER,
     DEFAULT_SYNC_EXCLUDE,
+    DEFAULT_SYNC_TYPES,
     DEFAULT_TRANSCRIPT_CACHE,
     DEFAULT_VERBOSITY,
     FLAG,
@@ -268,8 +269,7 @@ class Settings:
         ai_language: Language to transcribe in, or ``"auto"``.
         ai_prompt_dir: Directory of user-owned prompt overrides, if any.
         ocr_concurrency: How many pages to transcribe at once. 1 is serial.
-        sync_pdfs: Whether annotated PDFs are synced alongside notebooks.
-        sync_epubs: Whether annotated EPUBs are synced alongside notebooks.
+        sync_types: Document types this run syncs, e.g. ``("notebook", "pdf")``.
         sync_tags: Only sync documents carrying one of these tablet tags.
         sync_exclude: Tablet folders never synced.
         skip_empty: Whether a document that transcribes to nothing is skipped.
@@ -311,8 +311,7 @@ class Settings:
     ai_prompt_dir: Optional[str] = None
     ocr_concurrency: int = DEFAULT_OCR_CONCURRENCY
 
-    sync_pdfs: bool = False
-    sync_epubs: bool = False
+    sync_types: Tuple[str, ...] = DEFAULT_SYNC_TYPES
     sync_tags: Tuple[str, ...] = ()
     sync_exclude: Tuple[str, ...] = DEFAULT_SYNC_EXCLUDE
     skip_empty: bool = False

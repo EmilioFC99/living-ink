@@ -167,6 +167,23 @@ def reads_as(value: Any, kind: str) -> bool:
     return True
 
 
+def _split(raw: str) -> List[str]:
+    """Read a :data:`LIST` value written as one string.
+
+    The comma is the separator wherever a list has to fit in one word — an
+    environment variable, a single command-line argument — so the validator
+    reads the same shapes the resolver does rather than judging a legal value
+    as a single nonsense name.
+
+    Args:
+        raw: The written value, e.g. ``"notebook, pdf"``.
+
+    Returns:
+        The trimmed, non-empty parts, in the order given.
+    """
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _value_problem(path: str, setting: Setting, value: Any) -> Optional[ConfigProblem]:
     """Report that a value cannot be used as the setting it was written under.
 
@@ -185,13 +202,26 @@ def _value_problem(path: str, setting: Setting, value: Any) -> Optional[ConfigPr
     if not reads_as(value, setting.kind):
         return ConfigProblem(ERROR, path, f"expected {setting.kind}, found {value!r}")
 
-    if setting.kind == CHOICE and setting.choices:
-        allowed = [choice.value for choice in setting.choices]
-        if str(value).strip().lower() not in allowed:
+    if not setting.choices:
+        return None
+
+    allowed = [choice.value for choice in setting.choices]
+    if setting.kind == CHOICE:
+        written = [value]
+    elif setting.kind == LIST:
+        # A list of allowed names is policed item by item. ``types: [notbook]``
+        # is otherwise a config that parses, selects nothing and never says
+        # why — the same silent-typo failure the schema exists to end.
+        written = list(value) if isinstance(value, (list, tuple)) else _split(str(value))
+    else:
+        return None
+
+    for item in written:
+        if str(item).strip().lower() not in allowed:
             return ConfigProblem(
                 ERROR,
                 path,
-                f"expected one of {', '.join(allowed)}, found {value!r}",
+                f"expected one of {', '.join(allowed)}, found {item!r}",
             )
 
     return None

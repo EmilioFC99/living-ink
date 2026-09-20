@@ -869,9 +869,6 @@ class SyncPipeline:
         limit: Optional[int] = None,
         ssh: bool = False,
         cloud: bool = False,
-        sync_pdfs: Optional[bool] = None,
-        sync_epubs: Optional[bool] = None,
-        all_types: bool = False,
         keep_temp: bool = False,
         dry_run: bool = False,
         prune: bool = False,
@@ -902,10 +899,6 @@ class SyncPipeline:
             limit: Most documents to process. 0 or None defers to config.
             ssh: Force the USB transport for this run.
             cloud: Force the reMarkable Cloud transport for this run.
-            sync_pdfs: Include annotated PDFs. None defers to config.
-            sync_epubs: Include annotated EPUBs. None defers to config.
-            all_types: Include every registered source type, whatever the
-                config and the two flags above say.
             keep_temp: Preserve rendered PNGs and transcripts for debugging.
             dry_run: Do everything except publish — what the front end
                 spells ``--preview --transcribe``.
@@ -952,18 +945,13 @@ class SyncPipeline:
             )
 
         self.target_notebook = notebook.strip() if notebook else None
-        self.all_types = all_types
 
         # None means "this flag was not given", which is what lets config and
         # the environment be heard; a False here would be an explicit "off"
-        # and would silently overrule the file. ``--all-types`` is the one
-        # switch that does overrule it, which is why it resolves to True
-        # rather than to None.
+        # and would silently overrule the file.
         named = {
             "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
             "use_ssh": True if ssh else False if cloud else None,
-            "sync_pdfs": True if all_types else sync_pdfs,
-            "sync_epubs": True if all_types else sync_epubs,
             "max_notebooks_per_run": limit,
             "prune": prune or None,
             "output_json": json_output or None,
@@ -1019,14 +1007,9 @@ class SyncPipeline:
         return self.settings.use_ssh
 
     @property
-    def sync_pdfs(self) -> bool:
-        """Whether annotated PDFs are included in this run."""
-        return self.settings.sync_pdfs
-
-    @property
-    def sync_epubs(self) -> bool:
-        """Whether annotated EPUBs are included in this run."""
-        return self.settings.sync_epubs
+    def sync_types(self) -> Tuple[str, ...]:
+        """The document types this run syncs."""
+        return tuple(self.settings.sync_types)
 
     @property
     def limit(self) -> int:
@@ -1123,21 +1106,9 @@ class SyncPipeline:
         Returns:
             The criteria for this run.
         """
-        from living_ink.sources import SOURCE_REGISTRY
-
-        if self.all_types:
-            types = frozenset(SOURCE_REGISTRY)
-        else:
-            enabled = {"notebook"}
-            if self.sync_pdfs:
-                enabled.add("pdf")
-            if self.sync_epubs:
-                enabled.add("epub")
-            types = frozenset(enabled)
-
         return SelectionCriteria(
             target=self.target_notebook,
-            types=types,
+            types=frozenset(self.sync_types),
             # Both come from the config file and had no reader at all, so
             # ``config`` and ``info`` reported Templates and Quick Sheets as
             # excluded while every run rendered and transcribed them at cost.

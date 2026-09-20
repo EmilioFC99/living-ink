@@ -235,6 +235,48 @@ def _add_choice(target: Any, setting: Setting, default: Any) -> None:
         )
 
 
+def _add_list(target: Any, setting: Setting, default: Any) -> None:
+    """Register a list setting, as one valued flag or as a flag per value.
+
+    Args:
+        target: Parser or argument group to register on.
+        setting: A :data:`LIST` setting.
+        default: What the namespace holds when no flag named a value.
+
+    Note:
+        The per-value form **replaces** the configured list rather than adding
+        to it, and it does so by being an ordinary flags layer: ``--pdf``
+        alone means PDFs and nothing else, because
+        :meth:`~living_ink.settings.Settings._pick` takes the first layer that
+        has an answer and never merges two. The flags accumulate among
+        themselves — ``--pdf --epub`` is both — which is what ``append_const``
+        buys, and it is why the default stays None: an empty list here would
+        read as "the user asked for nothing" and overrule the file.
+    """
+    dedicated = [choice for choice in setting.choices if choice.flag]
+    if not dedicated:
+        target.add_argument(
+            setting.flag,
+            dest=setting.field,
+            default=default,
+            action=_CollectList,
+            metavar=_metavar(setting),
+            help=f"{setting.help} Repeatable, or comma-separated.",
+        )
+        return
+    for choice in dedicated:
+        assert choice.flag is not None
+        spellings = [choice.short, choice.flag] if choice.short else [choice.flag]
+        target.add_argument(
+            *spellings,
+            dest=setting.field,
+            action="append_const",
+            const=choice.value,
+            default=default,
+            help=choice.label,
+        )
+
+
 def _register(parser: argparse.ArgumentParser, settings: List[Setting], default: Any) -> None:
     """Add one list of settings' flags to a parser.
 
@@ -267,14 +309,7 @@ def _register(parser: argparse.ArgumentParser, settings: List[Setting], default:
         elif setting.kind == CHOICE:
             _add_choice(target, setting, default)
         elif setting.kind == LIST:
-            target.add_argument(
-                setting.flag,
-                dest=setting.field,
-                default=default,
-                action=_CollectList,
-                metavar=_metavar(setting),
-                help=f"{setting.help} Repeatable, or comma-separated.",
-            )
+            _add_list(target, setting, default)
         else:
             target.add_argument(
                 setting.flag,

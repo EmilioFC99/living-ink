@@ -19,7 +19,6 @@ from living_ink.config import (
     apply_status,
     read_config_file,
     split_problems,
-    validate,
     validate_config,
 )
 from living_ink.config.validate import _retired_problem
@@ -159,6 +158,29 @@ class TestConfigSchema:
         assert validate_config({"notion": {"token": "x"}}, extra_sections=("notion",)) == []
         assert [p.level for p in validate_config({"notion": {"token": "x"}})] == [ERROR]
 
+    def test_a_list_of_named_values_is_policed_item_by_item(self):
+        """``types: [notbook]`` otherwise selects nothing and never says why.
+
+        A :data:`CHOICE` has always been checked against its values; a
+        :data:`LIST` that enumerates its values is the same promise, made once
+        per item rather than once per key.
+        """
+        assert validate_config({"sync": {"types": ["notebook", "pdf"]}}) == []
+
+        problems = validate_config({"sync": {"types": ["notebook", "notbook"]}})
+        assert [p.level for p in problems] == [ERROR]
+        assert "notebook, pdf, epub" in problems[0].message
+        assert "notbook" in problems[0].message
+
+    def test_a_list_written_as_one_string_is_read_as_several(self):
+        """The comma is how a single word says "several", here as in the shell."""
+        assert validate_config({"sync": {"types": "notebook, pdf"}}) == []
+        assert [p.level for p in validate_config({"sync": {"types": "pdf, nope"}})] == [ERROR]
+
+    def test_a_list_with_no_named_values_accepts_anything(self):
+        """A folder name is not drawn from a list, so nothing is checked."""
+        assert validate_config({"sync": {"exclude": ["Anything At All"]}}) == []
+
     def test_a_newer_schema_version_is_refused(self):
         """Running an old build over a new file would ignore half of it."""
         problems = validate_config({"schema_version": SCHEMA_VERSION + 1})
@@ -167,7 +189,7 @@ class TestConfigSchema:
 
     def test_a_config_with_no_schema_version_is_version_one(self):
         """Every config written before this existed is a version 1 config."""
-        assert validate_config({"sync": {"sync_pdfs": True}}) == []
+        assert validate_config({"sync": {"limit": 3}}) == []
 
     def test_split_problems_separates_by_level(self):
         """Callers act on the two levels differently, so they arrive separated."""
@@ -346,24 +368,38 @@ class TestAKeyHasAStatusOfItsOwn:
         """Nothing replaced it, so the only useful advice is to delete the line."""
         assert _retired_problem("sync.sync_pdfs", _retired(REMOVED)).hint == "delete it"
 
-    def test_a_removed_key_is_dropped_before_anything_reads_it(self, monkeypatch):
+    def test_a_retired_key_warns_rather_than_stopping_the_run(self):
+        """The real one: ``sync.sync_pdfs`` was retired in favour of a list."""
+        problems = validate_config({"sync": {"sync_pdfs": True}})
+        assert [p.level for p in problems] == [WARNING]
+        assert problems[0].path == "sync.sync_pdfs"
+        assert problems[0].hint == "use sync.types instead"
+
+    def test_a_removed_key_is_dropped_before_anything_reads_it(self):
         """Same contract as a removed section, one level down.
 
         A retired setting has no field on :class:`Settings` to resolve onto, so
         leaving it in the loaded config would hand the dataclass a keyword it
         does not have.
         """
-        monkeypatch.setattr(validate, "SETTINGS", (_retired(REMOVED),))
         loaded = apply_status({"sync": {"sync_pdfs": True, "limit": 5}})
         assert loaded["sync"] == {"limit": 5}
 
-    def test_dropping_a_key_leaves_the_section_and_the_original_alone(self, monkeypatch):
+    def test_dropping_a_key_leaves_the_section_and_the_original_alone(self):
         """Emptying a section is not deleting it, and the parsed dict is the caller's."""
-        monkeypatch.setattr(validate, "SETTINGS", (_retired(REMOVED),))
-        original = {"sync": {"sync_pdfs": True}}
+        original = {"sync": {"sync_epubs": True}}
         loaded = apply_status(original)
         assert loaded["sync"] == {}
-        assert original == {"sync": {"sync_pdfs": True}}
+        assert original == {"sync": {"sync_epubs": True}}
+
+    def test_a_config_naming_only_retired_keys_still_resolves(self):
+        """End to end: warned about, dropped, and the run proceeds on defaults."""
+        stale = {"sync": {"sync_pdfs": True, "sync_epubs": True}}
+        errors, warnings = split_problems(validate_config(stale))
+
+        assert errors == []
+        assert len(warnings) == 2
+        assert Settings.resolve(apply_status(stale), env={}).sync_types == ("notebook",)
 
     def test_a_retired_key_stays_in_the_schema_so_it_stays_recognised(self):
         """Deleting the entry is what the status exists to avoid.

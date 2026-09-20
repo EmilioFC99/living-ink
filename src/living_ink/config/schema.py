@@ -118,6 +118,10 @@ DEFAULT_ATTACHMENTS_FOLDER = "_attachments"
 # The folders every tablet has and nobody wants synced.
 DEFAULT_SYNC_EXCLUDE: Tuple[str, ...] = ("Trash", "Templates", "Quick sheets")
 
+# Handwriting only. A tablet's PDFs and EPUBs are usually a library rather than
+# a body of notes, and transcribing one costs an OCR call per annotated page.
+DEFAULT_SYNC_TYPES: Tuple[str, ...] = ("notebook",)
+
 #: Standard reMarkable paper colour — a light cream rather than pure white.
 DEFAULT_RENDER_BACKGROUND = "#FBFBFB"
 
@@ -132,7 +136,7 @@ DEFAULT_VERBOSITY = "normal"
 
 @dataclass(frozen=True)
 class Choice:
-    """One allowed value of a :data:`CHOICE` setting.
+    """One allowed value of a :data:`CHOICE` or :data:`LIST` setting.
 
     Attributes:
         value: The stored value.
@@ -168,7 +172,14 @@ class Setting:
         env: Environment variable that overrides it, or None.
         flag: Long flag, or None for a setting with no command-line form.
         negated: The ``--no-x`` form for a boolean, or None.
-        choices: Allowed values when :attr:`kind` is :data:`CHOICE`.
+        choices: Allowed values. A :data:`CHOICE` takes one of them and a
+            :data:`LIST` takes any number, which is the difference between
+            ``--ssh`` and ``--pdf``: the first replaces the transport, the
+            second adds a type to a set this run's flags are building from
+            scratch. Either way a flag naming a value *replaces* what the
+            config said, because the flags are one layer of
+            :meth:`~living_ink.settings.Settings._pick` and a layer is never
+            merged into the one below it.
         exclusive_group: Flags sharing a group become one mutually exclusive
             argparse group.
         store: :data:`STORE_CONFIG`, :data:`STORE_CREDENTIALS` or
@@ -474,13 +485,31 @@ SETTINGS: Tuple[Setting, ...] = (
     ),
     # ── What to sync ───────────────────────────────────────────────────────
     Setting(
+        field="sync_types",
+        key="sync.types",
+        kind=LIST,
+        default=DEFAULT_SYNC_TYPES,
+        help="Document types to sync.",
+        env="SYNC_TYPES",
+        choices=(
+            Choice("notebook", "Handwritten notebooks.", flag="--notebooks"),
+            Choice("pdf", "Annotated PDFs.", flag="--pdf"),
+            Choice("epub", "Annotated EPUBs.", flag="--epub"),
+        ),
+    ),
+    # Retired, not deleted: an unrecognised key is a hard ERROR, so a config
+    # still naming one of these has to be recognised in order to be warned
+    # about. Neither is a rename — a bool and a list of names are two shapes
+    # nothing can mechanically convert between, which is why the user is told
+    # the new spelling rather than having a value guessed at.
+    Setting(
         field="sync_pdfs",
         key="sync.sync_pdfs",
         kind=FLAG,
         default=False,
         help="Sync annotated PDFs alongside notebooks.",
-        env="SYNC_PDFS",
-        flag="--pdf",
+        status=REMOVED,
+        replacement="sync.types",
     ),
     Setting(
         field="sync_epubs",
@@ -488,8 +517,8 @@ SETTINGS: Tuple[Setting, ...] = (
         kind=FLAG,
         default=False,
         help="Sync annotated EPUBs alongside notebooks.",
-        env="SYNC_EPUBS",
-        flag="--epub",
+        status=REMOVED,
+        replacement="sync.types",
     ),
     Setting(
         field="sync_tags",

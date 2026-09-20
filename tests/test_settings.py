@@ -5,7 +5,15 @@ from dataclasses import FrozenInstanceError, fields
 import pytest
 
 from living_ink.config import credentials
-from living_ink.config.schema import SETTINGS, STORE_CONFIG, STORE_CREDENTIALS, STORE_ENV_ONLY
+from living_ink.config.schema import (
+    LIST,
+    LIVE_SETTINGS,
+    REMOVED,
+    SETTINGS,
+    STORE_CONFIG,
+    STORE_CREDENTIALS,
+    STORE_ENV_ONLY,
+)
 from living_ink.settings import (
     DEFAULT_CACHE_MAX_AGE_DAYS,
     DEFAULT_OCR_CONCURRENCY,
@@ -73,8 +81,7 @@ class TestDefaults:
         assert s.use_ssh is True
         assert s.ssh_host == DEFAULT_SSH_HOST
         assert s.ssh_port == 22
-        assert s.sync_pdfs is False
-        assert s.sync_epubs is False
+        assert s.sync_types == ("notebook",)
         assert s.max_notebooks_per_run == 1
         assert s.remarkable_token is None
 
@@ -97,7 +104,7 @@ class TestConfigValues:
             },
             "ai": {"provider": "gemini", "model": "gemini-2.0-flash", "temperature": "0.7"},
             "ocr": {"concurrency": 6},
-            "sync": {"sync_pdfs": True, "sync_epubs": "yes", "limit": 5, "tags": ["work"]},
+            "sync": {"types": ["notebook", "pdf"], "limit": 5, "tags": ["work"]},
             "obsidian": {"enabled": True, "vault_path": "/tmp/vault", "root_folder": "Ink"},
             "cache": {"transcripts": False},
             "output": {"verbosity": "verbose"},
@@ -112,8 +119,7 @@ class TestConfigValues:
         assert s.ai_model == "gemini-2.0-flash"
         assert s.ai_temperature == 0.7
         assert s.ocr_concurrency == 6
-        assert s.sync_pdfs is True
-        assert s.sync_epubs is True
+        assert s.sync_types == ("notebook", "pdf")
         assert s.max_notebooks_per_run == 5
         assert s.sync_tags == ("work",)
         assert s.obsidian_enabled is True
@@ -236,20 +242,20 @@ class TestPrecedence:
     def test_env_overrides_config(self):
         config = {
             "remarkable": {"ssh_host": "config-host"},
-            "sync": {"limit": 5, "sync_pdfs": False},
+            "sync": {"limit": 5, "types": ["notebook"]},
             "obsidian": {"root_folder": "ConfigFolder"},
         }
         env = {
             "REMARKABLE_SSH_HOST": "env-host",
             "SYNC_MAX_NOTEBOOKS": "9",
-            "SYNC_PDFS": "true",
+            "SYNC_TYPES": "pdf,epub",
             "LIVING_INK_OBSIDIAN_ROOT_FOLDER": "EnvFolder",
         }
         s = Settings.resolve(config=config, env=env)
 
         assert s.ssh_host == "env-host"
         assert s.max_notebooks_per_run == 9
-        assert s.sync_pdfs is True
+        assert s.sync_types == ("pdf", "epub")
         assert s.obsidian_root_folder == "EnvFolder"
 
     def test_a_flag_overrides_the_environment(self):
@@ -430,7 +436,7 @@ class TestExplain:
 
         origins = Settings.explain(config=config, env=env)
 
-        assert {o.name for o in origins} == {s.field for s in SETTINGS}
+        assert {o.name for o in origins} == {s.field for s in LIVE_SETTINGS}
         assert all(getattr(resolved, o.name) == o.value for o in origins)
 
     def test_the_token_is_never_displayed(self):
@@ -457,11 +463,12 @@ class TestExplain:
         assert "middle-of-a-real-jwt" not in shown
 
     def test_display_renders_booleans_lists_and_absences_readably(self):
-        origins = {o.name: o for o in Settings.explain(config={}, env={"SYNC_PDFS": "true"})}
+        origins = {o.name: o for o in Settings.explain(config={}, env={"SYNC_SKIP_EMPTY": "true"})}
 
-        assert origins["sync_pdfs"].display() == "true"
-        assert origins["sync_epubs"].display() == "false"
+        assert origins["skip_empty"].display() == "true"
+        assert origins["prune"].display() == "false"
         assert origins["remarkable_token"].display() == "not set"
+        assert origins["sync_types"].display() == "notebook"
         assert origins["sync_exclude"].display() == "Trash, Templates, Quick sheets"
         assert origins["sync_tags"].display() == "not set"
 
@@ -480,11 +487,24 @@ class TestSchemaParity:
     one list now, and this is what keeps it one.
     """
 
-    def test_every_schema_setting_is_a_field_and_the_reverse(self):
-        declared = {setting.field for setting in SETTINGS}
+    def test_every_live_schema_setting_is_a_field_and_the_reverse(self):
+        declared = {setting.field for setting in LIVE_SETTINGS}
         present = {f.name for f in fields(Settings)}
 
         assert declared == present
+
+    def test_a_retired_setting_has_no_field_to_resolve_onto(self):
+        """It stays in the schema to be recognised, not to be read.
+
+        Keeping the dataclass field would mean the resolver still had an answer
+        for a question nothing asks, and the next reader could not tell which
+        settings are live by looking at :class:`Settings`.
+        """
+        present = {f.name for f in fields(Settings)}
+        retired = [s.field for s in SETTINGS if s.status == REMOVED]
+
+        assert retired, "the test is vacuous the day nothing is retired"
+        assert not (set(retired) & present)
 
     def test_no_two_settings_share_an_environment_variable(self):
         """A shared variable silently sets two things, or the wrong one."""
@@ -513,7 +533,7 @@ class TestSchemaParity:
         """A field nobody can look up is a field nobody configures."""
         doc = Settings.__doc__ or ""
 
-        missing = [setting.field for setting in SETTINGS if f"{setting.field}:" not in doc]
+        missing = [setting.field for setting in LIVE_SETTINGS if f"{setting.field}:" not in doc]
         assert missing == []
 
     def test_a_secret_is_never_storable_in_the_config_file(self):
@@ -542,9 +562,15 @@ class TestSchemaParity:
             if setting.store == STORE_ENV_ONLY:
                 assert setting.env, setting.field
 
-    def test_a_choice_setting_enumerates_its_choices(self):
+    def test_a_setting_that_enumerates_its_values_defaults_to_one_of_them(self):
+        """A default outside the list is a config nothing typed can reproduce."""
         for setting in SETTINGS:
-            if setting.choices:
-                values = [choice.value for choice in setting.choices]
-                assert len(values) == len(set(values))
-                assert setting.default is None or setting.default in values
+            if not setting.choices:
+                continue
+            values = [choice.value for choice in setting.choices]
+            assert len(values) == len(set(values))
+            if setting.default is None:
+                continue
+            # A list setting defaults to several of them; a choice to one.
+            chosen = setting.default if setting.kind == LIST else (setting.default,)
+            assert set(chosen) <= set(values), setting.field
