@@ -62,6 +62,26 @@ DB_FILENAME = "state.db"
 #: every real user's ``created`` dates. One constant string buys that away.
 DEFAULT_PROFILE = "default"
 
+#: What started a run. A manual ``sync`` must not reset the staleness clock:
+#: somebody who syncs by hand every morning still wants to be told that the
+#: scheduled job died in March.
+TRIGGER_MANUAL = "manual"
+TRIGGER_SCHEDULED = "scheduled"
+
+#: How a run ended. The first four are the pipeline's; the last two belong to
+#: the scheduler and are the reason a healthy idle daemon and a dead one no
+#: longer look identical — a tick that found nothing still writes a row.
+OUTCOME_SUCCESS = "success"
+OUTCOME_PARTIAL = "partial"
+OUTCOME_ERROR = "error"
+OUTCOME_INTERRUPTED = "interrupted"
+OUTCOME_NOTHING_TO_DO = "nothing_to_do"
+OUTCOME_SKIPPED_OVERLAPPING = "skipped_overlapping"
+
+#: The outcomes that mean the run did its job. ``nothing_to_do`` is one of
+#: them: a schedule that fires nightly and finds nothing is working.
+HEALTHY_OUTCOMES = frozenset({OUTCOME_SUCCESS, OUTCOME_NOTHING_TO_DO, OUTCOME_SKIPPED_OVERLAPPING})
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +90,10 @@ CREATE TABLE IF NOT EXISTS runs (
     outcome             TEXT,
     documents_seen      INTEGER NOT NULL DEFAULT 0,
     documents_published INTEGER NOT NULL DEFAULT 0,
-    documents_failed    INTEGER NOT NULL DEFAULT 0
+    documents_failed    INTEGER NOT NULL DEFAULT 0,
+    trigger             TEXT NOT NULL DEFAULT 'manual',
+    scheduled_fire_time TEXT,
+    error               TEXT
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -133,6 +156,14 @@ CREATE TABLE IF NOT EXISTS pages (
 #: every column introduced later has to be listed here as well as in
 #: :data:`_SCHEMA`, and is applied with an ALTER on open.
 _ADDED_COLUMNS = {
+    "runs": {
+        # Nullable or defaulted, so no SCHEMA_VERSION bump: the ALTER runs on
+        # every open and an existing row reads as a manual run that was never
+        # scheduled, which is what it was.
+        "trigger": "TEXT NOT NULL DEFAULT 'manual'",
+        "scheduled_fire_time": "TEXT",
+        "error": "TEXT",
+    },
     "documents": {
         "last_error": "TEXT",
         "last_error_at": "TEXT",
@@ -456,18 +487,35 @@ class StateStore:
 
     # --- runs -------------------------------------------------------------
 
-    def start_run(self) -> int:
+    def start_run(
+        self,
+        *,
+        trigger: str = TRIGGER_MANUAL,
+        scheduled_fire_time: Optional[str] = None,
+    ) -> int:
         """Open a run and return its id.
 
         Every row written afterwards carries this id, so a later question of
         the form "what did that failing sync at 03:00 actually touch" has an
         answer.
 
+        Args:
+            trigger: :data:`TRIGGER_MANUAL` or :data:`TRIGGER_SCHEDULED`.
+                Manual is the default because every caller that does not say
+                is a person at a terminal.
+            scheduled_fire_time: The time the tick was *supposed* to run, as an
+                ISO-8601 string. It is what separates a late run from an absent
+                one: a row started at 14:05 for a 09:00 fire is a catch-up, and
+                no row at all for 09:00 is a scheduler that did not tick.
+
         Returns:
             The new run's primary key.
         """
         with self._write() as conn:
-            cursor = conn.execute("INSERT INTO runs (started_at) VALUES (?)", (_now(),))
+            cursor = conn.execute(
+                "INSERT INTO runs (started_at, trigger, scheduled_fire_time) VALUES (?, ?, ?)",
+                (_now(), trigger, scheduled_fire_time),
+            )
             return int(cursor.lastrowid)
 
     def finish_run(
@@ -478,21 +526,24 @@ class StateStore:
         seen: int = 0,
         published: int = 0,
         failed: int = 0,
+        error: Optional[str] = None,
     ) -> None:
         """Close a run and record what it did.
 
         Args:
             run_id: Value returned by :meth:`start_run`.
-            outcome: Short status word, e.g. ``"success"`` or ``"error"``.
+            outcome: Short status word, e.g. :data:`OUTCOME_SUCCESS`.
             seen: Documents discovered on the device.
             published: Documents published to at least one destination.
             failed: Documents that failed.
+            error: One line saying what went wrong, so ``info`` can show the
+                cause in its banner without sending the user to the log file.
         """
         with self._write() as conn:
             conn.execute(
                 "UPDATE runs SET finished_at = ?, outcome = ?, documents_seen = ?, "
-                "documents_published = ?, documents_failed = ? WHERE id = ?",
-                (_now(), outcome, seen, published, failed, run_id),
+                "documents_published = ?, documents_failed = ?, error = ? WHERE id = ?",
+                (_now(), outcome, seen, published, failed, error, run_id),
             )
 
     def last_run(self) -> Optional[Dict[str, Any]]:
@@ -503,6 +554,59 @@ class StateStore:
         """
         row = self._conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
         return dict(row) if row else None
+
+    def last_scheduled_run(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent run the scheduler started.
+
+        Read rather than :meth:`last_run` by everything that answers "is the
+        schedule alive": a user who syncs by hand every morning would otherwise
+        keep resetting a staleness clock that is meant to watch the daemon.
+
+        Returns:
+            A dict of the run's columns, or None if nothing has ever been
+            scheduled.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM runs WHERE trigger = ? ORDER BY id DESC LIMIT 1",
+            (TRIGGER_SCHEDULED,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def recent_runs(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Return the last ``limit`` runs, newest first.
+
+        Args:
+            limit: How many rows to return. Five is what ``watch`` prints:
+                enough to see a pattern, short enough that the live ticks stay
+                on screen below it.
+
+        Returns:
+            A list of run rows, newest first, possibly empty.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM runs ORDER BY id DESC LIMIT ?", (max(0, int(limit)),)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def runs_since(self, moment: str) -> int:
+        """Count the runs started at or after ``moment``.
+
+        This is the catch-up question: a schedule time has passed, and the only
+        thing that decides whether to run now is whether anything has run since
+        it. Started, not finished — a run that began after the fire time and
+        then failed has already answered for that fire time, and retrying it
+        immediately would spin.
+
+        Args:
+            moment: An ISO-8601 UTC timestamp, as written by this module.
+
+        Returns:
+            How many runs started at or after that instant.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM runs WHERE started_at >= ?", (moment,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     # --- documents --------------------------------------------------------
 
