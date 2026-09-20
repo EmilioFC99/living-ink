@@ -287,8 +287,8 @@ def render_comparison(
         show_all: Whether to print every row rather than the first
             :data:`PAGE_SIZE`.
     """
-    from living_ink.setup_wizard import bold, dim, green
     from living_ink.state import SYNC_STATUSES
+    from living_ink.ui import bold, dim, green
 
     print()
     against = device.describe() if device else "your reMarkable"
@@ -356,6 +356,6 @@ def tone_colour(tone: str):
         An unrecognised tone renders dim rather than raising — a new status
         should never be able to crash the renderer.
     """
-    from living_ink.setup_wizard import dim, green, red, yellow
+    from living_ink.ui import dim, green, red, yellow
 
     return {"good": green, "warn": yellow, "bad": red}.get(tone, dim)

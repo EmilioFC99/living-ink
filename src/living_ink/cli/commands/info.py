@@ -88,7 +88,7 @@ class InfoCommand(BaseCommand):
         Args:
             report: Snapshot produced by collect_status().
         """
-        from living_ink.setup_wizard import bold, cyan, dim, green, red, yellow
+        from living_ink.ui import bold, cyan, dim, green, red, yellow
 
         print()
         print(bold(cyan("============================================================")))
@@ -207,7 +207,7 @@ class InfoCommand(BaseCommand):
         Args:
             report: Snapshot produced by collect_status().
         """
-        from living_ink.setup_wizard import dim, red, yellow
+        from living_ink.ui import dim, red, yellow
 
         if not report.state_exists:
             print(f"Sync state:    {dim('Nothing recorded yet — run living-ink sync')}")
@@ -242,7 +242,7 @@ class InfoCommand(BaseCommand):
         Args:
             report: Snapshot produced by collect_status().
         """
-        from living_ink.setup_wizard import bold, cyan, dim, yellow
+        from living_ink.ui import bold, cyan, dim, yellow
 
         if not report.settings:
             return

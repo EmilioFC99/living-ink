@@ -30,6 +30,7 @@ dependencies = [
     "ebooklib>=0.18",
     "beautifulsoup4>=4.12.0",
     "pyyaml>=6.0.3",
+    "questionary>=2.1.1",
 ]
 
 [project.optional-dependencies]
