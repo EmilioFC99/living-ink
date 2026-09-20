@@ -243,3 +243,55 @@ class TestJsonConsoleMode:
         logs.console("progress")
 
         assert capsys.readouterr().out == "progress\n"
+
+
+class TestLogRedaction:
+    """``log()`` writes the file users attach to bug reports."""
+
+    def test_a_registered_secret_never_reaches_the_log_file(self, tmp_path, monkeypatch, capsys):
+        redact_mod.register_secret(SECRET)
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(logs, "LOG_PATH", log_path)
+
+        logs.log(f"connecting with {SECRET}")
+
+        written = log_path.read_text(encoding="utf-8")
+        assert SECRET not in written
+        assert "***redacted***" in written
+        # The same masked text is what the user saw on screen.
+        assert SECRET not in capsys.readouterr().out
+
+    def test_ordinary_messages_are_untouched(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(logs, "LOG_PATH", log_path)
+
+        logs.log("Publishing Meeting Notes")
+
+        assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")
+
+
+class TestLogPersistence:
+    """The log used to be truncated at the top of every run()."""
+
+    def test_a_new_run_keeps_the_previous_run(self, tmp_path, monkeypatch):
+        """`watch` calls run() every interval; it used to keep only the last."""
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(logs, "LOG_PATH", log_path)
+
+        logs.log("connection refused")
+        logs.mark_run_start()
+        logs.log("all good")
+
+        written = log_path.read_text(encoding="utf-8")
+        assert "connection refused" in written
+        assert "all good" in written
+
+    def test_log_is_silent_on_the_console_when_quiet(self, tmp_path, monkeypatch, capsys):
+        log_path = tmp_path / "pipeline.log"
+        monkeypatch.setattr(logs, "LOG_PATH", log_path)
+        logs.configure(log_path, quiet=True)
+
+        logs.log("Publishing Meeting Notes")
+
+        assert capsys.readouterr().out == ""
+        assert "Publishing Meeting Notes" in log_path.read_text(encoding="utf-8")

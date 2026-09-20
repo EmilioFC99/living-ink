@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 """Process notebooks: preprocess PNGs, run OCR, aggregate text, publish notes."""
 
+import atexit
 import datetime
 import hashlib
-import json
 import logging
 import os
-import re
 import sqlite3
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
-from PIL import Image, ImageFilter, ImageOps
 
 from living_ink import logs, state
 from living_ink.cache import CACHE_DIRNAME, RENDER_CACHE_DIRNAME, RenderCache, TranscriptCache
 from living_ink.clean import configure as configure_ai_provider
-from living_ink.clean import (
-    ocr_and_repair,
-    transcription_fingerprint,
-    vision_ocr_available,
-)
+from living_ink.clean import vision_ocr_available
 from living_ink.config import (
     ConfigurationMissing,
     apply_status,
@@ -37,6 +29,22 @@ from living_ink.config import (
     validate_config,
 )
 from living_ink.core.document import Document, Page, PublishContext, PublishResult
+from living_ink.core.listing import (
+    document_version,
+    get_document_type,
+    get_notebook_path,
+    get_val,
+)
+from living_ink.core.selection import (
+    NOT_TARGETED,
+    WRONG_TYPE,
+    Candidate,
+    Selection,
+    SelectionCriteria,
+    select,
+)
+from living_ink.core.stages import Transcriber, prepare_pages, write_transcript
+from living_ink.core.temp import DocumentWorkspace, page_number, purge_all
 from living_ink.destinations import (
     DESTINATION_REGISTRY,
     Destination,
@@ -45,8 +53,10 @@ from living_ink.destinations import (
     build_destinations,
 )
 from living_ink.devices import default_reading
+from living_ink.logs import log
 from living_ink.redact import redact, register_secret
 from living_ink.report import (
+    DEFERRED,
     FAILED,
     PUBLISHED,
     SKIPPED,
@@ -106,20 +116,18 @@ ROOT = find_repo_root()
 # All user runtime artifacts (PNGs, PDFs, OCR texts, logs, state) live under standard XDG DATA_DIR
 DATA_DIR = get_data_dir()
 
-WHITE_DIR = DATA_DIR / "remarkable_pngs_white"
-VISION_DIR = DATA_DIR / "remarkable_pngs_for_vision"
-OCR_DIR = DATA_DIR / "output"  # OCR text files
-PDF_DIR = DATA_DIR / "remarkable_pdfs"
-DOCS_DIR = DATA_DIR / "remarkable_documents"
+# One subdirectory per document, named by its id. Five directories keyed on
+# the sanitised *title* used to live here instead, which is how two similarly
+# named notebooks came to share their pages. See living_ink.core.temp.
+WORK_DIR = DATA_DIR / "work"
 # Deliberately not one of the temp dirs: the whole value of a cached
 # transcription is that it outlives the purge which removes the page it came
 # from. See living_ink.cache.
 TRANSCRIPT_CACHE_DIR = DATA_DIR / CACHE_DIRNAME
 RENDER_CACHE_DIR = DATA_DIR / RENDER_CACHE_DIRNAME
 LOGS_DIR = get_logs_dir()
-LOG_PATH = LOGS_DIR / "pipeline.log"
 
-#: Everything log() emits goes through here, alongside the rest of the package.
+#: Everything this module emits goes through here, alongside the rest of the package.
 _logger = logging.getLogger(__name__)
 
 
@@ -136,7 +144,7 @@ def ensure_runtime_dirs() -> None:
     global _runtime_dirs_ready
     if _runtime_dirs_ready:
         return
-    for folder in (DATA_DIR, LOGS_DIR, WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR):
+    for folder in (DATA_DIR, LOGS_DIR, WORK_DIR):
         folder.mkdir(parents=True, exist_ok=True)
     _runtime_dirs_ready = True
 
@@ -430,6 +438,26 @@ def reset_state_store() -> None:
         _state_store = None
 
 
+def reset_caches() -> None:
+    """Drop everything this module holds for the lifetime of the process.
+
+    The three accessors above cache so that one run reads ``config.yml`` once.
+    Across runs that is wrong: ``watch`` ticks in a single process for weeks,
+    so a config read at start would be the config for ever, and
+    ``get_default_destinations()`` would hand every tick the *same mutable
+    objects* — one tick's per-run override leaking into the next.
+
+    The scheduler calls this between ticks. A single ``sync`` never needs it,
+    which is why the accessors do not invalidate themselves on a timer: the
+    boundary is a run ending, and only the caller knows where that is.
+    """
+    global _default_config, _default_destinations
+
+    _default_config = None
+    _default_destinations = None
+    reset_state_store()
+
+
 def load_processed_log(dest_name: str):
     """Return the published version of every document for one destination.
 
@@ -443,7 +471,15 @@ def load_processed_log(dest_name: str):
 
 
 def add_to_processed_log(
-    dest_name: str, doc_id, version, run_id=None, external_id=None, target=None
+    dest_name: str,
+    doc_id,
+    version,
+    *,
+    recipe: str,
+    pages_failed: int = 0,
+    run_id=None,
+    external_id=None,
+    target=None,
 ):
     """Record that a document reached a destination.
 
@@ -451,74 +487,30 @@ def add_to_processed_log(
         dest_name: Destination class name.
         doc_id: reMarkable document id.
         version: Device version or content hash that was published.
+        recipe: Digest of everything other than the document that shaped the
+            output, so a prompt edit or a settings change makes it pending
+            again even though the tablet's version is unchanged.
+        pages_failed: How many pages did not transcribe, so a partial publish
+            stays pending and the next run retries it.
         run_id: Run that published it, when one is in progress.
         external_id: Identifier the destination gave the note, so the next
             sync replaces that exact note rather than one sharing its title.
         target: Where the note landed, so a later run can tell it has moved.
     """
     get_state_store().record_publication(
-        doc_id, dest_name, version, run_id=run_id, external_id=external_id, target=target
+        doc_id,
+        dest_name,
+        version,
+        recipe=recipe,
+        pages_failed=pages_failed,
+        run_id=run_id,
+        external_id=external_id,
+        target=target,
     )
 
 
-def preprocess_image(in_path: Path, out_path: Path):
-    im = Image.open(in_path)
-    # Always composite onto a white background, regardless of mode
-    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
-        bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-        bg.paste(im, (0, 0), im if im.mode == "RGBA" else None)
-        im = bg.convert("RGB")
-    else:
-        im = im.convert("RGB")
-
-    # Autocontrast
-    im = ImageOps.autocontrast(im, cutoff=2)
-
-    # Upscale 1.5x (rounded)
-    w, h = im.size
-    im = im.resize((int(w * 1.5), int(h * 1.5)), resample=Image.Resampling.LANCZOS)
-
-    # Sharpen
-    im = im.filter(ImageFilter.SHARPEN)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    im.save(out_path, quality=95)
-
-
-def sanitize_filename(name: str) -> str:
-    """Make a notebook name safe for a temporary working-file path.
-
-    Note:
-        This is deliberately *not* the same as
-        ``ObsidianDestination._sanitize_filename``. This one names throwaway
-        artifacts under the data directory, so it collapses spaces to
-        underscores for shell-friendliness; the Obsidian one names files the
-        user will see in their vault, so it keeps spaces and uses hyphens.
-        Merging the two would silently rename every note in existing vaults.
-
-    Args:
-        name: Raw notebook name.
-
-    Returns:
-        A path-safe variant of the name.
-    """
-    return name.replace("/", "_").replace("\\", "_").replace(" ", "_")
-
-
-def log(msg):
-    # Redacted at the single choke point rather than at each of the ~90 call
-    # sites: pipeline.log is the file a user attaches to a bug report.
-    msg = redact(str(msg))
-    # Console and file are separate decisions now: --quiet silences the first,
-    # and the second is a rotating handler shared with every other module's
-    # logger calls, so the file holds more than just these ~90 messages.
-    logs.console(msg)
-    logs.ensure_configured(LOG_PATH)
-    _logger.info(msg)
-
-
 def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
-    """Clean all temporary working folders (PNG, OCR, PDF, Vision, Documents) and zip archives.
+    """Delete every document workspace left on disk.
 
     Args:
         keep_temp: If True, preserve files on disk for debugging.
@@ -527,62 +519,32 @@ def cleanup_temp_artifacts(keep_temp: bool = False) -> None:
         log("Preserving temporary working files (--keep-temp enabled).")
         return
 
-    import shutil
-
-    temp_folders = [WHITE_DIR, VISION_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]
-    for folder in temp_folders:
-        if folder.exists():
-            for item in folder.iterdir():
-                try:
-                    if item.is_file() or item.is_symlink():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                except OSError as e:
-                    logging.debug("Failed to remove temporary item %s: %s", item, e)
-            folder.mkdir(parents=True, exist_ok=True)
-
-    # Clean any lingering zip archives in DATA_DIR
-    if DATA_DIR.exists():
-        for zip_file in DATA_DIR.glob("*.zip"):
-            try:
-                zip_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+    purge_all(WORK_DIR)
 
 
-def clean_notebook_temp_artifacts(safe_notebook: str, keep_temp: bool = False) -> None:
-    """Clean temporary artifacts for a specific completed notebook.
+_temp_cleanup_registered = False
+_temp_cleanup_keep = False
+
+
+def register_temp_cleanup(keep_temp: bool) -> None:
+    """Arrange for the temp folders to be purged when the process exits.
+
+    Once per process, not once per run. ``watch`` loops in a single process for
+    weeks, and registering inside each run leaves one handler per tick — a list
+    that only grows, each entry pinning the ``keep_temp`` of a run that ended
+    long ago. The flag lives beside the registration instead, so the last run
+    to ask is the one the exit handler obeys.
 
     Args:
-        safe_notebook: Sanitized notebook name prefix.
-        keep_temp: If True, preserve files on disk.
+        keep_temp: Whether the run now starting wants its artifacts preserved.
     """
-    if keep_temp:
+    global _temp_cleanup_registered, _temp_cleanup_keep
+
+    _temp_cleanup_keep = keep_temp
+    if _temp_cleanup_registered:
         return
-
-    import shutil
-
-    for folder in [WHITE_DIR, OCR_DIR, PDF_DIR, DOCS_DIR]:
-        if folder.exists():
-            for p in folder.glob(f"{safe_notebook}*"):
-                try:
-                    if p.is_file() or p.is_symlink():
-                        p.unlink()
-                    elif p.is_dir():
-                        shutil.rmtree(p)
-                except OSError:
-                    pass
-
-    if VISION_DIR.exists():
-        for p in VISION_DIR.glob(f"{safe_notebook}*"):
-            try:
-                if p.is_file() or p.is_symlink():
-                    p.unlink()
-                elif p.is_dir():
-                    shutil.rmtree(p)
-            except OSError:
-                pass
+    atexit.register(lambda: cleanup_temp_artifacts(keep_temp=_temp_cleanup_keep))
+    _temp_cleanup_registered = True
 
 
 def validate_environment():
@@ -638,157 +600,6 @@ def validate_environment():
         raise ConfigurationMissing(msg, hint=docs_hint)
 
     log("Configuration valid.")
-
-
-def get_val(item: Any, key: str) -> Any:
-    """Safely get a property or dictionary key from a document item."""
-    if isinstance(item, dict):
-        return item.get(key)
-    return getattr(item, key, getattr(item, key.lower(), None))
-
-
-def document_version(item: Any) -> str:
-    """Return the value that decides whether a document has changed.
-
-    The content hash when the transport offers one, the version counter
-    otherwise. Lives here rather than inline in
-    :meth:`SyncPipeline.filter_pending_documents` because ``sync --status``
-    predicts that decision, and a preview that disagrees with the run it
-    predicts is worse than no preview.
-
-    Args:
-        item: A document from the transport's listing.
-
-    Returns:
-        The content hash, or the version number as a string, or ``"1"``.
-    """
-    value = get_val(item, "hash")
-    if value:
-        return str(value)
-    try:
-        return str(int(get_val(item, "Version")))
-    except (ValueError, TypeError):
-        return "1"
-
-
-def get_notebook_path(item: Any, id_map: Dict[str, Any]) -> str:
-    """Construct the folder path for an item using the ID lookup map."""
-    path = []
-    current = item
-    while get_val(current, "Parent"):
-        parent_id = get_val(current, "Parent")
-        if parent_id == "trash":
-            path.insert(0, "[TRASH]")
-            break
-        parent = id_map.get(parent_id)
-        if parent:
-            parent_name = get_val(parent, "VissibleName") or get_val(parent, "VisibleName")
-            path.insert(0, parent_name)
-            current = parent
-        else:
-            break
-    return " / ".join(path)
-
-
-def normalize_path_str(path_str: str) -> str:
-    """Normalize a path string by stripping whitespace around slashes and lowercasing."""
-    parts = [p.strip().lower() for p in path_str.replace("\\", "/").split("/") if p.strip()]
-    return "/".join(parts)
-
-
-def matches_notebook_target(item: Any, target_str: str, id_map: Dict[str, Any]) -> bool:
-    """Check if a document matches a target string by ID, name, or folder path.
-
-    Args:
-        item: Document item.
-        target_str: Search target (name, folder path, or document UUID).
-        id_map: Map of ID -> Document for resolving parent folders.
-
-    Returns:
-        True if the item matches the target.
-    """
-    t = target_str.strip()
-    if not t:
-        return False
-
-    # 1. Exact ID match (case-insensitive)
-    doc_id = str(get_val(item, "ID") or getattr(item, "id", "") or "").strip()
-    if doc_id.lower() == t.lower():
-        return True
-
-    # 2. Name match (case-insensitive, exact or substring)
-    name = str(
-        get_val(item, "VissibleName")
-        or get_val(item, "VisibleName")
-        or getattr(item, "name", "")
-        or ""
-    ).strip()
-    if name.lower() == t.lower() or t.lower() in name.lower():
-        return True
-
-    # 3. Path match: e.g. "Work/Notes" or "Work / Notes"
-    folder_path = get_notebook_path(item, id_map)
-    if folder_path:
-        full_spaced = f"{folder_path} / {name}"
-        full_slash = f"{folder_path}/{name}"
-        t_norm = normalize_path_str(t)
-        norm_spaced = normalize_path_str(full_spaced)
-        norm_slash = normalize_path_str(full_slash)
-        if t_norm == norm_spaced or t_norm == norm_slash or t_norm in norm_spaced:
-            return True
-
-    return False
-
-
-def get_document_type(item: Any, client: Optional[Any] = None) -> str:
-    """Determine which registered source handles a document.
-
-    Three signals, strongest first: the ``fileType`` the transport reports, the
-    extension of a file listed against the document, and the extension of its
-    display title. Every one of them is answered by
-    :mod:`living_ink.sources`, so adding a document type does not mean editing
-    this function.
-
-    Args:
-        item: The document/metadata item or dict.
-        client: Optional API client to query for file type.
-
-    Returns:
-        The name of a registered source — ``'notebook'``, ``'pdf'`` or
-        ``'epub'`` today, and the fallback source's name when nothing matches.
-    """
-    from living_ink.sources import fallback_source, source_for_file_type, source_for_filename
-
-    if client is not None:
-        try:
-            source = source_for_file_type(client.get_file_type(item))
-            if source:
-                return source.name
-        except Exception:
-            # Deliberately broad. This is a probe against whichever transport
-            # happens to be connected, and the filename fallback below answers
-            # the question just as well. A type lookup must never be the reason
-            # a document drops out of discovery.
-            logging.debug("get_file_type probe failed", exc_info=True)
-
-    files = get_val(item, "files") or []
-    for f in files:
-        fid = str(f.get("id") if isinstance(f, dict) else getattr(f, "id", ""))
-        source = source_for_filename(fid)
-        if source:
-            return source.name
-
-    name = str(
-        get_val(item, "VissibleName")
-        or get_val(item, "VisibleName")
-        or getattr(item, "name", "")
-        or ""
-    )
-    source = source_for_filename(name)
-    if source:
-        return source.name
-
-    return fallback_source().name
 
 
 def to_datetime(value: Any) -> Optional[datetime.datetime]:
@@ -942,94 +753,6 @@ def select_notebook_interactive(
         print_func(f"Invalid selection '{raw}'. Please enter 1-{len(matches)}, 'a', or 'q'.")
 
 
-@dataclass(frozen=True)
-class SyncOptions:
-    """Per-run choices for a single sync, separate from the persisted config.
-
-    These are the knobs a caller sets at invocation time — the CLI flags, in
-    practice. Config supplies the defaults; a field left at ``None`` means
-    "no override, use whatever config says". The boolean flags default to
-    ``False`` rather than ``None`` because they are store-true switches with no
-    meaningful third state.
-
-    Kept frozen so a pipeline's options cannot drift underneath it mid-run; use
-    :meth:`merged_with` to derive a variant.
-
-    Attributes:
-        notebook: Target a single notebook by name, folder path, or document ID.
-        limit: Maximum number of notebooks to process. None or 0 means "use config".
-        ssh: Force the USB SSH transport.
-        cloud: Force the reMarkable Cloud transport.
-        preferred_connection: Explicit transport preference ('ssh' or 'cloud'),
-            used when neither ``ssh`` nor ``cloud`` is set.
-        sync_pdfs: Include PDF documents. None means "use config".
-        sync_epubs: Include EPUB documents. None means "use config".
-        all_types: Include every document type; overrides sync_pdfs/sync_epubs.
-        keep_temp: Preserve rendered PNGs and OCR transcripts for debugging.
-        dry_run: Do everything except publish, so a run can be inspected first.
-        prune: Delete notes whose notebook is gone from the tablet, instead of
-            only reporting them.
-        json_output: Print the run summary as JSON instead of a table.
-    """
-
-    notebook: Optional[str] = None
-    limit: Optional[int] = None
-    ssh: bool = False
-    cloud: bool = False
-    preferred_connection: Optional[str] = None
-    sync_pdfs: Optional[bool] = None
-    sync_epubs: Optional[bool] = None
-    all_types: bool = False
-    keep_temp: bool = False
-    dry_run: bool = False
-    prune: bool = False
-    json_output: bool = False
-
-    @classmethod
-    def from_args(cls, args: Any) -> "SyncOptions":
-        """Build options from a parsed argparse namespace.
-
-        This is the single place that knows CLI flag names, so adding a flag
-        means touching the parser and this method — not the pipeline internals.
-
-        Note:
-            ``--sync-pdfs`` / ``--sync-epubs`` are store-true flags, so an unset
-            flag is mapped to None ("defer to config") rather than to False
-            ("explicitly disable"), which would silently override the config.
-
-        Args:
-            args: Namespace produced by the sync subparser.
-
-        Returns:
-            A populated SyncOptions.
-        """
-        return cls(
-            notebook=getattr(args, "notebook", None),
-            limit=getattr(args, "limit", None),
-            ssh=getattr(args, "ssh", False),
-            cloud=getattr(args, "cloud", False),
-            sync_pdfs=getattr(args, "sync_pdfs", False) or None,
-            sync_epubs=getattr(args, "sync_epubs", False) or None,
-            all_types=getattr(args, "all_types", False),
-            keep_temp=getattr(args, "keep_temp", False),
-            dry_run=getattr(args, "dry_run", False),
-            prune=getattr(args, "prune", False),
-            json_output=getattr(args, "json", False),
-        )
-
-    def merged_with(self, **overrides: Any) -> "SyncOptions":
-        """Return a copy with the supplied non-None fields replaced.
-
-        Args:
-            **overrides: Field names and values. None values are ignored so
-                callers can pass through optional arguments unconditionally.
-
-        Returns:
-            A new SyncOptions; the receiver is unchanged.
-        """
-        return replace(self, **{k: v for k, v in overrides.items() if v is not None})
-
-
 class _StopProcessing(Exception):
     """Raised by a stage when there is nothing left to do for a document.
 
@@ -1080,12 +803,23 @@ class DocumentJob:
     notebook_id: Any
     doc_type: str
     version: Any
-    safe_name: str
+    #: Where this document's throwaway artifacts go. Keyed on the document id,
     folder_path: str
     display_title: str
     keep_temp: bool
+    #: Where this document's throwaway artifacts go. Derived from the document
+    #: id rather than the title, so two notebooks with similar names cannot
+    #: write over each other's pages. Left unset by everything but a test.
+    workspace: DocumentWorkspace = None  # type: ignore[assignment]
+    #: Where the original PDF or EPUB inside the zip is unpacked, for the
+    #: sources that have one. Inside the workspace, like everything else.
     doc_file_path: Optional[Path] = None
 
+    #: Recipe digest per destination ``state_key``, computed by the selection
+    #: pass that decided this document was pending. Carried rather than
+    #: recomputed so the row recorded on the way out describes the inputs the
+    #: decision was made on, even under ``--force``.
+    recipes: Dict[str, str] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
     imgs: List[Path] = field(default_factory=list)
     # One entry per rendered page, in page order. Built once the images are
@@ -1103,7 +837,11 @@ class DocumentJob:
     would_publish_to: List[str] = field(default_factory=list)
     pre_paths: List[Path] = field(default_factory=list)
     extracted_doc_text: str = ""
-    clean_out_txt: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        """Derive the workspace from the document id when none was given."""
+        if self.workspace is None:
+            self.workspace = DocumentWorkspace(WORK_DIR, str(self.notebook_id))
 
     def modified_at(self) -> Optional[datetime.datetime]:
         """Return when the tablet says this notebook was last written on.
@@ -1131,16 +869,15 @@ class DocumentJob:
             The page number to show in the section header.
         """
         if index < len(self.imgs):
-            match = re.search(r"page-(\d+)", self.imgs[index].name, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
+            number = page_number(self.imgs[index])
+            if number is not None:
+                return number
         return index + 1
 
     def source_file(self) -> Optional[Path]:
         """Return the original PDF/EPUB to attach, if one was retrieved."""
-        if self.doc_file_path and self.doc_file_path.exists():
-            return self.doc_file_path
-        return None
+        path = self.doc_file_path
+        return path if path and path.exists() else None
 
     def folder_parts(self) -> Tuple[str, ...]:
         """Return the reMarkable folder hierarchy, outermost first.
@@ -1164,27 +901,56 @@ class SyncPipeline:
 
     def __init__(
         self,
-        options: Optional[SyncOptions] = None,
+        *,
+        notebook: Optional[str] = None,
+        limit: Optional[int] = None,
+        ssh: bool = False,
+        cloud: bool = False,
+        sync_pdfs: Optional[bool] = None,
+        sync_epubs: Optional[bool] = None,
+        all_types: bool = False,
+        keep_temp: bool = False,
+        dry_run: bool = False,
+        prune: bool = False,
+        json_output: bool = False,
         config_path: Optional[Path] = None,
         data_dir: Optional[Path] = None,
         destinations: Optional[List[Destination]] = None,
     ):
-        """Initialize the SyncPipeline by resolving options against configuration.
+        """Initialize the SyncPipeline by resolving this run's choices once.
 
-        Every per-run knob arrives in ``options``; config supplies the defaults
-        that the options do not override. The resolution happens once, here, so
-        that by the time :meth:`run` is called the pipeline's state is settled.
+        The per-run knobs used to arrive as a ``SyncOptions`` value object that
+        this method then merged against config with a hand-written precedence
+        ladder — a second implementation of the one in
+        :meth:`living_ink.settings.Settings._pick`, and the two had already
+        disagreed about what a zero ``--limit`` means. The settings-backed
+        knobs are now handed to :meth:`Settings.resolve` as its ``flags``
+        layer, so "a flag outranks the environment outranks the file" is
+        written down in exactly one place. What is left here is the handful of
+        choices that shape a single run and have no persisted form at all.
+
+        Keyword-only on purpose: every one of these is a bare boolean or a bare
+        string at the call site, and a positional ``True`` says nothing about
+        which switch it flipped.
 
         Args:
-            options: Per-run overrides. Defaults to an all-defaults SyncOptions,
-                i.e. "do exactly what the config says".
+            notebook: Target a single document by name, folder path, or id.
+            limit: Most documents to process. 0 or None defers to config.
+            ssh: Force the USB transport for this run.
+            cloud: Force the reMarkable Cloud transport for this run.
+            sync_pdfs: Include annotated PDFs. None defers to config.
+            sync_epubs: Include annotated EPUBs. None defers to config.
+            all_types: Include every registered source type, whatever the
+                config and the two flags above say.
+            keep_temp: Preserve rendered PNGs and transcripts for debugging.
+            dry_run: Do everything except publish.
+            prune: Delete notes whose document is gone from the tablet.
+            json_output: Print the run report as JSON instead of a table.
             config_path: Path to YAML config file. Defaults to standard config path.
             data_dir: Path to runtime data directory. Defaults to standard data dir.
             destinations: Explicit list of destinations. Defaults to active destinations from config.
         """
         ensure_runtime_dirs()
-        self.options = options or SyncOptions()
-        opts = self.options
 
         # Filled in by _learn_device once the transport is up. Until then the
         # named default stands in, so nothing downstream has to handle None.
@@ -1192,12 +958,12 @@ class SyncPipeline:
 
         self.config_path = config_path or get_config_path()
         self.data_dir = data_dir or DATA_DIR
-        self.dry_run = opts.dry_run
-        self.prune = opts.prune
-        self.json_output = opts.json_output
+        self.dry_run = dry_run
+        self.prune = prune
+        self.json_output = json_output
         # A dry run's whole output is the transcripts it leaves behind, so it
         # implies --keep-temp; purging them would delete what it points at.
-        self.keep_temp = opts.keep_temp or opts.dry_run
+        self.keep_temp = keep_temp or dry_run
 
         if self.config_path and self.config_path != get_config_path():
             self.raw_config = load_yaml_config(self.config_path)
@@ -1212,48 +978,40 @@ class SyncPipeline:
                 destinations if destinations is not None else list(get_default_destinations())
             )
 
-        # Config and environment are merged once, here; the CLI options layered
-        # on top are the only thing that outranks them.
-        base = Settings.resolve(self.raw_config)
+        self.target_notebook = notebook.strip() if notebook else None
+        self.all_types = all_types
 
-        # 1. Connection properties
-        if opts.ssh:
-            preferred, use_ssh = "ssh", True
-        elif opts.cloud:
-            preferred, use_ssh = "cloud", False
-        elif opts.preferred_connection:
-            preferred = opts.preferred_connection.strip().lower()
-            use_ssh = preferred == "ssh"
-        else:
-            preferred, use_ssh = base.preferred_connection, base.use_ssh
-
-        # 2. Document types and limits
-        self.target_notebook = opts.notebook.strip() if opts.notebook else None
-        self.all_types = opts.all_types
-
-        if opts.all_types:
-            sync_pdfs = sync_epubs = True
-        else:
-            sync_pdfs = base.sync_pdfs if opts.sync_pdfs is None else opts.sync_pdfs
-            sync_epubs = base.sync_epubs if opts.sync_epubs is None else opts.sync_epubs
-
-        limit = (
-            opts.limit if opts.limit is not None and opts.limit > 0 else base.max_notebooks_per_run
-        )
-
-        self.settings = replace(
-            base,
-            preferred_connection=preferred,
-            use_ssh=use_ssh,
-            sync_pdfs=sync_pdfs,
-            sync_epubs=sync_epubs,
-            max_notebooks_per_run=limit,
+        # None means "this flag was not given", which is what lets config and
+        # the environment be heard; a False here would be an explicit "off"
+        # and would silently overrule the file. ``--all-types`` is the one
+        # switch that does overrule it, which is why it resolves to True
+        # rather than to None.
+        self.settings = Settings.resolve(
+            self.raw_config,
+            flags={
+                "preferred_connection": "ssh" if ssh else "cloud" if cloud else None,
+                "use_ssh": True if ssh else False if cloud else None,
+                "sync_pdfs": True if all_types else sync_pdfs,
+                "sync_epubs": True if all_types else sync_epubs,
+                # Not greater than zero is "no override", never "process none":
+                # ``--limit 0`` is what the parser hands over when the flag was
+                # left off entirely.
+                "max_notebooks_per_run": limit if limit and limit > 0 else None,
+                "prune": prune or None,
+                "output_json": json_output or None,
+            },
         )
 
         # Opened by run(); every state row written during that run carries it,
         # so "what did the 03:00 sync touch" has an answer.
         self.run_id: Optional[int] = None
         self.report: Optional[RunReport] = None
+
+        # Set here and not at the top of _execute(): anything that raises
+        # before the run proper starts — a Ctrl+C landing on entry, a failed
+        # connection — is read back by _run_recorded(), and an unset attribute
+        # there turns the real error into an AttributeError about counting.
+        self._counts: Tuple[int, int, int] = (0, 0, 0)
 
         # 3. Transcription cache. Pages are transcribed concurrently, so the
         # hit and miss tallies need a lock even though the entries themselves
@@ -1263,9 +1021,7 @@ class SyncPipeline:
             enabled=self.settings.transcript_cache,
             max_age_days=self.settings.cache_max_age_days,
         )
-        self._cache_lock = threading.Lock()
-        self._cache_hits = 0
-        self._cache_misses = 0
+        self.transcriber = Transcriber(self.cache, self.settings)
 
         # 5. Render cache. Rendering costs CPU rather than money, but it is
         # the slowest local step and just as pure, so it caches the same way.
@@ -1373,51 +1129,148 @@ class SyncPipeline:
         else:
             _logger.info("Device: %s", reading.describe())
 
-    def discover_documents(self, client: Any) -> Tuple[List[Any], Dict[str, Any]]:
-        """Discover documents in the tablet library matching configured document types.
+    def _criteria(self) -> SelectionCriteria:
+        """Translate this run's resolved options into what narrows it.
+
+        The one place the pipeline's long-standing attribute names are turned
+        into the vocabulary :mod:`living_ink.core.selection` speaks, so the
+        preview and the run can be handed the same object.
 
         Returns:
-            Tuple of (candidate_documents_list, id_map_dictionary).
+            The criteria for this run.
         """
-        collection = client.get_meta_items()
-        id_map = {get_val(item, "ID"): item for item in collection}
+        from living_ink.sources import SOURCE_REGISTRY
 
-        is_targeted = bool(self.target_notebook)
+        if self.all_types:
+            types = frozenset(SOURCE_REGISTRY)
+        else:
+            enabled = {"notebook"}
+            if self.sync_pdfs:
+                enabled.add("pdf")
+            if self.sync_epubs:
+                enabled.add("epub")
+            types = frozenset(enabled)
 
-        candidates = [
-            item
-            for item in collection
-            if get_val(item, "Type") == "DocumentType"
-            and (get_val(item, "VissibleName") or get_val(item, "VisibleName"))
-            and not get_notebook_path(item, id_map).startswith("[TRASH]")
-        ]
+        return SelectionCriteria(
+            target=self.target_notebook,
+            types=types,
+            # Both come from the config file and had no reader at all, so
+            # ``config`` and ``info`` reported Templates and Quick Sheets as
+            # excluded while every run rendered and transcribed them at cost.
+            exclude=frozenset(self.settings.sync_exclude or ()),
+            tags=frozenset(self.settings.sync_tags or ()),
+            # A named notebook is not part of a sweep, so the sweep's cap does
+            # not apply to it — and applying it would deal the second of two
+            # same-named matches into ``deferred``, where the prompt that asks
+            # the user which one they meant can no longer see it.
+            limit=None if self.target_notebook else self.limit,
+            # Naming a notebook is asking for that notebook, whether or not the
+            # comparison thinks it is current. There is no --force flag yet;
+            # this is the one thing that already behaved like one.
+            force=bool(self.target_notebook),
+        )
 
-        notebooks = []
-        skipped_pdfs = 0
-        skipped_epubs = 0
-        for item in candidates:
-            dtype = get_document_type(item, client)
-            if dtype == "notebook":
-                notebooks.append(item)
-            elif dtype == "pdf":
-                if self.sync_pdfs or is_targeted:
-                    notebooks.append(item)
-                else:
-                    skipped_pdfs += 1
-            elif dtype == "epub":
-                if self.sync_epubs or is_targeted:
-                    notebooks.append(item)
-                else:
-                    skipped_epubs += 1
+    def select_documents(self, listing: Sequence[Any], client: Any) -> Optional[Selection]:
+        """Decide what this run will touch, and record the library it saw.
 
-        if skipped_pdfs > 0:
-            log(f"Skipped {skipped_pdfs} PDF documents (enable with --sync-pdfs or in config.yml).")
-        if skipped_epubs > 0:
+        The inventory is written first, and for every document rather than
+        only the pending ones: "what is on my tablet" has to be answerable
+        without talking to the tablet again, and it is recorded *before* the
+        comparison so the classifier judges this run's facts.
+
+        Args:
+            listing: Everything the transport reported.
+            client: The connected transport, passed on so the document type is
+                the one the device reports rather than one guessed from a title.
+
+        Returns:
+            The selection, including what was left out and why — or None when
+            ``--notebook`` named something the library does not contain, which
+            is a failed run rather than an empty one.
+        """
+        id_map = {get_val(item, "ID"): item for item in listing}
+        self._record_inventory(listing, id_map)
+
+        chosen = select(
+            listing,
+            self._criteria(),
+            get_state_store(),
+            self.destinations or get_default_destinations(),
+            settings=self.settings,
+            client=client,
+        )
+
+        if not self.target_notebook:
+            self._report_type_skips(chosen)
+            return chosen
+
+        log(f"Filtering for notebook: {self.target_notebook}")
+        if not chosen.to_process:
+            log(f"Notebook '{self.target_notebook}' not found in library. Exiting.")
+            return None
+        return self._disambiguate(chosen, id_map)
+
+    def _report_type_skips(self, chosen: Selection) -> None:
+        """Say how many documents were passed over for their type alone.
+
+        Counted from the selection rather than tallied during discovery, so the
+        number and the decision cannot disagree.
+
+        Args:
+            chosen: What this run decided to do.
+        """
+        skipped: Dict[str, int] = {}
+        for item, reason in chosen.skipped:
+            if reason == WRONG_TYPE:
+                source = get_document_type(item)
+                skipped[source] = skipped.get(source, 0) + 1
+
+        for source, count in sorted(skipped.items()):
             log(
-                f"Skipped {skipped_epubs} EPUB documents (enable with --sync-epubs or in config.yml)."
+                f"Skipped {count} {source.upper()} document(s) "
+                f"(enable with --sync-{source}s or in config.yml)."
             )
 
-        return notebooks, id_map
+    def _disambiguate(self, chosen: Selection, id_map: Dict[str, Any]) -> Selection:
+        """Let the user pick when ``--notebook`` matched more than one document.
+
+        Args:
+            chosen: The selection, already narrowed to the matches.
+            id_map: Every listed item by id, for rendering the choices.
+
+        Returns:
+            The same selection when there is nothing to disambiguate, otherwise
+            one narrowed to what the user chose — empty if they cancelled.
+        """
+        if not self.target_notebook:
+            return chosen
+
+        keep = select_notebook_interactive(
+            matches=[candidate.item for candidate in chosen.to_process],
+            query=self.target_notebook,
+            id_map=id_map,
+        )
+        if not keep:
+            log("Sync cancelled by user. Exiting.")
+            return replace(chosen, to_process=())
+
+        chosen_items = {id(item) for item in keep}
+        return replace(
+            chosen,
+            to_process=tuple(c for c in chosen.to_process if id(c.item) in chosen_items),
+        )
+
+    def _record_inventory(self, listing: Sequence[Any], id_map: Dict[str, Any]) -> None:
+        """Note every document the tablet listed in the state database.
+
+        Args:
+            listing: Everything the transport reported, folders included.
+            id_map: Every listed item by id, for resolving folder paths.
+        """
+        for item in listing:
+            if get_val(item, "Type") != "DocumentType":
+                continue
+            self._record_seen_document(item, get_val(item, "ID"), document_version(item), id_map)
 
     def _record_seen_document(
         self, item: Any, doc_id: str, version: Any, id_map: Dict[str, Any]
@@ -1452,100 +1305,10 @@ class SyncPipeline:
             # build. None of them is a reason to skip the document.
             log(f"⚠️ Could not record {doc_id} in the state database: {e}")
 
-    def filter_pending_documents(
-        self, notebooks: List[Any], id_map: Dict[str, Any]
-    ) -> Tuple[List[Any], Dict[str, List[Destination]], bool]:
-        """Determine which notebooks need updating for active destinations.
-
-        The decision is not made here. The listing is handed to
-        :meth:`~living_ink.state.StateStore.compare_with_listing`, which is the
-        same call ``living-ink sync --status`` makes, so the preview and the run
-        it predicts share one classifier rather than two expressions of the same
-        rule that are free to drift apart.
-
-        Returns:
-            Tuple of (notebooks_to_process, needs_update_map, should_continue_bool).
-        """
-        active_dests = self.destinations or get_default_destinations()
-        by_name = {dest.state_key: dest for dest in active_dests}
-
-        listing = []
-        for item in notebooks:
-            doc_id = get_val(item, "ID")
-            curr_val = document_version(item)
-
-            # Recorded whether or not it needs publishing: an inventory of what
-            # is on the device is what makes "what is pending" answerable
-            # without talking to the tablet again. Recorded *before* the
-            # comparison, so the classifier judges this run's facts.
-            self._record_seen_document(item, doc_id, curr_val, id_map)
-
-            listing.append(
-                {
-                    "id": doc_id,
-                    "name": get_val(item, "VissibleName") or get_val(item, "VisibleName"),
-                    "folder": get_notebook_path(item, id_map) or None,
-                    "doc_type": get_document_type(item),
-                    "version": curr_val,
-                }
-            )
-
-        rows, _ = get_state_store().compare_with_listing(listing, list(by_name))
-        # ``pending`` as well as ``needs_sync``: a status can want attention
-        # without owing any enabled destination a publish, and there is nothing
-        # for this loop to do about one that does not.
-        needs_update: Dict[str, List[Destination]] = {
-            row["id"]: [by_name[name] for name in row["pending"]]
-            for row in rows
-            if row["pending"] and row["status"].needs_sync
-        }
-
-        if self.target_notebook:
-            target_name = self.target_notebook
-            log(f"Filtering for notebook: {target_name}")
-
-            matched_items = [
-                item for item in notebooks if matches_notebook_target(item, target_name, id_map)
-            ]
-
-            if not matched_items:
-                log(f"Notebook '{target_name}' not found in library. Exiting.")
-                return [], {}, False
-
-            selected_items = select_notebook_interactive(
-                matches=matched_items,
-                query=target_name,
-                id_map=id_map,
-            )
-
-            if not selected_items:
-                log("Sync cancelled by user. Exiting.")
-                return [], {}, True
-
-            for it in selected_items:
-                doc_id = get_val(it, "ID")
-                needs_update[doc_id] = active_dests
-
-            return selected_items, needs_update, True
-
-        else:
-            candidates = [item for item in notebooks if get_val(item, "ID") in needs_update]
-
-            if not candidates:
-                log("No new or updated notebooks found for any active destination. Exiting.")
-                return [], {}, True
-
-            if self.limit > 0:
-                candidates = candidates[: self.limit]
-
-            return candidates, needs_update, True
-
     def process_notebook_item(
         self,
-        nb_item: Any,
+        candidate: Candidate,
         client: Any,
-        id_map: Dict[str, Any],
-        needs_update: Dict[str, List[Destination]],
         keep_temp: Optional[bool] = None,
     ) -> bool:
         """Process a single notebook or document item through extraction, OCR, and publishing.
@@ -1556,16 +1319,16 @@ class SyncPipeline:
         raises :class:`_StopProcessing` carrying the verdict to report.
 
         Args:
-            nb_item: reMarkable item metadata.
+            candidate: What the selection pass decided about this document —
+                its identity, its type, and the destinations that owe it a
+                publish. Nothing here re-derives any of it.
             client: reMarkable API client.
-            id_map: Mapping from document ID to metadata item.
-            needs_update: Mapping from document ID to target destinations.
             keep_temp: Whether to keep temporary files on disk.
 
         Returns:
             True if notebook was processed and published successfully, False otherwise.
         """
-        job = self._describe_job(nb_item, client, id_map, keep_temp)
+        job = self._describe_job(candidate, keep_temp)
 
         try:
             self._acquire_pages(job, client)
@@ -1573,7 +1336,7 @@ class SyncPipeline:
             self._preprocess_images(job)
             self._ocr_pages(job)
             self._write_transcripts(job)
-            success = self._publish(job, needs_update)
+            success = self._publish(job, candidate.pending)
         except _StopProcessing as stop:
             if stop.reason:
                 log(stop.reason)
@@ -1583,7 +1346,8 @@ class SyncPipeline:
 
         if success:
             log(f"Notebook {job.notebook} processing complete.")
-            clean_notebook_temp_artifacts(job.safe_name, keep_temp=job.keep_temp)
+            if not job.keep_temp:
+                job.workspace.purge()
         else:
             log(f"Notebook {job.notebook} processing FAILED.")
 
@@ -1655,21 +1419,84 @@ class SyncPipeline:
         except (sqlite3.Error, OSError, RuntimeError) as e:
             log(f"⚠️ Could not record the outcome for {job.notebook_id}: {e}")
 
+    def _process_one(self, candidate: Candidate, client: Any) -> bool:
+        """Process one document, and never let its failure end the run.
+
+        The stages catch ``_StopProcessing``, which is the failure they *mean*;
+        anything else — a transport that gave up after both fallbacks, a
+        truncated PNG that throws inside PIL — used to propagate out of the
+        batch loop, past ``_run_recorded``, to ``cli.main``. On the unattended
+        nightly run this product is built around, that meant document 12 of 40
+        took the other 28 with it: not processed, not recorded as failed, and
+        no run summary at all, because ``_print_summary`` is after the loop.
+
+        ``_transcribe_page`` already says "an error here costs one page, never
+        the document". This is the same rule one level up.
+
+        Args:
+            candidate: The document to process.
+            client: reMarkable API client.
+
+        Returns:
+            True if the document published, False if it failed for any reason.
+        """
+        try:
+            return self.process_notebook_item(
+                candidate=candidate,
+                client=client,
+                keep_temp=self.keep_temp,
+            )
+        except KeyboardInterrupt:
+            # Ctrl+C is the user ending the run, not this document failing.
+            raise
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            log(f"❌ {candidate.name} failed unexpectedly: {redact(reason)}")
+            self._record_candidate_failure(candidate, reason)
+            return False
+
+    def _record_candidate_failure(self, candidate: Candidate, reason: str) -> None:
+        """Report and remember a document that died before its stages could.
+
+        Reported from the candidate rather than the job, because the job is
+        one of the things that may not exist yet.
+
+        Args:
+            candidate: The document that failed.
+            reason: What went wrong, unredacted; redacted on the way out.
+        """
+        if self.report is not None:
+            self.report.add(
+                DocumentOutcome(
+                    name=candidate.name,
+                    doc_id=candidate.doc_id,
+                    status=FAILED,
+                    reason=redact(reason),
+                )
+            )
+        if self.dry_run:
+            return
+        try:
+            get_state_store().record_failure(candidate.doc_id, redact(reason))
+        except (sqlite3.Error, OSError, RuntimeError) as e:
+            log(f"⚠️ Could not record the outcome for {candidate.doc_id}: {e}")
+
     # ── Stage 1: identify ────────────────────────────────────────────────
 
     def _describe_job(
         self,
-        nb_item: Any,
-        client: Any,
-        id_map: Dict[str, Any],
+        candidate: Candidate,
         keep_temp: Optional[bool],
     ) -> DocumentJob:
-        """Resolve a library item into the job the later stages operate on.
+        """Turn a chosen document into the job the later stages operate on.
+
+        Every fact here was established by the selection pass and is carried
+        over rather than recomputed. Re-probing the type would mean a second
+        round trip per document *and* the risk of answering differently from
+        the answer the recipe was digested against.
 
         Args:
-            nb_item: reMarkable item metadata.
-            client: reMarkable API client, used to determine the document type.
-            id_map: Mapping from document ID to metadata item, for folder paths.
+            candidate: The document this run chose, and what it knows about it.
             keep_temp: Per-call override for keeping temp artifacts.
 
         Returns:
@@ -1677,26 +1504,28 @@ class SyncPipeline:
         """
         from living_ink.sources import source_for_name
 
-        notebook = get_val(nb_item, "VissibleName") or get_val(nb_item, "VisibleName")
-        doc_type = get_document_type(nb_item, client)
-        folder_path = get_notebook_path(nb_item, id_map)
-        safe_name = sanitize_filename(notebook)
+        notebook = candidate.name
+        doc_type = candidate.source
+        folder_path = candidate.folder
+        workspace = DocumentWorkspace(WORK_DIR, str(candidate.doc_id)).ensure()
+
         # Where the source document lands, if this type has one. The extension
         # comes from the registered source rather than a `doc_type in
         # ("pdf", "epub")` test, so a new format needs no edit here.
         suffix = source_for_name(doc_type).source_suffix
 
         job = DocumentJob(
-            item=nb_item,
+            item=candidate.item,
             notebook=notebook,
-            notebook_id=get_val(nb_item, "ID"),
+            notebook_id=candidate.doc_id,
             doc_type=doc_type,
-            version=_item_version(nb_item),
-            safe_name=safe_name,
+            version=_item_version(candidate.item),
             folder_path=folder_path,
             display_title=f"{folder_path} / {notebook}" if folder_path else notebook,
             keep_temp=self.keep_temp if keep_temp is None else keep_temp,
-            doc_file_path=(DOCS_DIR / f"{safe_name}.{suffix}" if suffix else None),
+            workspace=workspace,
+            doc_file_path=workspace.source_file(suffix),
+            recipes=dict(candidate.recipes),
         )
 
         type_badge = f" ({doc_type.upper()})" if doc_type != "notebook" else ""
@@ -1802,12 +1631,7 @@ class SyncPipeline:
 
     def _rendered_pages(self, job: DocumentJob) -> List[Path]:
         """List the page images already rendered for this job, in page order."""
-        prefix = job.safe_name + "."
-        return sorted(
-            p
-            for p in WHITE_DIR.iterdir()
-            if p.name.startswith(prefix) and p.suffix.lower() == ".png"
-        )
+        return job.workspace.rendered_pages()
 
     def _render_context(self) -> "RenderContext":
         """Build the render settings this run uses, once.
@@ -1841,7 +1665,7 @@ class SyncPipeline:
         from living_ink.extract import extract_tags_from_zip
         from living_ink.sources import SourceBundle, source_for_name
 
-        tmp_zip = DATA_DIR / f"{job.safe_name}.zip"
+        tmp_zip = job.workspace.ensure().download
         raw_bytes = client.download(job.item)
         if not raw_bytes:
             raise _StopProcessing(False, f"Failed to download document zip for {job.notebook}.")
@@ -2005,9 +1829,18 @@ class SyncPipeline:
             log(f"{reused} of {len(refs)} pages were already rendered; reused as-is.")
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
-        """Write one rendered page image into the white-background directory."""
-        out_img = WHITE_DIR / f"{job.safe_name}.page-{page}.png"
-        out_img.write_bytes(data)
+        """Write one rendered page image into the workspace, atomically.
+
+        Written to a sibling and renamed, because ``rendered_pages()`` decides
+        a page is already rendered from the filename alone. A direct write
+        interrupted half way leaves a valid-looking PNG holding nothing, and
+        the next run feeds it to the preprocessor and to OCR — publishing
+        either a crash or somebody's idea of what half an image says.
+        """
+        out_img = job.workspace.page_image(page)
+        tmp = out_img.with_suffix(out_img.suffix + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, out_img)
         log(f"{label}: {out_img}")
 
     # ── Stage 3: tags ────────────────────────────────────────────────────
@@ -2025,15 +1858,8 @@ class SyncPipeline:
     # ── Stage 4: preprocess ──────────────────────────────────────────────
 
     def _preprocess_images(self, job: DocumentJob) -> None:
-        """Prepare each page image for OCR, writing the results to VISION_DIR."""
-        pre_dir = VISION_DIR / job.safe_name
-        pre_dir.mkdir(parents=True, exist_ok=True)
-
-        for p in job.imgs:
-            out_p = pre_dir / p.name
-            preprocess_image(p, out_p)
-            job.pre_paths.append(out_p)
-
+        """Prepare each page image for OCR, writing the results beside them."""
+        job.pre_paths.extend(prepare_pages(job.imgs, job.workspace.preprocessed_dir))
         self._record_page_hashes(job)
 
     def _record_page_hashes(self, job: DocumentJob) -> None:
@@ -2156,9 +1982,9 @@ class SyncPipeline:
         197 publish, the three are marked, and the transcript cache makes the
         retry cost three API calls rather than two hundred.
         """
-        before = self._cache_hits
-        results = self._transcribe_pages(job.pre_paths)
-        reused = self._cache_hits - before
+        before = self.transcriber.hits
+        results = self.transcriber.transcribe(job.pre_paths)
+        reused = self.transcriber.hits - before
         if reused:
             log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
 
@@ -2176,119 +2002,6 @@ class SyncPipeline:
             if self.report:
                 self.report.warn(f"{job.notebook} {page.label}: {page.error}")
 
-    def _transcribe_pages(self, paths: List[Path]) -> List[Tuple[str, Optional[str]]]:
-        """Transcribe pages, several at a time, and return them in page order.
-
-        A page is one network round trip and nothing else, so running a few
-        concurrently is most of the wall-clock win available in a sync. The
-        ceiling is the AI provider's rate limit, which is why the width is the
-        configurable ``ocr_concurrency`` rather than the page count.
-
-        Args:
-            paths: Prepared page images, in page order.
-
-        Returns:
-            One ``(text, error)`` pair per page, in the order given.
-        """
-        width = min(self.settings.ocr_concurrency, len(paths))
-        if width <= 1:
-            return [self._transcribe_page(p) for p in paths]
-
-        log(f"Transcribing {len(paths)} pages, {width} at a time...")
-        with ThreadPoolExecutor(max_workers=width) as pool:
-            # ``map`` yields in submission order, so pages stay in page order
-            # however the calls happen to finish.
-            return list(pool.map(self._transcribe_page, paths))
-
-    def _transcribe_page(self, path: Path) -> Tuple[str, Optional[str]]:
-        """Transcribe one page, from the cache when it is there.
-
-        Args:
-            path: The prepared page image.
-
-        Returns:
-            ``(text, error)``. A blank page is ``("", None)`` and a failed one
-            is ``("", "<reason>")`` — the two are indistinguishable by text
-            alone, which is the whole reason the second element exists. An
-            error here costs one page, never the document: the caller marks a
-            gap and publishes the rest.
-        """
-        key = self._cache_key(path)
-        if key:
-            cached = self.cache.get(key)
-            if cached is not None:
-                with self._cache_lock:
-                    self._cache_hits += 1
-                log(f"  Cached: {path.name}")
-                return cached, None
-            with self._cache_lock:
-                self._cache_misses += 1
-
-        try:
-            return self._cached(key, self._vision_ocr_page(path)), None
-        except Exception as e:
-            # Deliberately broad, and it does not swallow: the reason is put on
-            # the page, warned about, and counted. An unreadable image or a
-            # provider that finally gave up used to propagate out of the thread
-            # pool and fail every other page in the notebook with it.
-            return "", redact(f"{type(e).__name__}: {e}")
-
-    def _cache_key(self, path: Path) -> Optional[str]:
-        """Return the cache key for one page, or None if it cannot be computed.
-
-        The key covers the page image and the model and prompts behind it, so
-        editing a prompt or switching provider correctly misses.
-
-        Args:
-            path: The prepared page image.
-
-        Returns:
-            A cache key, or None when caching is off or the page is unreadable.
-        """
-        if not self.cache.enabled:
-            return None
-        try:
-            image_bytes = path.read_bytes()
-        except OSError:
-            # No page to hash means nothing to key on; transcribe uncached.
-            return None
-        return self.cache.key(image_bytes, transcription_fingerprint())
-
-    def _cached(self, key: Optional[str], text: str) -> str:
-        """Store a freshly transcribed page and return it unchanged.
-
-        An empty result is not stored. A page that read as nothing is usually a
-        provider hiccup or a rate limit rather than a blank page, and caching
-        it would make one bad minute permanent.
-
-        Args:
-            key: The cache key, or None if this page is not cacheable.
-            text: The page's text.
-
-        Returns:
-            The text it was given.
-        """
-        if key and text.strip():
-            self.cache.put(key, text)
-        return text
-
-    def _vision_ocr_page(self, path: Path) -> str:
-        """Read and clean one page in a single AI vision call.
-
-        Args:
-            path: The prepared page image.
-
-        Returns:
-            The cleaned text, or an empty string if vision returned nothing.
-        """
-        log(f"  AI Vision OCR: {path.name}...")
-        cleaned_text = ocr_and_repair(str(path))
-        if cleaned_text:
-            return cleaned_text
-
-        log(f"  AI Vision returned empty for {path.name}")
-        return ""
-
     # ── Stage 6: transcripts ─────────────────────────────────────────────
 
     def _write_transcripts(self, job: DocumentJob) -> None:
@@ -2298,50 +2011,14 @@ class SyncPipeline:
         cleans the page in the same call, so there is no earlier, rawer text
         for a second file to hold.
         """
-        meta = {"notebook": job.notebook, "images": [p.name for p in job.imgs]}
-
-        job.clean_out_txt = OCR_DIR / f"{job.safe_name}_clean.txt"
-        self._write_transcript(job, job.clean_out_txt, meta)
-        log(f"Cleaned OCR text saved to {job.clean_out_txt}")
-
-    def _write_transcript(self, job: DocumentJob, path: Path, meta: Dict[str, Any]) -> None:
-        """Write one transcript: a metadata line, then a section per page.
-
-        A page that produced no text keeps its header and gets no body, so the
-        page numbering still lines up with the notebook, and a page that failed
-        says so where the missing text would have been.
-
-        Written for a person to read. Nothing in the pipeline reads it back.
-
-        Args:
-            job: The job being transcribed.
-            path: File to write.
-            meta: Metadata dict, written as the first line.
-        """
-        from living_ink.extract import format_page_section_header
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(meta) + "\n\n")
-
-            if not job.pages and job.extracted_doc_text:
-                f.write(job.extracted_doc_text + "\n")
-                return
-
-            for page in job.pages:
-                header = format_page_section_header(
-                    page.number,
-                    job.doc_file_path,
-                    include_divider=True,
-                    # Already read once, when the page was rendered. Letting the
-                    # header re-read them reopens the PDF once per page.
-                    label=page.label,
-                    breadcrumbs=page.breadcrumbs,
-                )
-                body = page.error if page.error else page.text.strip()
-                f.write(f"{header}\n\n{body}\n\n" if body else f"{header}\n\n")
-
-            if job.extracted_doc_text and not any(p.text.strip() for p in job.pages):
-                f.write(job.extracted_doc_text + "\n")
+        write_transcript(
+            job.workspace.transcript,
+            {"notebook": job.notebook, "images": [p.name for p in job.imgs]},
+            job.pages,
+            job.extracted_doc_text,
+            job.doc_file_path,
+        )
+        log(f"Cleaned OCR text saved to {job.workspace.transcript}")
 
     # ── Stage 7: publish ─────────────────────────────────────────────────
 
@@ -2407,22 +2084,24 @@ class SyncPipeline:
             settings=self.settings,
         )
 
-    def _publish(self, job: DocumentJob, needs_update: Dict[str, List[Destination]]) -> bool:
+    def _publish(self, job: DocumentJob, targets: Sequence[Destination]) -> bool:
         """Publish the transcribed document to every destination that wants it.
+
+        The targets are passed in, never looked up and never defaulted. They
+        used to be read out of a dict with ``or``, which cannot tell "no entry
+        for this document" from "computed as pending at zero destinations" —
+        so a document that needed nobody was published to everybody.
 
         Args:
             job: The processed job.
-            needs_update: Mapping from document ID to the destinations that are
-                behind on it. No entry means a forced run, which targets every
-                active destination.
+            targets: The destinations that are behind on this document, as
+                decided by the selection pass.
 
         Returns:
             True if every targeted destination accepted the note.
         """
         try:
-            targets = needs_update.get(job.notebook_id) or (
-                self.destinations or get_default_destinations()
-            )
+            targets = list(targets)
             if not targets:
                 log("No destinations need update for this notebook (or none configured).")
                 return True
@@ -2441,11 +2120,15 @@ class SyncPipeline:
                     job.published_to.append(dest.state_key)
                     if result.detail:
                         log(f"   {result.detail}")
-                    # Update state for THIS destination immediately.
+                    # Update state for THIS destination immediately, and after
+                    # the note is on disk: a row recorded first would claim a
+                    # note a crash never wrote, and that document is never
+                    # retried. The other order costs one redundant republish.
                     add_to_processed_log(
                         dest.state_key,
                         job.notebook_id,
                         job.version,
+                        recipe=self._recipe_for(job, dest),
                         run_id=self.run_id,
                         external_id=result.external_id,
                         target=result.target,
@@ -2468,6 +2151,34 @@ class SyncPipeline:
 
             log(traceback.format_exc())
             return False
+
+    def _recipe_for(self, job: DocumentJob, dest: Destination) -> str:
+        """Digest the inputs that shaped what this destination was just given.
+
+        Recorded beside the version so the next run can tell that the document
+        is unchanged but the way it would be produced is not.
+
+        The digest the selection pass computed is preferred over a fresh one:
+        it is the digest the decision was made against, so recording it is what
+        keeps a forced run from leaving the next ordinary run with a mismatch.
+
+        Args:
+            job: The processed job, for the recipes it carries and its source type.
+            dest: The destination the note went to.
+
+        Returns:
+            The recipe digest. An unrecognised ``doc_type`` resolves to the
+            fallback source, which is the same source that rendered the pages,
+            so the digest still describes what actually happened.
+        """
+        recipe = job.recipes.get(dest.state_key)
+        if recipe:
+            return recipe
+
+        from living_ink.core.recipe import document_recipe
+        from living_ink.sources import source_for_name
+
+        return document_recipe(source_for_name(job.doc_type), dest, self.settings)
 
     def _report_dry_run(self, job: DocumentJob, doc: Document, targets: List[Destination]) -> None:
         """Say what a real run would have published, and where to read it.
@@ -2496,9 +2207,9 @@ class SyncPipeline:
                 log("      Replaces the whole note, including anything you added to it.")
             else:
                 log("      Replaces only the pages that changed; your own text is kept.")
-        log(f"   Transcript: {job.clean_out_txt}")
+        log(f"   Transcript: {job.workspace.transcript}")
         if job.imgs:
-            log(f"   {len(job.imgs)} page image(s) in {WHITE_DIR}")
+            log(f"   {len(job.imgs)} page image(s) in {job.workspace.pages_dir}")
         if job.tags:
             log(f"   Tags: {job.tags}")
 
@@ -2555,7 +2266,7 @@ class SyncPipeline:
 
         return published
 
-    def _handle_orphans(self, id_map: Dict[str, Any]) -> None:
+    def _handle_orphans(self, orphans: Sequence[str], id_map: Dict[str, Any]) -> None:
         """Report, and optionally delete, notes whose notebook is gone.
 
         A document that was published once and is no longer in the tablet's
@@ -2564,13 +2275,15 @@ class SyncPipeline:
         transport hiccup. So the default is to say so and do nothing;
         ``--prune`` is the user taking responsibility for the difference.
 
-        The whole listing is used, not the sync candidates, so a notebook in
-        the trash or of a type this run skipped is not mistaken for a deletion.
+        Which documents those are is decided by the selection pass, against the
+        whole listing rather than the sync candidates, so a notebook in the
+        trash or of a type this run skipped is not mistaken for a deletion.
 
         Args:
+            orphans: Ids with publications that the tablet no longer lists.
             id_map: Every document the tablet listed, keyed by id.
         """
-        if not id_map or self.dry_run:
+        if not id_map or self.dry_run or not orphans:
             # An empty listing means the transport told us nothing, which is
             # not the same as the tablet being empty.
             return
@@ -2581,19 +2294,19 @@ class SyncPipeline:
             log(f"⚠️ Could not check for deleted notebooks: {e}")
             return
 
-        orphans = {doc_id: rows for doc_id, rows in publications.items() if doc_id not in id_map}
-        if not orphans:
+        rows_by_id = {doc_id: publications[doc_id] for doc_id in orphans if doc_id in publications}
+        if not rows_by_id:
             return
 
         if not self.prune:
-            log(f"{len(orphans)} published notebook(s) are no longer on the tablet:")
-            for doc_id, rows in orphans.items():
+            log(f"{len(rows_by_id)} published notebook(s) are no longer on the tablet:")
+            for doc_id, rows in rows_by_id.items():
                 where = ", ".join(sorted(rows))
                 log(f"  {self._orphan_label(doc_id)} — still in {where}")
             log("Their notes were left alone. Run with --prune to delete them.")
             return
 
-        for doc_id, rows in orphans.items():
+        for doc_id, rows in rows_by_id.items():
             self._prune_orphan(doc_id, rows)
 
     def _orphan_label(self, doc_id: str) -> str:
@@ -2664,7 +2377,7 @@ class SyncPipeline:
             True if sync succeeded or completed gracefully, False on error.
         """
         ensure_runtime_dirs()
-        logs.ensure_configured(LOG_PATH)
+        logs.ensure_configured(logs.LOG_PATH)
         logs.mark_run_start()
         try:
             return self._run_recorded()
@@ -2686,6 +2399,8 @@ class SyncPipeline:
             result = self._execute()
             seen, published, failed = self._counts
             outcome = "success" if result else "partial"
+            if outcome == "success":
+                self._prune_caches()
             return result
         except KeyboardInterrupt:
             # Ctrl+C is not a failure, and the run did not do nothing. Record
@@ -2704,6 +2419,32 @@ class SyncPipeline:
                     published=published,
                     failed=failed,
                 )
+
+    def _prune_caches(self) -> None:
+        """Evict cache entries no run has wanted for ``cache.max_age_days``.
+
+        Last, and only after a run that succeeded. A prune that ran first would
+        be deleting exactly the entries the run about to happen is about to
+        ask for: a notebook synced quarterly would find its own transcripts
+        evicted moments before it needed them, and every cached page would
+        turn back into an API call. Running last means an entry is only ever
+        dropped after a run that did not want it. A failed or interrupted run
+        prunes nothing, because it does not know what it would have used.
+
+        ``living-ink cache --prune`` is the other caller, and the difference is
+        the point: there the user has said when, so any moment is the right
+        one. Here nobody has, so the placement is what makes it safe.
+        """
+        if self.dry_run:
+            return
+        for cache in (self.cache, self.renders):
+            try:
+                removed = cache.prune()
+            except OSError as e:
+                log(f"Could not prune the {cache.noun} cache: {e}")
+                continue
+            if removed:
+                log(f"Pruned {removed} unused {cache.noun} cache entries.")
 
     def _signal_outcome(self, outcome: str) -> None:
         """Tell the destinations themselves how the run ended.
@@ -2755,7 +2496,7 @@ class SyncPipeline:
             lines.append("")
             lines.extend(f"- {warning}" for warning in self.report.warnings)
         lines.append("")
-        lines.append(f"Run `living-ink status` for details, or see the log at {LOG_PATH}.")
+        lines.append(f"Run `living-ink status` for details, or see the log at {logs.LOG_PATH}.")
         return "\n".join(lines)
 
     def _report_interrupt(self, published: int) -> None:
@@ -2790,37 +2531,33 @@ class SyncPipeline:
         if self.dry_run:
             log("🔍 Dry run: nothing will be published and no sync state will be recorded.")
 
-        # Clean temporary working artifacts at start of run and register exit cleanup
-        import atexit
-
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
-        atexit.register(cleanup_temp_artifacts, keep_temp=self.keep_temp)
+        register_temp_cleanup(keep_temp=self.keep_temp)
 
         client = self.connect()
         self.preflight_destinations()
         self._learn_device(client)
-        notebooks, id_map = self.discover_documents(client)
-        self._counts = (len(notebooks), 0, 0)
-        self._handle_orphans(id_map)
-        to_process, needs_update, should_continue = self.filter_pending_documents(notebooks, id_map)
 
-        if not should_continue:
+        listing = list(client.get_meta_items())
+        id_map = {get_val(item, "ID"): item for item in listing}
+        chosen = self.select_documents(listing, client)
+        if chosen is None:
             return False
-        self._report_unchanged(notebooks, to_process)
-        if not to_process:
+
+        self._counts = (chosen.considered, 0, 0)
+        self._handle_orphans(chosen.orphans, id_map)
+        self._report_selection(chosen)
+
+        if not chosen.to_process:
+            if not self.target_notebook:
+                log("No new or updated notebooks found for any active destination. Exiting.")
             self._print_summary()
             return True
 
         all_success = True
         published = failed = 0
-        for nb_item in to_process:
-            item_success = self.process_notebook_item(
-                nb_item=nb_item,
-                client=client,
-                id_map=id_map,
-                needs_update=needs_update,
-                keep_temp=self.keep_temp,
-            )
+        for candidate in chosen.to_process:
+            item_success = self._process_one(candidate, client)
             if item_success:
                 published += 1
             else:
@@ -2829,46 +2566,74 @@ class SyncPipeline:
             # Updated per notebook, not once at the end: a run that is
             # interrupted half way through still did the work it did, and the
             # run record has to say so.
-            self._counts = (len(notebooks), published, failed)
+            self._counts = (chosen.considered, published, failed)
 
         log("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
         self._print_summary()
         return all_success
 
-    def _report_unchanged(self, notebooks: List[Any], to_process: List[Any]) -> None:
+    def _report_selection(self, chosen: Selection) -> None:
         """Record the documents this run will not touch, and why.
 
         A summary that lists only what was synced cannot answer "why was my
-        notebook not picked up", which is the question a user actually has.
+        notebook not picked up", which is the question a user actually has —
+        and it has to answer it *truthfully*. Everything here used to be
+        reported as ``unchanged``, including documents that were pending and
+        fell outside ``--limit``: with the default limit of one, nine pending
+        notebooks were reported as up to date.
 
         Args:
-            notebooks: Everything discovered on the device.
-            to_process: The subset this run will work on.
+            chosen: What this run decided to do, and what it left out.
         """
         if self.report is None:
             return
-        if self.target_notebook:
-            # A targeted run did not consider the rest of the library, so
-            # calling it "unchanged" would be a claim it never checked.
-            return
-        pending = {id(item) for item in to_process}
-        for item in notebooks:
-            if id(item) in pending:
+
+        for item, reason in chosen.skipped:
+            if reason == NOT_TARGETED:
+                # A targeted run never considered the rest of the library, so
+                # listing all of it would be a claim it never checked — and on
+                # a real tablet it would bury the one document asked for.
                 continue
             self.report.add(
                 DocumentOutcome(
-                    name=str(
-                        get_val(item, "VissibleName")
-                        or get_val(item, "VisibleName")
-                        or get_val(item, "ID")
-                        or "(unnamed)"
-                    ),
-                    doc_id=get_val(item, "ID"),
+                    name=self._selection_label(item),
+                    doc_id=getattr(item, "doc_id", None) or get_val(item, "ID"),
                     status=SKIPPED,
-                    reason="unchanged",
+                    reason=reason,
                 )
             )
+
+        for candidate in chosen.deferred:
+            self.report.add(
+                DocumentOutcome(
+                    name=candidate.name or candidate.doc_id,
+                    doc_id=candidate.doc_id,
+                    status=DEFERRED,
+                    destinations=[dest.state_key for dest in candidate.pending],
+                )
+            )
+
+    @staticmethod
+    def _selection_label(item: Any) -> str:
+        """Name a skipped document, whether it got as far as being classified.
+
+        Args:
+            item: A :class:`~living_ink.core.selection.Candidate` for anything
+                the classifier reached, or the transport's raw item for
+                anything ruled out before that.
+
+        Returns:
+            Something to print in the summary's name column.
+        """
+        if isinstance(item, Candidate):
+            return item.name or item.doc_id
+        return str(
+            get_val(item, "VissibleName")
+            or get_val(item, "VisibleName")
+            or get_val(item, "ID")
+            or "(unnamed)"
+        )
 
     def _print_summary(self) -> None:
         """Print the run summary, as a table or as JSON.

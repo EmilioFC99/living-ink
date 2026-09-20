@@ -28,8 +28,13 @@ SKIPPED = "skipped"
 FAILED = "failed"
 #: A document a real run would have published: transcribed under ``--dry-run``.
 WOULD_PUBLISH = "would_publish"
+#: A document that needs work but fell outside ``--limit``. Distinct from
+#: :data:`SKIPPED` because it is not up to date: reporting it as unchanged is
+#: how a run with the default limit of 1 told the user nine pending notebooks
+#: were fine.
+DEFERRED = "deferred"
 
-_MARKERS = {PUBLISHED: "✓", SKIPPED: "⊘", FAILED: "✗", WOULD_PUBLISH: "◦"}
+_MARKERS = {PUBLISHED: "✓", SKIPPED: "⊘", FAILED: "✗", WOULD_PUBLISH: "◦", DEFERRED: "…"}
 
 
 @dataclass
@@ -77,6 +82,8 @@ class DocumentOutcome:
         line = f"  {marker} {name:<24}"
         if self.status == SKIPPED:
             return f"{line} {self.reason or 'unchanged'}"
+        if self.status == DEFERRED:
+            return f"{line} {self.reason or 'pending, past the limit'}"
         if self.status == FAILED:
             return f"{line} {self.reason or 'failed'}"
 
@@ -157,6 +164,11 @@ class RunReport:
         return len(self._of(SKIPPED))
 
     @property
+    def deferred(self) -> int:
+        """Documents that need work but fell outside the run's limit."""
+        return len(self._of(DEFERRED))
+
+    @property
     def failed(self) -> int:
         """Documents that were attempted and did not make it."""
         return len(self._of(FAILED))
@@ -200,6 +212,7 @@ class RunReport:
             "published": self.published,
             "would_publish": self.would_publish,
             "skipped": self.skipped,
+            "deferred": self.deferred,
             "failed": self.failed,
             "partial": self.partial,
             "pages_failed": self.pages_failed,
@@ -241,6 +254,11 @@ class RunReport:
             lines.append(
                 f"Pages: {read}   API calls: {self.transcribed}   "
                 f"From cache: {self.cached} ({rate:.0%})"
+            )
+        if self.deferred:
+            lines.append(
+                f"{self.deferred} document(s) still need syncing and were left for the next "
+                "run; raise --limit to take more at once."
             )
         if self.failed:
             lines.append(f"{self.failed} document(s) failed; see the lines marked ✗ above.")

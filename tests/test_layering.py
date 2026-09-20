@@ -150,6 +150,33 @@ class TestSourcesDoNotReachBack:
         assert {k: v for k, v in offenders.items() if v} == {}
 
 
+class TestCoreIsBelowThePlugins:
+    """Rule 4: ``core/`` imports neither the command layer nor a plugin package.
+
+    ``destinations/`` and ``sources/`` both read ``core/`` — that is what rules
+    2 and 3 allow — so ``core/`` importing either of them back is the cycle
+    those rules exist to prevent. It is also why ``core/recipe.py`` names
+    ``Destination`` and ``SourceType`` only under ``TYPE_CHECKING``: what it
+    needs from each is one declared attribute, not the module.
+    """
+
+    def test_core_imports_no_command_layer_and_no_plugin(self):
+        forbidden = {
+            "cli",
+            "ui",
+            "scheduler",
+            "pipeline",
+            "setup_wizard",
+            "destinations",
+            "sources",
+        }
+        offenders = {
+            path.name: [name for name in imports if name.split(".")[0] in forbidden]
+            for path, imports in package_files("core")
+        }
+        assert {k: v for k, v in offenders.items() if v} == {}
+
+
 class TestTheDomainModelIsALeaf:
     """``core/document.py`` imports nothing from Living Ink at all.
 
@@ -160,3 +187,15 @@ class TestTheDomainModelIsALeaf:
 
     def test_document_imports_nothing_from_the_package(self):
         assert module_imports(PACKAGE_ROOT / "core" / "document.py") == []
+
+
+class TestTheWorkspaceIsALeaf:
+    """``core/temp.py`` imports nothing from Living Ink either.
+
+    ``pipeline`` imports it, so an import back is a cycle. It is also what lets
+    a stage, a source or a future renderer be handed a workspace without any of
+    them taking a dependency on the pipeline that built it.
+    """
+
+    def test_temp_imports_nothing_from_the_package(self):
+        assert module_imports(PACKAGE_ROOT / "core" / "temp.py") == []

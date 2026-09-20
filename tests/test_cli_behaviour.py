@@ -25,21 +25,21 @@ Table                          What a failure means
 Two design choices are worth defending, because both look like shortcuts.
 
 **Total equality, not field-by-field assertions.** Every sync case compares the
-whole :class:`~living_ink.pipeline.SyncOptions` against an expected value. That
-is what makes "and nothing else" testable at all: asserting ``dry_run is True``
-proves the flag arrived, while asserting the whole object proves no *other*
-field moved with it. A new field defaults into every expectation for free; a
-new field that some flag secretly sets fails every case at once, which is the
-correct amount of noise.
+whole keyword mapping :func:`~living_ink.cli.sync_arguments` produces against an
+expected one. That is what makes "and nothing else" testable at all: asserting
+``dry_run is True`` proves the flag arrived, while asserting the whole mapping
+proves no *other* argument moved with it. A new argument defaults into every
+expectation for free; a new argument that some flag secretly sets fails every
+case at once, which is the correct amount of noise.
 
 **The exhaustive pass runs at the parse layer.** :func:`intent` is
-``parse_args`` followed by ``SyncOptions.from_args`` — the two steps that turn
-an argv into an instruction, and nothing after them. All 512 boolean
-combinations go through it, which would be slow through ``main()`` and would
-prove no more. What licenses the shortcut is
-:class:`TestTheShortcutMatchesTheRealThing`: it runs the real entry point and
-checks the pipeline was handed the same object :func:`intent` predicts. If that
-one test passes, the 512 are statements about the real CLI.
+``parse_args`` followed by ``sync_arguments`` — the two steps that turn an argv
+into an instruction, and nothing after them. All 512 boolean combinations go
+through it, which would be slow through ``main()`` and would prove no more.
+What licenses the shortcut is :class:`TestTheShortcutMatchesTheRealThing`: it
+runs the real entry point and checks the pipeline was handed the same arguments
+:func:`intent` predicts. If that one test passes, the 512 are statements about
+the real CLI.
 
 Nothing here reaches the network, a tablet, a vault, or a real config. The
 ``cli`` fixture replaces the four seams that face outward and *fails the test*
@@ -56,23 +56,22 @@ import platform
 import socket
 import stat
 import subprocess
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from living_ink.cli import LivingInkCLI
-from living_ink.pipeline import SyncOptions
+from living_ink.cli import LivingInkCLI, sync_arguments
 
 # ---------------------------------------------------------------------------
 # Table 1 — what each sync flag means
 # ---------------------------------------------------------------------------
 
-#: Every boolean flag on ``sync``, and the single ``SyncOptions`` field it is
-#: allowed to change. One flag, one field: the exhaustive pass below turns that
-#: into a property — the options for any set of flags must be exactly the union
-#: of their individual effects, with no interaction between them.
+#: Every boolean flag on ``sync``, and the single pipeline argument it is
+#: allowed to change. One flag, one argument: the exhaustive pass below turns
+#: that into a property — the arguments for any set of flags must be exactly
+#: the union of their individual effects, with no interaction between them.
 SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
     "--ssh": ("ssh", True),
     "--cloud": ("cloud", True),
@@ -90,9 +89,25 @@ SYNC_BOOLEAN_FLAGS: dict[str, tuple[str, Any]] = {
 #: ``limit`` is 0 rather than None because the parser declares ``default=0``,
 #: and the pipeline reads 0 as "no override, use the configured maximum". The
 #: distinction matters: a real 0 here would mean "process no notebooks".
-BARE_SYNC = SyncOptions(limit=0)
+#: Spelled out rather than derived from the function under test, because a
+#: mapping built by calling ``sync_arguments([])`` would agree with it by
+#: construction and prove nothing.
+BARE_SYNC: dict[str, Any] = {
+    "notebook": None,
+    "limit": 0,
+    "ssh": False,
+    "cloud": False,
+    # None, not False: an unset store-true flag means "defer to config".
+    "sync_pdfs": None,
+    "sync_epubs": None,
+    "all_types": False,
+    "keep_temp": False,
+    "dry_run": False,
+    "prune": False,
+    "json_output": False,
+}
 
-#: Boolean flags that ``sync`` accepts but that never reach ``SyncOptions``.
+#: Boolean flags that ``sync`` accepts but that never reach the pipeline.
 #:
 #: ``--status`` selects a different code path entirely and ``--all`` only
 #: qualifies it, so both are tested by
@@ -123,35 +138,35 @@ def is_rejected(flags: tuple[str, ...]) -> bool:
     return any(group <= set(flags) for group in MUTUALLY_EXCLUSIVE_SYNC_FLAGS)
 
 
-def intent(argv: list[str]) -> SyncOptions:
+def intent(argv: list[str]) -> dict[str, Any]:
     """Turn a command line into the instruction it encodes.
 
     This is the whole of the CLI's decision-making for ``sync``: argparse
-    produces a namespace and ``SyncOptions.from_args`` — which the pipeline
-    documents as "the single place that knows CLI flag names" — turns it into
-    the object the pipeline obeys. Everything downstream reads that object, so
-    two argvs that produce equal options are the same instruction.
+    produces a namespace and :func:`~living_ink.cli.sync_arguments` — the
+    single place that knows CLI flag names — turns it into the keyword
+    arguments the pipeline is constructed from. Everything downstream reads
+    those, so two argvs that produce equal mappings are the same instruction.
 
     Args:
         argv: Arguments as the user would type them, without the program name.
 
     Returns:
-        The options a real run would be driven by.
+        The arguments a real run would be driven by.
     """
     args = LivingInkCLI().build_parser().parse_args(argv)
-    return SyncOptions.from_args(args)
+    return sync_arguments(args)
 
 
-def expected_for(flags: tuple[str, ...]) -> SyncOptions:
-    """Predict the options for a set of boolean flags.
+def expected_for(flags: tuple[str, ...]) -> dict[str, Any]:
+    """Predict the pipeline arguments for a set of boolean flags.
 
     Args:
         flags: Flag strings, each a key of :data:`SYNC_BOOLEAN_FLAGS`.
 
     Returns:
-        :data:`BARE_SYNC` with one field changed per flag, and nothing else.
+        :data:`BARE_SYNC` with one entry changed per flag, and nothing else.
     """
-    return replace(BARE_SYNC, **{SYNC_BOOLEAN_FLAGS[f][0]: SYNC_BOOLEAN_FLAGS[f][1] for f in flags})
+    return {**BARE_SYNC, **{SYNC_BOOLEAN_FLAGS[f][0]: SYNC_BOOLEAN_FLAGS[f][1] for f in flags}}
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +422,7 @@ class _Recorder:
     def __init__(self, state_db: Path) -> None:
         """Start with an empty log."""
         self.calls: list[str] = []
-        self.options: list[SyncOptions] = []
+        self.options: list[dict[str, Any]] = []
         self.state_db = state_db
         self.pipeline_error: BaseException | None = None
 
@@ -430,7 +445,7 @@ class Invocation:
         stdout: Everything printed to standard output.
         stderr: Everything printed to standard error.
         calls: Subsystem labels, in the order they fired.
-        options: The options handed to each pipeline that was constructed.
+        options: The keyword arguments each constructed pipeline was given.
     """
 
     argv: list[str]
@@ -438,7 +453,7 @@ class Invocation:
     stdout: str
     stderr: str
     calls: list[str] = field(default_factory=list)
-    options: list[SyncOptions] = field(default_factory=list)
+    options: list[dict[str, Any]] = field(default_factory=list)
 
 
 @pytest.fixture(autouse=True)
@@ -498,8 +513,13 @@ def cli(monkeypatch, capsys, tmp_path):
     class _RecordingPipeline:
         """Stands in for the pipeline, remembering what it was told to do."""
 
-        def __init__(self, options=None, config_path=None, data_dir=None, destinations=None):
-            """Record the instruction without acting on it."""
+        def __init__(self, *, config_path=None, data_dir=None, destinations=None, **options):
+            """Record the instruction without acting on it.
+
+            The three the front end supplies itself are named so that the rest
+            can be collected: what a test asserts on is the instruction the
+            flags encode, not where the config happened to live.
+            """
             recorder.note("pipeline.construct")
             recorder.options.append(options)
 
@@ -673,7 +693,7 @@ def cli(monkeypatch, capsys, tmp_path):
 class TestSyncFlagsMapExactly:
     """Each named command line produces one exact instruction.
 
-    Every assertion compares the whole options object, so these also prove the
+    Every assertion compares the whole argument mapping, so these also prove the
     negative: a flag that quietly set a second field would fail here.
     """
 
@@ -683,41 +703,35 @@ class TestSyncFlagsMapExactly:
             pytest.param(["sync"], BARE_SYNC, id="bare"),
             pytest.param(
                 ["sync", "--notebook", "Work/Notes"],
-                replace(BARE_SYNC, notebook="Work/Notes"),
+                {**BARE_SYNC, "notebook": "Work/Notes"},
                 id="notebook-path",
             ),
             pytest.param(
                 ["sync", "--notebook", "abc-123"],
-                replace(BARE_SYNC, notebook="abc-123"),
+                {**BARE_SYNC, "notebook": "abc-123"},
                 id="notebook-id",
             ),
-            pytest.param(["sync", "--limit", "5"], replace(BARE_SYNC, limit=5), id="limit"),
-            pytest.param(["sync", "--limit", "0"], replace(BARE_SYNC, limit=0), id="limit-zero"),
-            pytest.param(["sync", "--dry-run"], replace(BARE_SYNC, dry_run=True), id="dry-run"),
-            pytest.param(["sync", "--prune"], replace(BARE_SYNC, prune=True), id="prune"),
-            pytest.param(["sync", "--ssh"], replace(BARE_SYNC, ssh=True), id="ssh"),
-            pytest.param(["sync", "--cloud"], replace(BARE_SYNC, cloud=True), id="cloud"),
-            pytest.param(["sync", "--json"], replace(BARE_SYNC, json_output=True), id="json"),
+            pytest.param(["sync", "--limit", "5"], {**BARE_SYNC, "limit": 5}, id="limit"),
+            pytest.param(["sync", "--limit", "0"], {**BARE_SYNC, "limit": 0}, id="limit-zero"),
+            pytest.param(["sync", "--dry-run"], {**BARE_SYNC, "dry_run": True}, id="dry-run"),
+            pytest.param(["sync", "--prune"], {**BARE_SYNC, "prune": True}, id="prune"),
+            pytest.param(["sync", "--ssh"], {**BARE_SYNC, "ssh": True}, id="ssh"),
+            pytest.param(["sync", "--cloud"], {**BARE_SYNC, "cloud": True}, id="cloud"),
+            pytest.param(["sync", "--json"], {**BARE_SYNC, "json_output": True}, id="json"),
+            pytest.param(["sync", "--keep-temp"], {**BARE_SYNC, "keep_temp": True}, id="keep-temp"),
+            pytest.param(["sync", "--all-types"], {**BARE_SYNC, "all_types": True}, id="all-types"),
+            pytest.param(["sync", "--sync-pdfs"], {**BARE_SYNC, "sync_pdfs": True}, id="sync-pdfs"),
             pytest.param(
-                ["sync", "--keep-temp"], replace(BARE_SYNC, keep_temp=True), id="keep-temp"
-            ),
-            pytest.param(
-                ["sync", "--all-types"], replace(BARE_SYNC, all_types=True), id="all-types"
-            ),
-            pytest.param(
-                ["sync", "--sync-pdfs"], replace(BARE_SYNC, sync_pdfs=True), id="sync-pdfs"
-            ),
-            pytest.param(
-                ["sync", "--sync-epubs"], replace(BARE_SYNC, sync_epubs=True), id="sync-epubs"
+                ["sync", "--sync-epubs"], {**BARE_SYNC, "sync_epubs": True}, id="sync-epubs"
             ),
             pytest.param(
                 ["sync", "--notebook", "Foo", "--dry-run", "--keep-temp"],
-                replace(BARE_SYNC, notebook="Foo", dry_run=True, keep_temp=True),
+                {**BARE_SYNC, "notebook": "Foo", "dry_run": True, "keep_temp": True},
                 id="scoped-preview",
             ),
             pytest.param(
                 ["sync", "--all-types", "--limit", "2", "--json"],
-                replace(BARE_SYNC, all_types=True, limit=2, json_output=True),
+                {**BARE_SYNC, "all_types": True, "limit": 2, "json_output": True},
                 id="everything-two-of-them-as-json",
             ),
         ],
@@ -729,29 +743,42 @@ class TestSyncFlagsMapExactly:
     def test_an_unset_document_type_defers_to_config(self):
         """``--sync-pdfs`` absent means None, not False.
 
-        The difference is the whole reason ``from_args`` maps with ``or None``:
-        False would override a config that has PDFs switched on, turning an
-        omitted flag into an instruction the user never gave.
+        The difference is the whole reason ``sync_arguments`` maps with ``or
+        None``: False would override a config that has PDFs switched on,
+        turning an omitted flag into an instruction the user never gave.
         """
         options = intent(["sync"])
-        assert options.sync_pdfs is None
-        assert options.sync_epubs is None
+        assert options["sync_pdfs"] is None
+        assert options["sync_epubs"] is None
 
-    def test_no_flag_ever_sets_the_connection_preference(self):
-        """``preferred_connection`` is a config field, not a CLI one.
+    def test_a_namespace_missing_a_flag_reads_as_the_flag_being_unset(self):
+        """A partial namespace is a missing flag, not an AttributeError.
 
-        ``--ssh`` and ``--cloud`` set their own booleans and the pipeline reads
-        those; a flag writing this field instead would change precedence.
+        ``watch`` borrows the sync parser and a caller can construct one by
+        hand, so every read is a ``getattr`` with the same default the parser
+        declares. A flag added to the parser and forgotten here therefore
+        degrades to "not given" rather than crashing the run.
+        """
+        assert sync_arguments(argparse.Namespace()) == BARE_SYNC | {"limit": None}
+        assert sync_arguments(argparse.Namespace(dry_run=True))["dry_run"] is True
+
+    def test_no_flag_ever_names_the_connection_preference(self):
+        """``--ssh`` and ``--cloud`` travel as themselves, not as a preference.
+
+        The pipeline is what turns the pair into ``preferred_connection`` and
+        ``use_ssh`` in the settings layer (asserted by
+        :class:`TestForcingBothTransports`). A flag arriving already translated
+        would put that decision in two places.
         """
         for flag in SYNC_BOOLEAN_FLAGS:
-            assert intent(["sync", flag]).preferred_connection is None, flag
+            assert "preferred_connection" not in intent(["sync", flag]), flag
 
 
 class TestEveryFlagCombination:
     """All 512 subsets of the boolean flags, checked against the same rule.
 
     The rule has two halves. A subset that trips an exclusion is a usage error;
-    every other subset is independent, meaning its options are exactly the
+    every other subset is independent, meaning its arguments are exactly the
     union of what each flag does alone. That is a stronger claim than any list
     of hand-picked cases, and it is the claim a user makes when they combine
     two flags and expect both to apply — the exclusions are then the complete,
@@ -851,7 +878,7 @@ class TestValueFlagsTakeTheValueGiven:
         Normalisation belongs to the pipeline's notebook matcher, which has its
         own tests; the CLI's job is to not get in the way of it.
         """
-        assert intent(["sync", "--notebook", value]).notebook == value
+        assert intent(["sync", "--notebook", value])["notebook"] == value
 
     def test_a_negative_limit_is_carried_not_rejected(self):
         """The parser accepts it and the pipeline decides what it means.
@@ -861,7 +888,7 @@ class TestValueFlagsTakeTheValueGiven:
         rather than an error, and moving that decision into the parser would
         change the exit code a script sees.
         """
-        assert intent(["sync", "--limit", "-1"]).limit == -1
+        assert intent(["sync", "--limit", "-1"])["limit"] == -1
 
 
 class TestForcingBothTransports:
@@ -904,7 +931,7 @@ class TestForcingBothTransports:
         """One flag, one transport, read back from the resolved settings."""
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(options=intent(["sync", "--ssh"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync", "--ssh"]), data_dir=tmp_path, destinations=[])
         assert pipe.settings.preferred_connection == "ssh"
         assert pipe.settings.use_ssh is True
 
@@ -912,7 +939,7 @@ class TestForcingBothTransports:
         """And the other one, so the exclusion did not disable a flag."""
         from living_ink.pipeline import SyncPipeline
 
-        pipe = SyncPipeline(options=intent(["sync", "--cloud"]), data_dir=tmp_path, destinations=[])
+        pipe = SyncPipeline(**intent(["sync", "--cloud"]), data_dir=tmp_path, destinations=[])
         assert pipe.settings.preferred_connection == "cloud"
         assert pipe.settings.use_ssh is False
 
@@ -986,7 +1013,7 @@ class TestStatusIsADifferentCommandInDisguise:
     """``sync --status`` answers a question instead of doing the work."""
 
     def test_the_status_flag_is_not_part_of_the_instruction(self):
-        """It never reaches ``SyncOptions``, because no sync is run."""
+        """It never reaches the pipeline, because no sync is run."""
         assert not hasattr(intent(["sync", "--status"]), "status")
 
     def test_all_without_status_is_accepted_and_inert(self, cli):
@@ -1011,7 +1038,7 @@ class TestTheShortcutMatchesTheRealThing:
 
     Everything above runs at the parse layer for speed. This is the test that
     makes those results statements about ``living-ink`` rather than about a
-    helper: it drives ``cli.main`` and compares the options the pipeline was
+    helper: it drives ``cli.main`` and compares the arguments the pipeline was
     actually constructed with.
     """
 
@@ -1026,7 +1053,7 @@ class TestTheShortcutMatchesTheRealThing:
             ["sync", "--sync-pdfs", "--sync-epubs"],
         ],
     )
-    def test_the_pipeline_receives_the_predicted_options(self, cli, argv):
+    def test_the_pipeline_receives_the_predicted_arguments(self, cli, argv):
         """One pipeline, built with exactly the predicted instruction."""
         run = cli(*argv)
         assert run.options == [intent(argv)]
@@ -1129,7 +1156,7 @@ class TestAbbreviationsAreAccepted:
         mean entirely different things.
         """
         assert intent(["sync", "--all"]) == BARE_SYNC
-        assert intent(["sync", "--all-types"]).all_types is True
+        assert intent(["sync", "--all-types"])["all_types"] is True
 
 
 class TestVerbosityIsAcceptedOnBothSides:
@@ -1180,7 +1207,7 @@ class TestCommandsDoOnlyTheirOwnWork:
         """
         run = cli("sync", "--dry-run")
         assert run.calls == ["pipeline.construct", "pipeline.run"]
-        assert run.options[0].dry_run is True
+        assert run.options[0]["dry_run"] is True
 
     def test_reading_the_cache_never_opens_the_state_database(self, cli):
         """Two independent stores, and the commands stay independent."""

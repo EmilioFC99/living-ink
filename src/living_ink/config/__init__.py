@@ -54,6 +54,7 @@ from living_ink.config.schema import (
     Choice,
     Section,
     Setting,
+    settings_for_section,
 )
 from living_ink.config.validate import (
     ERROR,
@@ -111,6 +112,7 @@ __all__ = [
     "mask",
     "read_secret",
     "reads_as",
+    "settings_for_section",
     "split_problems",
     "validate_config",
     "write_secret",

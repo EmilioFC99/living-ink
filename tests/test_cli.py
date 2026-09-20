@@ -320,14 +320,14 @@ def test_sync_command_execution(tmp_path):
             code = cmd.run(args)
             assert code == 0
             mock_init.assert_called_once()
-            opts = mock_init.call_args.kwargs["options"]
-            assert opts.notebook == "MyNotes"
-            assert opts.limit == 5
-            assert opts.ssh is True
-            assert opts.sync_pdfs is True
+            opts = mock_init.call_args.kwargs
+            assert opts["notebook"] == "MyNotes"
+            assert opts["limit"] == 5
+            assert opts["ssh"] is True
+            assert opts["sync_pdfs"] is True
             # An unset store-true flag must defer to config, not force False.
-            assert opts.sync_epubs is None
-            assert opts.keep_temp is True
+            assert opts["sync_epubs"] is None
+            assert opts["keep_temp"] is True
             mock_run.assert_called_once()
 
 
@@ -818,7 +818,7 @@ class TestVerbosityFlags:
 
         args = argparse.Namespace(command="status", config=None, verbose=True, quiet=False)
         with (
-            patch("living_ink.pipeline.LOG_PATH", tmp_path / "pipeline.log"),
+            patch("living_ink.logs.LOG_PATH", tmp_path / "pipeline.log"),
             patch.object(StatusCommand, "run", return_value=0),
         ):
             try:
@@ -892,7 +892,7 @@ class TestStateCommand:
         pipeline.reset_state_store()
         opened = pipeline.get_state_store()
         opened.record_document("id-1", name="Journal", folder="Personal", version="v1")
-        opened.record_publication("id-1", "ObsidianDestination", "v1")
+        opened.record_publication("id-1", "ObsidianDestination", "v1", recipe="")
         yield opened
         pipeline.reset_state_store()
 
@@ -946,7 +946,7 @@ class TestStateCommand:
         assert code == 0
 
     def test_forget_can_target_one_destination(self, store, capsys):
-        store.record_publication("id-1", "FakeApiDestination", "v1")
+        store.record_publication("id-1", "FakeApiDestination", "v1", recipe="")
 
         self._run(capsys, forget="id-1", destination="ObsidianDestination")
 
@@ -1301,25 +1301,6 @@ class TestSyncStatusFlag:
         mock_wizard.assert_not_called()
         assert code == 1
         assert "living-ink setup" in capsys.readouterr().err
-
-
-class TestVersionOf:
-    """The preview and the run must agree on what "changed" means."""
-
-    def test_the_content_hash_wins(self):
-        from living_ink.cli import version_of
-
-        assert version_of({"hash": "abc123", "Version": 4}) == "abc123"
-
-    def test_the_version_number_is_the_fallback(self):
-        from living_ink.cli import version_of
-
-        assert version_of({"Version": 4}) == "4"
-
-    def test_metadata_with_neither_still_yields_a_version(self):
-        from living_ink.cli import version_of
-
-        assert version_of({}) == "1"
 
 
 class TestComparisonPaging:

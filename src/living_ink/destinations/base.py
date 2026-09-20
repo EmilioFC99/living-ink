@@ -9,8 +9,9 @@ import abc
 import enum
 import logging
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, Optional, Type
+from typing import Any, ClassVar, Dict, Optional, Tuple, Type
 
+from living_ink.config import Setting
 from living_ink.core.document import Document, PublishContext, PublishResult
 from living_ink.settings import Settings
 
@@ -135,6 +136,13 @@ class Destination(abc.ABC):
             wrote between them is kept" is a different promise from "the whole
             note will be rewritten", and the pipeline reads this rather than
             branching on a class name to decide which one to make.
+        settings: The settings whose values change what this destination
+            writes. Declared, because change detection digests them: a
+            destination that names its own inputs makes an edit to one of them
+            re-publish the documents it affects, and only those. Digesting the
+            whole of :class:`~living_ink.settings.Settings` instead would make
+            an unrelated flag — ``--limit``, a log level — look like a content
+            change and rewrite the entire vault.
     """
 
     config_key: ClassVar[str] = ""
@@ -142,6 +150,7 @@ class Destination(abc.ABC):
     state_key: ClassVar[str] = ""
     display_name: ClassVar[str] = ""
     merge_unit: ClassVar[MergeUnit] = MergeUnit.DOCUMENT
+    settings: ClassVar[Tuple[Setting, ...]] = ()
 
     @classmethod
     def from_config(cls, section: Dict[str, Any], settings: Settings) -> Optional["Destination"]:
@@ -238,6 +247,33 @@ class Destination(abc.ABC):
         name = self.display_name or type(self).__name__
         logger.info("%s does not support removing notes.", name)
         return PublishResult(ok=False, detail=f"{name} cannot remove notes.")
+
+    def published_exists(self, ctx: PublishContext) -> bool:
+        """Report whether the note recorded for this document is still there.
+
+        Change detection asks this before it decides a document is settled: the
+        state store says a note was published, and the user may since have
+        deleted it. A notebook that is unchanged on the tablet but whose note
+        is gone must come back, and nothing else in the run would notice.
+
+        True by default, which is the answer that does the least damage when a
+        destination genuinely cannot look. A default of False would make every
+        such destination re-publish its whole library on every run for ever,
+        rather than once; a destination that *can* check overrides this and
+        gets the deletion caught on the next sync.
+
+        Cheap by contract, like :meth:`check`: this runs once per published
+        document per run, so it is a ``stat()`` or an equivalent, never a
+        download.
+
+        Args:
+            ctx: Carries ``existing_target`` and ``existing_external_id`` — the
+                coordinates the last publication recorded.
+
+        Returns:
+            Whether the note is still where it was left.
+        """
+        return True
 
     def report_failure(self, summary: str) -> None:
         """Tell the user, at the destination, that the last sync did not finish.
