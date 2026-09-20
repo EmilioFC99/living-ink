@@ -919,6 +919,61 @@ class TestOrderedDurabilityUnderAKill:
         assert pipeline.get_state_store().get_publication("nb-1", dest.state_key) is None
 
 
+class TestAPartialPublishStaysPending:
+    """The gap markers are retried because the row says how many there were.
+
+    ``state`` stores ``pages_failed`` and ``selection._owes_a_publish`` reads
+    it, and both ends were tested — but ``_publish`` never passed the count, so
+    every partial publish wrote a zero. The version matched, the recipe
+    matched, and the clause that exists to catch exactly this had nothing left
+    to notice: a notebook published with three
+    ``> [!warning] Page not transcribed`` callouts kept them for ever.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _state_dir(self, tmp_path, monkeypatch):
+        """Point the state layer at a temp directory, and drop it afterwards."""
+        monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(pipeline, "ensure_runtime_dirs", lambda: None)
+        pipeline.reset_state_store()
+        yield
+        pipeline.reset_state_store()
+
+    def _job(self, tmp_path, *, failed: int) -> DocumentJob:
+        workspace = DocumentWorkspace(tmp_path, "nb-1").ensure()
+        workspace.transcript.write_text("### Page 1\n\nHello\n", encoding="utf-8")
+        job = make_job(workspace=workspace)
+        job.failed_pages = failed
+        return job
+
+    def _row(self, dest):
+        return pipeline.get_state_store().get_publication("nb-1", dest.state_key)
+
+    def test_the_count_reaches_the_row(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        assert pipe._publish(self._job(tmp_path, failed=3), [dest]) is True
+        assert self._row(dest)["pages_failed"] == 3
+
+    def test_a_whole_document_records_no_gaps(self, tmp_path):
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        assert pipe._publish(self._job(tmp_path, failed=0), [dest]) is True
+        assert self._row(dest)["pages_failed"] == 0
+
+    def test_a_later_whole_publish_clears_the_gaps(self, tmp_path):
+        """The retry has to be able to end, or the notebook is pending for ever."""
+        dest = MockDestination("MockDest")
+        pipe = SyncPipeline(destinations=[dest])
+
+        pipe._publish(self._job(tmp_path, failed=3), [dest])
+        pipe._publish(self._job(tmp_path, failed=0), [dest])
+
+        assert self._row(dest)["pages_failed"] == 0
+
+
 class TestEveryRunReadsItsPages:
     """A leftover transcript on disk is not a shortcut around the OCR stages.
 
