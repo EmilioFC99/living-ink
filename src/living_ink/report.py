@@ -230,12 +230,42 @@ class RunReport:
         """
         return json.dumps(self.as_dict(), indent=2)
 
-    def render(self) -> str:
+    def render(self, *, detailed: bool = True) -> str:
         """Render the report as the summary a person reads.
 
+        Args:
+            detailed: Whether to list every document considered. If False,
+                only the totals, elapsed time, and run-level warnings/errors
+                are rendered. Defaults to True.
+
         Returns:
-            The full summary block, without a trailing newline.
+            The summary block, without a trailing newline.
         """
+        read = self.transcribed + self.cached
+        rate = self.cache_hit_rate or 0.0
+        time_str = f"{self.elapsed:.0f}s" if self.elapsed >= 1 else f"{self.elapsed:.1f}s"
+        stats = (
+            f"Pages: {read}   API calls: {self.transcribed}   "
+            f"From cache: {self.cached} ({rate:.0%})   Time: {time_str}"
+        )
+
+        if not detailed:
+            lines = ["", stats]
+            if self.deferred:
+                lines.append(
+                    f"{self.deferred} document(s) still need syncing and were left for the next "
+                    "run; raise --limit to take more at once."
+                )
+            if self.failed:
+                lines.append(f"{self.failed} document(s) failed.")
+            if self.partial:
+                lines.append(
+                    f"{self.partial} document(s) published without every page; "
+                    f"{self.pages_failed} page(s) could not be rendered — see ⚠ above."
+                )
+            lines.extend(f"⚠️  {w}" for w in self.warnings)
+            return "\n".join(lines)
+
         if not self.documents:
             return "Nothing to sync: every document is already up to date."
 
@@ -248,9 +278,7 @@ class RunReport:
         lines = ["", f"{headline} in {self.elapsed:.0f}s"]
         lines.extend(d.describe() for d in self.documents)
 
-        read = self.transcribed + self.cached
         if read:
-            rate = self.cache_hit_rate or 0.0
             lines.append(
                 f"Pages: {read}   API calls: {self.transcribed}   "
                 f"From cache: {self.cached} ({rate:.0%})"

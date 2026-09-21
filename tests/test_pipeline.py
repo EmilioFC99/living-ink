@@ -3267,7 +3267,7 @@ class TestRunSummary:
 
         pipe._print_summary()
 
-        assert "Synced 0 of 1 documents" in capsys.readouterr().out
+        assert "Pages:" in capsys.readouterr().out
 
     def test_json_output_is_machine_readable(self, capsys):
         pipe = self._pipeline()
@@ -3369,7 +3369,7 @@ class TestJsonSummaryReachesStdout:
         self._pipeline(json_output=False)._print_summary()
         out = capsys.readouterr().out
 
-        assert "Synced 0 of 1 documents" in out
+        assert "Pages:" in out
         with pytest.raises(json.JSONDecodeError):
             json.loads(out)
 

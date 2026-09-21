@@ -539,7 +539,7 @@ def validate_environment():
 
         raise ConfigurationMissing(msg, hint=docs_hint)
 
-    log("Configuration valid.")
+    _logger.debug("Configuration valid.")
 
 
 def to_datetime(value: Any) -> Optional[datetime.datetime]:
@@ -933,6 +933,16 @@ class SyncPipeline:
         """Whether the run report is printed as JSON instead of a table."""
         return self.settings.output_json
 
+    @property
+    def quiet(self) -> bool:
+        """Whether this run was asked to say nothing below a warning."""
+        return getattr(self.settings, "verbosity", None) == "quiet"
+
+    @property
+    def verbose(self) -> bool:
+        """Whether this run was asked to emit verbose logs."""
+        return getattr(self.settings, "verbosity", None) == "verbose"
+
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
         from living_ink.api import get_rmapi
@@ -999,7 +1009,7 @@ class SyncPipeline:
 
         self.device = reading
         if reading.source == SOURCE_USB:
-            log(f"📱 {reading.describe()}")
+            _logger.info("📱 %s", reading.describe())
         else:
             _logger.info("Device: %s", reading.describe())
 
@@ -1053,7 +1063,7 @@ class SyncPipeline:
         )
 
         if not self.target_notebook:
-            self._report_type_skips(chosen)
+            self._report_type_skips(chosen, client)
             return chosen
 
         log(f"Filtering for notebook: {self.target_notebook}")
@@ -1066,7 +1076,7 @@ class SyncPipeline:
             )
         return chosen
 
-    def _report_type_skips(self, chosen: Selection) -> None:
+    def _report_type_skips(self, chosen: Selection, client: Any = None) -> None:
         """Say how many documents were passed over for their type alone.
 
         Counted from the selection rather than tallied during discovery, so the
@@ -1074,17 +1084,21 @@ class SyncPipeline:
 
         Args:
             chosen: What this run decided to do.
+            client: The connected transport, for accurate document type resolution.
         """
         skipped: Dict[str, int] = {}
         for item, reason in chosen.skipped:
             if reason == WRONG_TYPE:
-                source = get_document_type(item)
+                source = get_document_type(item, client)
                 skipped[source] = skipped.get(source, 0) + 1
 
         for source, count in sorted(skipped.items()):
-            log(
-                f"Skipped {count} {source.upper()} document(s) "
-                f"(enable with --sync-{source}s or in config.yml)."
+            flag = f"--{source}s" if source == "notebook" else f"--{source}"
+            _logger.info(
+                "Skipped %d %s document(s) (enable with %s or in config.yml).",
+                count,
+                source.upper(),
+                flag,
             )
 
     def _record_inventory(self, listing: Sequence[Any], id_map: Dict[str, Any]) -> None:
@@ -1174,7 +1188,7 @@ class SyncPipeline:
             return stop.success
 
         if success:
-            log(f"Notebook {job.notebook} processing complete.")
+            _logger.debug(f"Notebook {job.notebook} processing complete.")
             if not job.keep_temp:
                 job.workspace.purge()
         else:
@@ -1358,7 +1372,9 @@ class SyncPipeline:
         )
 
         type_badge = f" ({doc_type.upper()})" if doc_type != "notebook" else ""
-        log(f"Processing {doc_type}: {job.display_title}{type_badge} (ID: {job.notebook_id})")
+        _logger.info(
+            "Processing %s: %s%s (ID: %s)", doc_type, job.display_title, type_badge, job.notebook_id
+        )
         return job
 
     # ── Stage 2: acquire pages ───────────────────────────────────────────
@@ -1381,9 +1397,9 @@ class SyncPipeline:
         job.imgs = self._rendered_pages(job)
 
         if not job.imgs:
-            log(
-                f"No white-background PNGs found for {job.notebook}. "
-                "Attempting to pull from reMarkable..."
+            _logger.debug(
+                "No white-background PNGs found for %s. Attempting to pull from reMarkable...",
+                job.notebook,
             )
             if not job.item:
                 raise _StopProcessing(
@@ -1399,9 +1415,11 @@ class SyncPipeline:
                     False, f"No pages or text could be extracted for '{job.notebook}'. Skipping."
                 )
 
-        log(
-            f"Found {len(job.imgs)} white-background PNGs for {job.notebook}: "
-            f"{[p.name for p in job.imgs]}"
+        _logger.debug(
+            "Found %d white-background PNGs for %s: %s",
+            len(job.imgs),
+            job.notebook,
+            [p.name for p in job.imgs],
         )
         self._describe_pages(job)
 
@@ -1553,6 +1571,9 @@ class SyncPipeline:
                 if not renderer.prepare(bundle, ctx):
                     self._nothing_to_render(job, source)
 
+                if bundle.source_path and bundle.source_path.exists():
+                    job.doc_file_path = bundle.source_path
+
                 refs = list(renderer.pages(bundle, ctx))
                 job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
 
@@ -1564,7 +1585,12 @@ class SyncPipeline:
                     self._nothing_to_render(job, source)
 
                 if refs:
-                    log(f"Rendering {len(refs)} page(s) for {source.label} '{job.notebook}'...")
+                    _logger.debug(
+                        "Rendering %d page(s) for %s '%s'...",
+                        len(refs),
+                        source.label,
+                        job.notebook,
+                    )
                     self._render_pages(job, source, bundle, refs, ctx)
             finally:
                 # In a finally because a document that stopped early is exactly
@@ -1680,7 +1706,7 @@ class SyncPipeline:
             self._save_page(job, ref.number, png_bytes)
 
         if reused:
-            log(f"{reused} of {len(refs)} pages were already rendered; reused as-is.")
+            _logger.debug("%d of %d pages were already rendered; reused as-is.", reused, len(refs))
 
     def _save_page(self, job: DocumentJob, page: int, data: bytes, label: str = "Saved") -> None:
         """Write one rendered page image into the workspace, atomically.
@@ -1695,7 +1721,7 @@ class SyncPipeline:
         tmp = out_img.with_suffix(out_img.suffix + ".tmp")
         tmp.write_bytes(data)
         os.replace(tmp, out_img)
-        log(f"{label}: {out_img}")
+        _logger.debug("%s: %s", label, out_img)
 
     # ── Stage 3: tags ────────────────────────────────────────────────────
 
@@ -1707,7 +1733,7 @@ class SyncPipeline:
             job.tags.extend(get_document_tags(client, job.item) or [])
 
         if job.tags:
-            log(f"Tags found for '{job.notebook}': {job.tags}")
+            _logger.debug("Tags found for '%s': %s", job.notebook, job.tags)
 
     # ── Stage 4: preprocess ──────────────────────────────────────────────
 
@@ -1840,7 +1866,9 @@ class SyncPipeline:
         results = self.transcriber.transcribe(job.pre_paths)
         reused = self.transcriber.hits - before
         if reused:
-            log(f"{reused} of {len(job.pre_paths)} pages came from the cache; no API call made.")
+            _logger.debug(
+                "%d of %d pages came from the cache; no API call made.", reused, len(job.pre_paths)
+            )
 
         job.transcribed_pages = len(job.pre_paths) - reused
         job.cached_pages = reused
@@ -1872,7 +1900,7 @@ class SyncPipeline:
             job.extracted_doc_text,
             job.doc_file_path,
         )
-        log(f"Cleaned OCR text saved to {job.workspace.transcript}")
+        _logger.debug("Cleaned OCR text saved to %s", job.workspace.transcript)
 
     # ── Stage 7: the verdict on what came back ───────────────────────────
 
@@ -1999,7 +2027,9 @@ class SyncPipeline:
                 if result.ok:
                     job.published_to.append(dest.state_key)
                     if result.detail:
-                        log(f"   {result.detail}")
+                        log(f"✓ Synced {result.detail}")
+                    else:
+                        log(f"✓ Synced '{job.notebook}'")
                     # Update state for THIS destination immediately, and after
                     # the note is on disk: a row recorded first would claim a
                     # note a crash never wrote, and that document is never
@@ -2131,7 +2161,7 @@ class SyncPipeline:
             could not be asked.
         """
         dest_name = dest.display_name
-        log(f"Publishing to {dest_name}...")
+        _logger.debug("Publishing to %s...", dest_name)
 
         try:
             published = dest.publish(doc, self._publish_context(dest, doc.doc_id))
@@ -2459,7 +2489,7 @@ class SyncPipeline:
         self._failure_detail = None
 
         validate_environment()
-        log("Pipeline started.")
+        _logger.info("Pipeline started.")
         if self.dry_run:
             log("🔍 Dry run: nothing will be published and no sync state will be recorded.")
 
@@ -2479,6 +2509,7 @@ class SyncPipeline:
         self._counts = (chosen.considered, 0, 0)
         self._handle_orphans(chosen.orphans, id_map)
         self._report_selection(chosen)
+        self._show_preview(listing, chosen)
 
         if not chosen.to_process:
             # Recorded, not inferred. A scheduled tick that found nothing is a
@@ -2486,10 +2517,16 @@ class SyncPipeline:
             # happened, or the staleness banner either cries wolf at every
             # quiet week or never fires at all.
             self.nothing_pending = True
-            if not self.target_notebook:
+            if not self.target_notebook and (
+                self.quiet or self.json_output or self.trigger == state.TRIGGER_SCHEDULED
+            ):
                 log("No new or updated notebooks found for any active destination. Exiting.")
             self._print_summary()
             return True
+
+        count = len(chosen.to_process)
+        unit = "document" if count == 1 else "documents"
+        log(f"Starting sync for {count} {unit}...")
 
         all_success = True
         published = failed = 0
@@ -2505,10 +2542,38 @@ class SyncPipeline:
             # run record has to say so.
             self._counts = (chosen.considered, published, failed)
 
-        log("Pipeline finished.")
+        _logger.info("Pipeline finished.")
         cleanup_temp_artifacts(keep_temp=self.keep_temp)
         self._print_summary()
         return all_success
+
+    def _show_preview(self, listing: Sequence[Any], chosen: Selection) -> None:
+        """Render the comparison table between the tablet and notes."""
+        if (
+            getattr(self, "quiet", False)
+            or getattr(self, "json_output", False)
+            or getattr(self, "trigger", None) == state.TRIGGER_SCHEDULED
+        ):
+            return
+        try:
+            from living_ink.cli.inventory import (
+                _orphan_records,
+                render_comparison,
+                rows_from_selection,
+            )
+
+            store = get_state_store()
+            active = getattr(self, "destinations", None) or list(get_default_destinations())
+            rows = rows_from_selection(list(listing), chosen, store, active)
+            orphans = _orphan_records(chosen, store)
+            render_comparison(
+                rows,
+                orphans,
+                getattr(self, "device", None),
+                show_all=False,
+            )
+        except Exception as e:
+            _logger.debug("Could not render comparison preview: %s", e, exc_info=True)
 
     def _report_selection(self, chosen: Selection) -> None:
         """Record the documents this run will not touch, and why.
@@ -2584,4 +2649,4 @@ class SyncPipeline:
             print(self.report.as_json())
             _logger.info("Run summary: %s", self.report.as_json())
             return
-        log(self.report.render())
+        log(self.report.render(detailed=getattr(self, "verbose", False)))
