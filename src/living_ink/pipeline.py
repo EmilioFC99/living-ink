@@ -814,7 +814,7 @@ class SyncPipeline:
         # Not implied by dry_run any more. One flag quietly turning on another
         # is a third concept where the product needs one, and the transcripts
         # a rehearsal leaves behind are a debugging artifact: anyone who wants
-        # them asks for them, which is what CLAUDE.md already tells them to do.
+        # them asks for them, which is what AGENTS.md already tells them to do.
         self.keep_temp = keep_temp
 
         if self.config_path and self.config_path != get_config_path():
@@ -1541,7 +1541,7 @@ class SyncPipeline:
             )
         finally:
             # The .rm source zip is exactly what a render bug needs, and
-            # CLAUDE.md tells people to debug rendering with --keep-temp. It
+            # AGENTS.md tells people to debug rendering with --keep-temp. It
             # used to be unlinked either way.
             if self.keep_temp:
                 log(f"Keeping {tmp_zip} (--keep-temp).")

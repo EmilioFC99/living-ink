@@ -2113,7 +2113,7 @@ class TestParserWarningsReachTheReport:
 
 
 class TestTheDownloadedZipHonoursKeepTemp:
-    """``--keep-temp`` is what CLAUDE.md tells people to debug rendering with."""
+    """``--keep-temp`` is what AGENTS.md tells people to debug rendering with."""
 
     def _pipeline(self, tmp_path, keep_temp):
         pipe = SyncPipeline.__new__(SyncPipeline)
