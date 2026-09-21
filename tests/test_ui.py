@@ -697,3 +697,96 @@ class TestSelectedOverridesTheChoicesOwnFlags:
             ENTER, lambda: ui.checkbox("Pick", self.ONE_ON, selected=("alpha",))
         )
         assert answer == ("alpha",)
+
+
+class TestColourNeverReachesAWidget:
+    """A widget renders its text literally, so an escape in it is visible.
+
+    ``console()`` writes to a terminal that reads ANSI; ``questionary`` hands a
+    plain-string title to ``prompt_toolkit``, which puts it on the screen as
+    text. The config menu's value column used ``ui.dim`` for the provenance
+    note and arrived as ``^[[2m(config file)^[[0m``. Styling inside a widget
+    belongs to :data:`ui.THEME`, so the colour is stripped at the boundary
+    rather than left to each caller to remember.
+
+    **The rendered assertions look for ``^[``, not ``\\x1b``, and that is the
+    whole reason they catch anything.** ``prompt_toolkit`` renders a control
+    character in caret notation, so a leaked escape reaches the screen as the
+    two printable characters the user actually sees — searching the render for
+    a raw ``\\x1b`` finds nothing whether the bug is present or not, which is
+    how the first version of these tests passed against the unfixed code.
+    """
+
+    @pytest.mark.parametrize(
+        "styled",
+        [
+            lambda: ui.dim("(default)"),
+            lambda: ui.cyan("  • edited"),
+            lambda: ui.yellow("(env)"),
+            lambda: f"{ui.bold('name')}  {ui.dim('(config file)')}{ui.cyan(' • edited')}",
+        ],
+    )
+    def test_every_helper_is_stripped(self, styled, monkeypatch):
+        """Including a label composed of several, which is the real shape."""
+        monkeypatch.setattr(ui, "colour_enabled", lambda: True)
+        text = styled()
+        assert "\033[" in text, "the helper did not colour, so this proves nothing"
+
+        assert "\033" not in ui.plain(text)
+
+    def test_text_with_no_colour_is_returned_unchanged(self):
+        """Stripping is not reformatting: spacing a menu column relies on it."""
+        assert ui.plain("true  (config file)  • edited") == "true  (config file)  • edited"
+
+    def test_a_coloured_label_renders_clean(self, keyboard, monkeypatch):
+        """End to end: the escape is gone from what the terminal is shown.
+
+        The unit test above proves the function; this proves it is *called*,
+        which is the half that regressed.
+        """
+        monkeypatch.setattr(ui, "colour_enabled", lambda: True)
+        rows = [ui.Choice("a", f"watch_enabled  true  {ui.dim('(config file)')}")]
+
+        keyboard.answer(ENTER, lambda: ui.select("Watch", rows), capture=True)
+
+        assert "(config file)" in keyboard.rendered
+        assert "^[" not in keyboard.rendered
+
+    def test_a_coloured_question_renders_clean(self, keyboard, monkeypatch):
+        """The message is text too, and takes the same route."""
+        monkeypatch.setattr(ui, "colour_enabled", lambda: True)
+
+        keyboard.answer("y\r", lambda: ui.confirm(f"Remove {ui.bold('everything')}?"), capture=True)
+
+        assert "everything" in keyboard.rendered
+        assert "^[" not in keyboard.rendered
+
+    def test_a_coloured_description_renders_clean(self, keyboard, monkeypatch):
+        """The second line is dimmed by the theme, not by the caller."""
+        monkeypatch.setattr(ui, "colour_enabled", lambda: True)
+        rows = [ui.Choice("a", "First", description=ui.yellow("shadowed by an env var"))]
+
+        keyboard.answer(ENTER, lambda: ui.select("Pick", rows), capture=True)
+
+        assert "shadowed by an env var" in keyboard.rendered
+        assert "^[" not in keyboard.rendered
+
+    def test_the_shortcut_numbers_survive(self, keyboard, monkeypatch):
+        """Why the colour is dropped rather than translated.
+
+        ``questionary`` accepts a list of style/text pairs as a title, which
+        would keep the colour — but the branch rendering one skips the
+        shortcut prefix and the highlight class, so the ``1)`` numbers and the
+        cursor would go instead. Losing the styling is the cheaper trade, and
+        this is the thing that trade was made to protect.
+        """
+        monkeypatch.setattr(ui, "colour_enabled", lambda: True)
+        rows = [
+            ui.Choice("a", ui.dim("First")),
+            ui.Choice("b", ui.dim("Second")),
+        ]
+
+        keyboard.answer(ENTER, lambda: ui.select("Pick", rows), capture=True)
+
+        assert "1)" in keyboard.rendered
+        assert "2)" in keyboard.rendered
