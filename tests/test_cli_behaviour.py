@@ -408,6 +408,10 @@ CLOUD_WALKTHROUGH: tuple[tuple[str, object], ...] = (
     ("How should Living Ink reach your reMarkable?", "cloud"),
     ("Reuse the reMarkable pairing", True),
     ("Also set up the USB cable", False),
+    # Asked before the model, because it is the question that decides how much
+    # the model will be asked to do: every annotated page is one OCR call,
+    # whatever kind of document it is a page of.
+    ("Which document types?", ("notebook",)),
     ("Which AI provider?", "gemini"),
     ("Model", "gemini-2.0-flash"),
     ("API key", "AIzaTestKey"),

@@ -35,6 +35,7 @@ from typing import List, Optional, Tuple
 from living_ink import ui
 from living_ink.cli.base import BaseCommand
 from living_ink.cli.commands.sync import SyncCommand
+from living_ink.config.schema import DEFAULT_SYNC_TYPES
 from living_ink.logs import console
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,10 @@ class Answers:
         ssh_host: Address of the tablet over USB.
         ssh_port: SSH port on the tablet.
         remarkable_token: A freshly paired or reused Cloud token, or "".
+        sync_types: Which document types to take off the tablet, as
+            ``sync.types`` values. Handwritten notebooks alone by default,
+            because an annotated PDF costs an OCR call per annotated page and
+            a library of them is a bill nobody asked for.
         ai_provider: Provider preset name, ``"custom"``, or ``"none"``.
         ai_model: Model name, or "" for a provider that needs none.
         ai_base_url: Endpoint for a provider with no preset, or "".
@@ -97,6 +102,7 @@ class Answers:
     ssh_host: str = ""
     ssh_port: int = 22
     remarkable_token: str = ""
+    sync_types: Tuple[str, ...] = DEFAULT_SYNC_TYPES
     ai_provider: str = "gemini"
     ai_model: str = ""
     ai_base_url: str = ""
@@ -161,6 +167,7 @@ class Wizard:
         """
         self._welcome()
         self.step_connection()
+        self.step_sync_types()
         self.step_ai()
         self.step_destination()
         self.step_completions()
@@ -181,7 +188,7 @@ class Wizard:
         """Print the banner, and say how long this is going to take."""
         console("")
         console(ui.bold(ui.cyan("Living Ink setup")))
-        console(ui.dim("Three questions, a summary, and nothing is saved until you say so."))
+        console(ui.dim("Four questions, a summary, and nothing is saved until you say so."))
         console("")
 
     # -- step 1: the tablet -------------------------------------------------
@@ -330,14 +337,57 @@ class Wizard:
             if not ui.confirm("Try again?", default=True):
                 return ""
 
-    # -- step 2: the model --------------------------------------------------
+    # -- step 2: what to take off it -----------------------------------------
+
+    def step_sync_types(self) -> None:
+        """Ask which kinds of document to take off the tablet.
+
+        Asked rather than defaulted because the two answers differ in cost,
+        not just in taste: a handwritten page is one OCR call, and so is every
+        annotated page of a 400-page PDF. A user who keeps their textbooks on
+        the tablet should agree to that bill on the way in, and a user who
+        wants their annotated reading synced should not have to discover a
+        config key to find out it was possible.
+
+        The options come from the ``sync.types`` schema entry, not from a list
+        written here, so a newly registered source is offered without a second
+        edit. Ticking nothing is a real answer from the widget but not a
+        useful one — a sync with no types matches no document — so it falls
+        back to the schema default rather than saving a config that can only
+        do nothing.
+        """
+        from living_ink.config.schema import SETTINGS
+
+        setting = next(s for s in SETTINGS if s.field == "sync_types")
+
+        console("")
+        console(ui.bold("2. What to sync"))
+        console(ui.dim("  Every annotated page costs one AI call, whatever it is a page of."))
+
+        picked = ui.required(
+            ui.checkbox(
+                "Which document types?",
+                [
+                    ui.Choice(choice.value, choice.label or choice.value)
+                    for choice in setting.choices
+                ],
+                selected=self.answers.sync_types,
+            )
+        )
+        if not picked:
+            console(ui.yellow("  Nothing ticked — keeping handwritten notebooks."))
+            picked = DEFAULT_SYNC_TYPES
+
+        self.answers.sync_types = tuple(picked)
+
+    # -- step 3: the model --------------------------------------------------
 
     def step_ai(self) -> None:
         """Ask which model reads the handwriting, and check the key works."""
         from living_ink.providers import PROVIDER_PRESETS
 
         console("")
-        console(ui.bold("2. Reading your handwriting"))
+        console(ui.bold("3. Reading your handwriting"))
 
         provider = ui.required(
             ui.select(
@@ -422,14 +472,14 @@ class Wizard:
                 self.answers.warnings.append(f"AI key: {message}")
                 return
 
-    # -- step 3: the vault --------------------------------------------------
+    # -- step 4: the vault --------------------------------------------------
 
     def step_destination(self) -> None:
         """Ask where the notes go, offering the vaults already on this Mac."""
         from living_ink.setup_wizard import detect_obsidian_vaults
 
         console("")
-        console(ui.bold("3. Where the notes go"))
+        console(ui.bold("4. Where the notes go"))
 
         self.answers.obsidian_enabled = bool(ui.confirm("Publish to Obsidian?", default=True))
         if not self.answers.obsidian_enabled:
@@ -621,7 +671,11 @@ class Wizard:
         if answers.ai_model:
             model += f" / {answers.ai_model}"
 
-        rows = [("Tablet", transport), ("Model", model)]
+        rows = [
+            ("Tablet", transport),
+            ("Syncing", ", ".join(answers.sync_types)),
+            ("Model", model),
+        ]
         if answers.ai_key:
             rows.append(("API key", credentials.mask(answers.ai_key)))
         if answers.remarkable_token:
@@ -676,6 +730,7 @@ class Wizard:
                 use_ssh=answers.use_ssh,
                 ssh_host=answers.ssh_host,
                 ssh_port=answers.ssh_port,
+                sync_types=answers.sync_types,
                 obsidian_enabled=answers.obsidian_enabled,
                 obsidian_vault_path=answers.obsidian_vault_path,
                 obsidian_root_folder=answers.obsidian_root_folder,

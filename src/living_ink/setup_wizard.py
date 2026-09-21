@@ -19,7 +19,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from living_ink.config import SCHEMA_VERSION, credentials, render_config
 from living_ink.config.schema import (
@@ -27,6 +27,7 @@ from living_ink.config.schema import (
     DEFAULT_PREFERRED_CONNECTION,
     DEFAULT_SSH_HOST,
     DEFAULT_SSH_PORT,
+    DEFAULT_SYNC_TYPES,
 )
 
 logger = logging.getLogger(__name__)
@@ -875,6 +876,7 @@ def generate_config_yaml(
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
     max_notebooks_per_run: int = 0,
+    sync_types: Sequence[str] = DEFAULT_SYNC_TYPES,
     watch_schedule: str = "",
     watch_timezone: str = "",
 ) -> str:
@@ -905,6 +907,8 @@ def generate_config_yaml(
             notebooks, and one they have to discover a setting to lift. The
             schema's own default stays low, because that one protects a
             *scripted* run from an accidentally enormous one.
+        sync_types: Which document types to sync, as schema ``sync.types``
+            values.
         watch_schedule: A cron expression, or "" for no automatic syncing.
         watch_timezone: The zone that expression is read in, written only
             alongside a schedule — a timezone with nothing to schedule is a
@@ -941,7 +945,7 @@ def generate_config_yaml(
                 "ssh_host": ssh_host,
                 "ssh_port": ssh_port,
             },
-            "sync": {"limit": max_notebooks_per_run},
+            "sync": {"limit": max_notebooks_per_run, "types": list(sync_types)},
             "obsidian": {
                 "enabled": obsidian_enabled,
                 "vault_path": obsidian_vault_path.strip(),
