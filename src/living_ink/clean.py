@@ -49,6 +49,11 @@ _provider: Optional[TextRepairProvider] = None
 # Whether the AI pass runs at all, as of the last configure(). None until then.
 _repair_enabled: Optional[bool] = None
 
+# ``ai.prompt_dir`` as of the last configure(). The two prompt files ship inside
+# the package, which means an upgrade overwrites an edited one; pointing this at
+# a directory of your own is how a customised prompt survives one.
+_prompt_dir: Optional[str] = None
+
 
 def _read_prompt(path: Path) -> str:
     """Read one of the two packaged prompt files.
@@ -73,13 +78,58 @@ def _read_prompt(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def _read_prompt_instructions() -> str:
+def _prompt_path(packaged: Path, prompt_dir: Optional[str]) -> Path:
+    """Resolve a prompt file, preferring the user's own copy over the shipped one.
+
+    The override is opt-in and per-file: a ``prompt_dir`` holding only
+    ``ocr_prompt.txt`` overrides the OCR prompt and leaves the cleanup prompt
+    packaged. A named directory that does not hold the file is not an error,
+    because the alternative is refusing to run over a prompt the user never
+    claimed to have replaced.
+
+    Args:
+        packaged: :data:`PROMPT_FILE` or :data:`OCR_PROMPT_FILE`.
+        prompt_dir: ``ai.prompt_dir``, or None for the packaged prompts.
+
+    Returns:
+        The path to read the prompt from.
+    """
+    if prompt_dir:
+        candidate = Path(prompt_dir).expanduser() / packaged.name
+        if candidate.is_file():
+            return candidate
+    return packaged
+
+
+def prompt_paths(prompt_dir: Optional[str]) -> tuple[Path, Path]:
+    """Report which two files a run with these settings reads its prompts from.
+
+    The config menu opens what a run actually reads, rather than the packaged
+    copy, so editing a prompt and syncing cannot disagree about which file was
+    edited.
+
+    Args:
+        prompt_dir: ``ai.prompt_dir``, or None for the packaged prompts.
+
+    Returns:
+        The OCR prompt path and the cleanup prompt path, in that order.
+    """
+    return (
+        _prompt_path(OCR_PROMPT_FILE, prompt_dir),
+        _prompt_path(PROMPT_FILE, prompt_dir),
+    )
+
+
+def _read_prompt_instructions(prompt_dir: Optional[str] = None) -> str:
     """Read the cleanup prompt instructions from the prompt file.
+
+    Args:
+        prompt_dir: ``ai.prompt_dir``, or None for the packaged prompt.
 
     Returns:
         The prompt text from ``cleanup_prompt.txt``.
     """
-    return _read_prompt(PROMPT_FILE)
+    return _read_prompt(_prompt_path(PROMPT_FILE, prompt_dir))
 
 
 def configure(settings: Settings) -> None:
@@ -93,9 +143,10 @@ def configure(settings: Settings) -> None:
         settings: The run's settings. Carries both the provider configuration
             and whether the AI pass runs at all.
     """
-    global _provider, _repair_enabled
+    global _provider, _repair_enabled, _prompt_dir
     _provider = get_provider(settings)
     _repair_enabled = settings.repair_enabled
+    _prompt_dir = settings.ai_prompt_dir
     logger.info("AI text cleanup provider: %s", _provider.name)
 
 
@@ -156,7 +207,7 @@ def repair_text_with_openai(text: str) -> str:
         return text
 
     provider = _get_provider()
-    instructions = _read_prompt_instructions()
+    instructions = _read_prompt_instructions(_prompt_dir)
 
     cleaned = provider.repair_text(text, instructions)
     return normalize_callout_annotations(cleaned)
@@ -265,13 +316,16 @@ def normalize_callout_annotations(text: str) -> str:
     return res.strip()
 
 
-def _read_ocr_instructions() -> str:
+def _read_ocr_instructions(prompt_dir: Optional[str] = None) -> str:
     """Read the OCR prompt instructions from the prompt file.
+
+    Args:
+        prompt_dir: ``ai.prompt_dir``, or None for the packaged prompt.
 
     Returns:
         The prompt text from ``ocr_prompt.txt``.
     """
-    return _read_prompt(OCR_PROMPT_FILE)
+    return _read_prompt(_prompt_path(OCR_PROMPT_FILE, prompt_dir))
 
 
 def transcription_fingerprint(settings: Settings) -> str:
@@ -282,7 +336,9 @@ def transcription_fingerprint(settings: Settings) -> str:
     language asked for, the system prompt the vision call opens with, and the
     two prompt files, which ship inside the package and are meant to be edited.
     Folding them into one digest means an edited prompt or a switched model
-    misses the cache instead of quietly serving the old answer.
+    misses the cache instead of quietly serving the old answer. It hashes the
+    prompts a run would actually *send*, resolved through ``ai.prompt_dir``, so
+    pointing that at a directory of edited prompts misses the cache too.
 
     **This builds nothing.** It used to read ``_get_provider().name``, which
     was only ever a way of spelling "provider and model" through an object that
@@ -303,8 +359,8 @@ def transcription_fingerprint(settings: Settings) -> str:
         repr(settings.ai_temperature),
         settings.ai_language or "",
         VISION_SYSTEM_MESSAGE,
-        _read_ocr_instructions(),
-        _read_prompt_instructions(),
+        _read_ocr_instructions(settings.ai_prompt_dir),
+        _read_prompt_instructions(settings.ai_prompt_dir),
     )
     digest = hashlib.sha256("\0".join(parts).encode("utf-8"))
     return digest.hexdigest()[:16]
@@ -351,7 +407,7 @@ def ocr_and_repair(image_path: str) -> Optional[str]:
         )
         return None
 
-    instructions = _read_ocr_instructions()
+    instructions = _read_ocr_instructions(_prompt_dir)
     result = provider.ocr_image(image_path, instructions)
 
     if not result:

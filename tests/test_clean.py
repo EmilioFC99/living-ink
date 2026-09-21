@@ -28,9 +28,11 @@ def reset_provider():
     """
     clean._provider = None
     clean._repair_enabled = None
+    clean._prompt_dir = None
     yield
     clean._provider = None
     clean._repair_enabled = None
+    clean._prompt_dir = None
 
 
 @pytest.fixture
@@ -382,3 +384,100 @@ class TestTranscriptionFingerprint:
 
     def test_it_is_short_enough_to_print(self, mock_prompt_file, mock_ocr_prompt_file):
         assert len(clean.transcription_fingerprint(self.settings)) == 16
+
+
+# =========================================================================
+# ai.prompt_dir — user-owned prompt overrides
+# =========================================================================
+
+
+class TestPromptDirOverride:
+    """``ai.prompt_dir`` was declared in the schema and read by nothing.
+
+    The two prompts ship inside the installed package, so editing one in place
+    is an edit an upgrade deletes. Pointing ``ai.prompt_dir`` at a directory of
+    your own is the way a customised prompt survives one — which only works if
+    the run reads from there and the cache notices that it did.
+    """
+
+    def test_no_prompt_dir_reads_the_packaged_prompt(self, mock_ocr_prompt_file):
+        assert clean._prompt_path(clean.OCR_PROMPT_FILE, None) == mock_ocr_prompt_file
+
+    def test_a_prompt_dir_without_the_file_reads_the_packaged_prompt(
+        self, tmp_path, mock_ocr_prompt_file
+    ):
+        """Not an error. A directory holding one prompt overrides one prompt."""
+        empty = tmp_path / "mine"
+        empty.mkdir()
+        assert clean._prompt_path(clean.OCR_PROMPT_FILE, str(empty)) == mock_ocr_prompt_file
+
+    def test_a_prompt_dir_holding_the_file_wins(self, tmp_path, mock_ocr_prompt_file):
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        override = mine / "ocr_prompt.txt"
+        override.write_text("Read it my way.")
+
+        assert clean._prompt_path(clean.OCR_PROMPT_FILE, str(mine)) == override
+        assert clean._read_ocr_instructions(str(mine)) == "Read it my way."
+
+    def test_the_override_is_per_file(self, tmp_path, mock_prompt_file, mock_ocr_prompt_file):
+        """Overriding the OCR prompt must not silently blank the cleanup one."""
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        (mine / "ocr_prompt.txt").write_text("Read it my way.")
+
+        assert clean._read_ocr_instructions(str(mine)) == "Read it my way."
+        assert clean._read_prompt_instructions(str(mine)) == mock_prompt_file.read_text()
+
+    def test_a_tilde_is_expanded(self, tmp_path, monkeypatch, mock_ocr_prompt_file):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        mine = tmp_path / "prompts"
+        mine.mkdir()
+        (mine / "ocr_prompt.txt").write_text("Home sweet home.")
+
+        assert clean._read_ocr_instructions("~/prompts") == "Home sweet home."
+
+    def test_prompt_paths_reports_both_in_ocr_then_cleanup_order(
+        self, tmp_path, mock_prompt_file, mock_ocr_prompt_file
+    ):
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        (mine / "cleanup_prompt.txt").write_text("Tidy it my way.")
+
+        ocr, cleanup = clean.prompt_paths(str(mine))
+        assert ocr == mock_ocr_prompt_file
+        assert cleanup == mine / "cleanup_prompt.txt"
+
+    def test_configure_records_the_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(clean, "get_provider", lambda settings: NoneProvider())
+        settings = Settings(ai_provider="none", ai_prompt_dir=str(tmp_path))
+
+        clean.configure(settings)
+
+        assert clean._prompt_dir == str(tmp_path)
+
+    def test_an_overridden_prompt_misses_the_cache(
+        self, tmp_path, mock_prompt_file, mock_ocr_prompt_file
+    ):
+        """The whole point: a different prompt must re-read every page."""
+        settings = Settings(ai_provider="gemini", ai_model="m")
+        before = clean.transcription_fingerprint(settings)
+
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        (mine / "ocr_prompt.txt").write_text("Read it my way.")
+        after = dataclasses.replace(settings, ai_prompt_dir=str(mine))
+
+        assert clean.transcription_fingerprint(after) != before
+
+    def test_an_empty_prompt_dir_keeps_the_cache(
+        self, tmp_path, mock_prompt_file, mock_ocr_prompt_file
+    ):
+        """Naming a directory that overrides nothing changes nothing."""
+        settings = Settings(ai_provider="gemini", ai_model="m")
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        assert clean.transcription_fingerprint(
+            dataclasses.replace(settings, ai_prompt_dir=str(empty))
+        ) == clean.transcription_fingerprint(settings)

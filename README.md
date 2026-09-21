@@ -1,148 +1,296 @@
 # Living Ink
 
-**Automate the flow of your "Living Signal" from reMarkable to Obsidian.**
+**Turn handwritten reMarkable notebooks into searchable Markdown in your Obsidian vault.**
 
-Living Ink is an automated pipeline that bridges the gap between your reMarkable tablet and your digital "Second Brain" (Obsidian). It goes beyond simple PDF export by converting your handwritten notebooks into fully searchable, typed text while preserving the original context and folder structure.
+[![CI](https://github.com/EmilioFC99/living-ink/actions/workflows/ci.yml/badge.svg)](https://github.com/EmilioFC99/living-ink/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
-## 🚀 Features
+Living Ink pulls your notebooks off a reMarkable tablet — over USB or the reMarkable
+Cloud — renders each page, has an AI model read the handwriting, and writes real
+Markdown into your vault. Your tablet's folder tree is mirrored, your tags come
+across, and anything you type into the note yourself is never overwritten.
 
-*   **Smart Sync**: Automatically detects new or updated notebooks on your reMarkable.
-*   **AI Vision OCR (Single API Key)**: Uses multimodal AI models (**Google Gemini**, **OpenAI GPT-4o**) to read handwritten pages directly and format them into clean text in a single step — **no Google Cloud Console or service accounts needed**.
-*   **Multi-Provider AI**: Supports:
-    *   **Google Gemini** (recommended: fast, free tier, vision OCR + text repair)
-    *   **OpenAI** (GPT-4o / GPT-4o-mini with vision OCR)
-    *   **Ollama** (100% local, no API key needed)
-    *   **Groq, OpenRouter, Mistral, Together AI**, or any custom OpenAI-compatible endpoint
-    *   Option to disable AI cleanup entirely for raw OCR text
-*   **Obsidian Integration**: Exports notes as Markdown files with YAML frontmatter, WikiLinked page attachments, and **full folder hierarchy mirroring** inside your vault (or a configurable root folder).
-*   **Folder Mirroring**: Replicates your exact reMarkable folder structure (e.g., `Finance/2026/Q1/Budget` → `Living Ink/Finance/2026/Q1/Budget.md`).
+## What you get
 
-## 📚 Documentation
+- **Searchable text, not images.** One multimodal AI call per page does OCR and
+  clean-up together. Headings, lists, tables and callouts survive.
+- **Your folder tree, mirrored.** `Finance/2026/Q1/Budget` on the tablet becomes
+  `Finance/2026/Q1/Budget.md` in the vault.
+- **Notes you can still edit.** Living Ink owns the frontmatter and the page
+  blocks. Everything you write between them is left alone on every re-sync.
+- **Cheap to repeat.** Transcriptions are cached, so re-syncing an unchanged
+  notebook costs nothing and Ctrl+C only loses the page in flight.
 
-*   **[Setup Guide](docs/SETUP_GUIDE.md)**: How to get your API keys (Google Gemini / OpenAI, reMarkable) and configure the app.
-*   **[User Manual](docs/USER_MANUAL.md)**: How to use the application in Automatic or Manual modes.
-*   **[AGENTS.md](AGENTS.md)**: Architecture and contributor guide for AI coding assistants.
+A published note looks like this:
 
-## ⚡ Quick Install (Recommended)
+```markdown
+---
+living_ink_id: 8f3c1a9e-...
+created: 2026-03-02
+updated: 2026-09-18
+synced: 2026-09-20
+source: Remarkable/Work/2026
+type: notebook
+tags: [meeting, q3]
+---
 
-### Option A: One-Line Installer
-Paste this command into your Terminal to install everything and launch the setup wizard:
+## Page 1
+
+# Q3 planning
+
+- Ship the importer by the 14th
+- [ ] Ask Dana about the migration window
+
+> [!quote] Highlight
+> The bottleneck is review, not authoring.
+```
+
+## Requirements
+
+| | |
+|---|---|
+| Python | 3.10 or newer |
+| Package manager | [uv](https://docs.astral.sh/uv/) (the installer sets it up for you) |
+| Tablet | A reMarkable on firmware 3.0 or newer, reachable over USB or the reMarkable Cloud |
+| AI | An API key for a vision-capable model — or [Ollama](https://ollama.com) running locally, which needs no key |
+| Platform | macOS or Linux |
+
+## Install
+
+**One-line installer** — installs `uv`, installs Living Ink, launches the wizard:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/EmilioFC99/living-ink/main/install.sh | bash
 ```
 
-### Option B: Using `uv tool`
-If you already have [uv](https://docs.astral.sh/uv/) installed:
+**With `uv` already installed:**
 
 ```bash
 uv tool install "git+https://github.com/EmilioFC99/living-ink.git"
 living-ink setup
 ```
 
-Once installed, you can use the global `living-ink` command from anywhere:
+**From source:**
+
 ```bash
-living-ink           # Sync notes (or runs setup if unconfigured)
-living-ink sync      # Run the sync pipeline
-living-ink watch     # Keep syncing on the schedule in config.yml until you stop it
-living-ink setup     # Re-run interactive setup wizard
-living-ink info      # Check tablet, AI, vault, caches, schedule, and sync state
-living-ink config    # Change any setting, edit the prompts, clear the caches
-living-ink completions bash|zsh|fish   # Print a tab-completion script
-living-ink uninstall # Remove the background job, settings and caches
+git clone https://github.com/EmilioFC99/living-ink.git
+cd living-ink
+uv sync --all-extras
+uv run living-ink setup
 ```
 
-`info` reads; `config` writes. Every setting `info` prints appears in the `config`
-menu under the same name, nothing is written until you confirm the summary, and
-your API keys stay out of `config.yml` — they live in a `0600` file of their own.
+To upgrade, re-run the installer or `uv tool install --force "git+https://github.com/EmilioFC99/living-ink.git"`.
 
-Automatic syncing is one cron expression in `config.yml` (`config` → Watch offers
-the common ones and shows you the next three times each would fire). `watch` reads
-it, and on macOS `setup` installs a LaunchAgent whose only job is keeping `watch`
-alive — so the schedule is somewhere you can read and change it, not buried in a
-plist. `info` says when the last scheduled sync ran and when the next one is due,
-and puts a banner above everything if one was missed.
-
-`uninstall` removes the background job and the caches, then asks separately before
-removing your settings, credentials and sync record. **It never touches your notes,
-under any flag** — pass `--yes` to answer every question with yes.
-
-For tab completion, redirect `completions` into the file named in the comment at
-the top of its output:
+## Quickstart
 
 ```bash
-living-ink completions bash > ~/.local/share/bash-completion/completions/living-ink
-living-ink completions zsh  > ~/.zfunc/_living-ink        # with fpath+=(~/.zfunc) before compinit
-living-ink completions fish > ~/.config/fish/completions/living-ink.fish
+living-ink setup            # 1. the wizard: tablet, AI provider, vault
+living-ink sync --preview   # 2. see what would happen — free, no API calls
+living-ink sync             # 3. do it
 ```
 
-The script is generated from the installed version's own commands and flags, so
-it is never out of date with the program — regenerate it after an upgrade rather
-than editing it.
+**Two defaults worth knowing before your first run:**
 
----
+- A sync processes **5 documents at a time** (whatever `sync.limit` says in your
+  config). Use `living-ink sync --limit 0` for the whole backlog.
+- Only **handwritten notebooks** sync. Annotated PDFs and EPUBs are opt-in:
+  `living-ink sync --pdf --epub`.
 
-## 🛠️ Manual Installation (Development)
+Trash, Templates and Quick sheets are always skipped.
 
-If you are developing or prefer a local clone:
+## Commands
 
-1.  **Clone and Install Dependencies**:
-    ```bash
-    git clone https://github.com/EmilioFC99/living-ink.git
-    cd living-ink
-    uv sync --all-extras
-    ```
+| Command | What it does |
+|---|---|
+| [`sync`](#sync) | Run the pipeline now |
+| [`watch`](#watch) | Keep syncing on a schedule until stopped |
+| [`setup`](#setup) | The first-run wizard |
+| [`config`](#config) | Change any setting, edit the prompts, clear the caches |
+| [`info`](#info) | Read-only health check |
+| [`uninstall`](#uninstall) | Remove what `setup` installed — never your notes |
 
-2.  **Run the Interactive Setup Wizard**:
-    ```bash
-    uv run living-ink setup
-    ```
+Running bare `living-ink` syncs if you are configured, and runs `setup` if you are not.
 
-    The guided wizard tests your tablet connection (USB SSH or Cloud), verifies your AI API key live, detects your Obsidian vault, and saves your configuration to `~/.config/living-ink/config.yml`.
+### `sync`
 
-3.  **Run the Pipeline**:
-    ```bash
-    uv run living-ink sync
-    ```
-
-## 🏗️ How It Works
-
-1.  **Download**: Fetches modified notebooks from reMarkable Cloud (or USB SSH).
-2.  **Render**: Converts vector strokes into high-resolution white-background PNG images.
-3.  **Read**: Your configured AI provider reads the handwriting and returns clean, structured text — one multimodal call per page, no separate OCR service.
-4.  **Publish**: Dispatches structured notes and page images to your enabled destinations.
-
-## 🧪 Running Tests
+Downloads what changed, reads it, publishes it. A notebook re-syncs when you
+edited it on the tablet, when a setting that changes the output changed (a new
+model, an edited prompt, a different vault folder), or when a previous run left
+pages untranscribed. Everything else is skipped, and skipping is free.
 
 ```bash
+living-ink sync --preview                # what would happen; no download, no OCR, no cost
+living-ink sync                          # sync
+living-ink sync --limit 0                # the whole backlog in one run
+living-ink sync --notebook "Work/Ideas"  # one notebook, by name, path or id
+```
+
+Every other flag — filtering, rehearsals, cache control, one-off overrides —
+is in the [User Manual](docs/USER_MANUAL.md#sync).
+
+### `watch`
+
+Syncs on the cron schedule in your config and keeps going until you stop it.
+
+```bash
+living-ink watch
+```
+
+The schedule is one cron expression you can read and change (`living-ink config`
+→ Watch offers common ones and shows the next three fire times). On macOS,
+`setup` installs a LaunchAgent whose only job is keeping `watch` alive.
+
+`watch` deliberately accepts **no behaviour flags**: a supervised process is
+restarted without its arguments, so a `--limit` here would silently stop
+applying. What a scheduled run does is what the config says it does.
+
+### `setup`
+
+The first-run wizard. It tests your tablet connection, verifies your AI key by
+sending it a real image, finds your Obsidian vault, and shows a summary.
+**Nothing is written until you confirm it.** It needs a terminal; with no TTY it
+exits 2 rather than guessing.
+
+```bash
+living-ink setup
+```
+
+Safe to re-run at any time.
+
+### `config`
+
+An interactive menu over every setting, generated from the schema — so every
+value `info` prints is editable here under the same name. Also where you edit
+the two AI prompts and clear the caches.
+
+```bash
+living-ink config
+```
+
+Nothing is written until you save, and the summary before the save names every
+change. Editing a prompt is a real change: it invalidates cached pages, so the
+next sync reads them again.
+
+### `info`
+
+Reads; changes nothing. The health check to run when something looks wrong.
+
+```bash
+living-ink info          # connection, AI, vault, caches, schedule, sync state
+living-ink info --json   # the same, plus every sync-state row
+```
+
+`info` reads, `config` writes. If a scheduled sync was missed, `info` prints a
+banner above everything else.
+
+### `uninstall`
+
+Removes the background job and the caches, then asks separately before removing
+your settings, credentials and sync record. **It never touches your notes, under
+any flag.**
+
+```bash
+living-ink uninstall        # asks
+living-ink uninstall --yes  # answers yes to everything
+```
+
+This does not remove the program — uninstall the package the way you installed it.
+
+### Shell completions
+
+```bash
+living-ink completions zsh > ~/.zfunc/_living-ink   # then: fpath+=(~/.zfunc) before compinit
+```
+
+`bash` and `fish` work the same way; the redirect target for each is named in a
+comment at the top of the output. The script is generated from the installed
+version's own parser, so regenerate it after an upgrade rather than editing it.
+
+## AI providers
+
+Any OpenAI-compatible endpoint works. The model must be able to read images —
+the wizard proves this by sending it one, so a text-only model fails at setup
+rather than at page 200.
+
+| `ai.provider` | Default model | Key needed |
+|---|---|---|
+| `gemini` | `gemini-flash-latest` | yes |
+| `openai` | `gpt-4o-mini` | yes |
+| `ollama` | `llama3.2` | no — runs locally |
+| `groq` | `llama-3.3-70b-versatile` | yes |
+| `openrouter` | `google/gemini-2.0-flash-exp:free` | yes |
+| `mistral` | `mistral-small-latest` | yes |
+| `together` | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` | yes |
+| `custom` | you set `ai.base_url` | depends |
+
+There is no non-AI OCR path. Setting `ai.provider: none` makes `sync` refuse to
+start rather than publish empty notes.
+
+**What leaves your machine:** the page image and the two prompts, over HTTPS, to
+the provider you chose. Your notebook titles, folder paths, tags and vault path
+are not in the request. With `ollama` or a `custom` endpoint on your own
+hardware, nothing leaves at all.
+
+## Configuration
+
+Settings live in `~/.config/living-ink/config.yml`. `living-ink config` edits
+them; `living-ink info` shows every effective value and where it came from.
+
+Every setting can also be given as an environment variable or, mostly, a CLI
+flag. They resolve in one order: **flag → environment variable → stored
+credential → config file → default.**
+
+**API keys are never in `config.yml`.** They live one per file at
+`~/.config/living-ink/credentials/`, mode `0600`. Caches, `state.db` and
+`logs/pipeline.log` live in `~/.local/share/living-ink/`.
+
+Full reference: [User Manual → Configuration](docs/USER_MANUAL.md#configuration-reference).
+
+## How it works
+
+1. **Download** — fetch changed documents over USB SSH or the reMarkable Cloud.
+2. **Render** — turn vector strokes into high-resolution PNGs.
+3. **Read** — one multimodal AI call per page returns clean, structured text.
+4. **Publish** — write Markdown and page images into your vault.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Only a few notebooks synced | `sync.limit` caps a run. `living-ink sync --limit 0` takes all of them. |
+| My annotated PDFs are ignored | Notebooks only, by default. `living-ink sync --pdf --epub`, or set `sync.types`. |
+| Tablet not found over USB | Plug the cable in and enable the USB web interface. `living-ink info` prints the exact remedy, including the `ssh-copy-id` line. |
+| Pages came back blank | Usually a rate limit. Lower `ocr.concurrency`. Failed pages publish a warning callout and are retried automatically on the next sync — only they are billed again. |
+| A "Living Ink — sync failed" note appeared | Living Ink wrote it when a run failed. Read it, fix the run; it deletes itself on the next successful sync. |
+| Scheduled syncs stopped | `living-ink info` shows the last and next scheduled run, and warns if one was missed. |
+
+Logs: `~/.local/share/living-ink/logs/pipeline.log`.
+
+## Documentation
+
+- **[User Manual](docs/USER_MANUAL.md)** — every command, every option, examples
+  and recipes.
+- **[AGENTS.md](AGENTS.md)** — architecture and contributor guide. Not user
+  documentation.
+
+## Contributing
+
+```bash
+uv sync --all-extras
+uv run ruff check .
+uv run ruff format --check .
 uv run pytest -v
 ```
 
-## 🐳 Docker & DevOps
+Those four are exactly what CI runs, on Python 3.10 and 3.12, on Linux and
+macOS. Branches are `feat/<description>` or `fix/<description>`; commits follow
+[Conventional Commits](https://www.conventionalcommits.org/). Read
+[AGENTS.md](AGENTS.md) before changing anything structural.
 
-Living Ink includes a production-grade container image (non-root user, multi-stage `uv` build, Cairo runtime dependencies) and `docker-compose.yml` for headless servers, NAS, or containerized testing:
+## License
 
-### Quick CLI via Docker Compose
-```bash
-# Check status
-docker compose run --rm living-ink info
-
-# Run notebook sync
-docker compose run --rm living-ink sync
-```
-
-### 24/7 Background Sync Daemon
-```bash
-# Sync on a schedule (every 30 minutes by default; set WATCH_SCHEDULE to any
-# five-field cron expression, and WATCH_TIMEZONE to the zone to read it in)
-docker compose --profile daemon up -d
-```
-
-### Run Clean Docker Smoke Tests
-```bash
-# Test build, CLI entrypoint, unconfigured status, and live sync against an ephemeral test vault
-./tests/test_docker.sh
-```
+[MIT](LICENSE).
 
 ## Acknowledgements
 

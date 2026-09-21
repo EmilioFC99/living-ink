@@ -814,7 +814,7 @@ class SyncPipeline:
         # Not implied by dry_run any more. One flag quietly turning on another
         # is a third concept where the product needs one, and the transcripts
         # a rehearsal leaves behind are a debugging artifact: anyone who wants
-        # them asks for them, which is what CLAUDE.md already tells them to do.
+        # them asks for them, which is what AGENTS.md already tells them to do.
         self.keep_temp = keep_temp
 
         if self.config_path and self.config_path != get_config_path():
@@ -937,6 +937,18 @@ class SyncPipeline:
     def quiet(self) -> bool:
         """Whether this run was asked to say nothing below a warning."""
         return getattr(self.settings, "verbosity", None) == "quiet"
+
+    @property
+    def verbose(self) -> bool:
+        """Whether this run was asked for a line per page.
+
+        The summary reads this to decide between the one-line totals and the
+        per-document table. It used to be ``getattr(self, "verbose", False)``
+        against an attribute nothing ever set, so ``--verbose`` raised the log
+        level and then printed the same compact summary as a quiet run — the
+        table in :meth:`living_ink.report.RunReport.render` was unreachable.
+        """
+        return getattr(self.settings, "verbosity", None) == "verbose"
 
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
@@ -1529,7 +1541,7 @@ class SyncPipeline:
             )
         finally:
             # The .rm source zip is exactly what a render bug needs, and
-            # CLAUDE.md tells people to debug rendering with --keep-temp. It
+            # AGENTS.md tells people to debug rendering with --keep-temp. It
             # used to be unlinked either way.
             if self.keep_temp:
                 log(f"Keeping {tmp_zip} (--keep-temp).")
@@ -2644,4 +2656,4 @@ class SyncPipeline:
             print(self.report.as_json())
             _logger.info("Run summary: %s", self.report.as_json())
             return
-        log(self.report.render(detailed=getattr(self, "verbose", False)))
+        log(self.report.render(detailed=self.verbose))

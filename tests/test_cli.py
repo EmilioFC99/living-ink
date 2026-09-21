@@ -1786,6 +1786,23 @@ class TestInfoWatchPanel:
         assert "reMarkable Cloud pairing was revoked" in report.watch_alert
         assert "living-ink sync" in report.watch_alert_fix
 
+    def test_the_banner_names_the_log_file_that_exists(self):
+        """The remedy used to send the reader to 'living-ink.log', which is
+        neither the log's name nor its location."""
+        from living_ink import state as state_module
+        from living_ink.logs import LOG_PATH
+
+        report = self._alert(
+            {
+                "outcome": state_module.OUTCOME_ERROR,
+                "error": "boom",
+                "started_at": "2026-09-19T07:00:00+00:00",
+            }
+        )
+
+        assert str(LOG_PATH) in report.watch_alert_fix
+        assert "living-ink.log" not in report.watch_alert_fix
+
     def test_a_quiet_night_is_not_a_failure(self):
         """A schedule that fires nightly and finds nothing is working."""
         from living_ink import state as state_module

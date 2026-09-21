@@ -1027,6 +1027,59 @@ class TestPrompts:
         )
         assert seen["command"] == ["my-editor", "--wait", str(clean.OCR_PROMPT_FILE)]
 
+    def test_a_prompt_dir_is_seeded_and_edited_instead_of_the_packaged_copy(
+        self, config_file, monkeypatch, tmp_path, capsys
+    ):
+        """An edit to the installed package is an edit the next upgrade deletes."""
+        from living_ink import clean
+
+        mine = tmp_path / "prompts"
+        write(config_file, {"ai": {"prompt_dir": str(mine)}})
+        seen: Dict[str, Any] = {}
+        monkeypatch.setattr(config_module, "editor_command", lambda: ["my-editor"])
+        monkeypatch.setattr(
+            config_module.subprocess, "run", lambda command, **_k: seen.setdefault("c", command)
+        )
+        drive(
+            [
+                ("what would you like to change", PROMPTS),
+                ("which prompt", str(clean.OCR_PROMPT_FILE)),
+                ("what would you like to change", DISCARD),
+            ],
+            monkeypatch,
+        )
+
+        copy = mine / "ocr_prompt.txt"
+        assert copy.read_text() == clean.OCR_PROMPT_FILE.read_text()
+        assert seen["c"] == ["my-editor", str(copy)]
+
+    def test_an_existing_prompt_dir_copy_is_offered_and_not_overwritten(
+        self, config_file, monkeypatch, tmp_path
+    ):
+        from living_ink import clean
+
+        mine = tmp_path / "prompts"
+        mine.mkdir()
+        (mine / "ocr_prompt.txt").write_text("Mine, edited last week.")
+        write(config_file, {"ai": {"prompt_dir": str(mine)}})
+        seen: Dict[str, Any] = {}
+        monkeypatch.setattr(config_module, "editor_command", lambda: ["my-editor"])
+        monkeypatch.setattr(
+            config_module.subprocess, "run", lambda command, **_k: seen.setdefault("c", command)
+        )
+        drive(
+            [
+                ("what would you like to change", PROMPTS),
+                ("which prompt", str(mine / "ocr_prompt.txt")),
+                ("what would you like to change", DISCARD),
+            ],
+            monkeypatch,
+        )
+
+        assert (mine / "ocr_prompt.txt").read_text() == "Mine, edited last week."
+        assert seen["c"] == ["my-editor", str(mine / "ocr_prompt.txt")]
+        assert clean.OCR_PROMPT_FILE.read_text() != "Mine, edited last week."
+
     def test_no_editor_prints_the_path_rather_than_failing(self, config_file, monkeypatch, capsys):
         from living_ink import clean
 

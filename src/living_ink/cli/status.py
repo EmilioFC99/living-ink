@@ -527,11 +527,15 @@ def _raise_watch_alert(report: StatusReport, now: datetime, tz: Any) -> None:
         tz: The schedule's zone.
     """
     from living_ink import scheduler, state
+    from living_ink.logs import LOG_PATH
 
     last = report.last_scheduled_run
     if last is not None and last.get("outcome") not in state.HEALTHY_OUTCOMES:
         report.watch_alert = f"The last scheduled sync {scheduler.describe_run(last)}."
-        report.watch_alert_fix = "Run 'living-ink sync' to retry, or check living-ink.log."
+        # Name the file that exists. This said "living-ink.log", which is not
+        # what the log is called and not where it lives, so the one instruction
+        # a failed scheduled run gives you sent you looking for nothing.
+        report.watch_alert_fix = f"Run 'living-ink sync' to retry, or check {LOG_PATH}."
         return
 
     due = scheduler.previous_fire(report.watch_schedule, now, tz)
