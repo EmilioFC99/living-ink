@@ -24,8 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         # Both declared-supported Python versions, on both supported systems.
-        # macOS is where Apple Notes runs; Linux is where Docker and most
-        # contributors run. Nothing had ever verified either automatically.
+        # macOS is where the LaunchAgent and the USB transport are used; Linux
+        # is where most contributors run. Nothing had ever verified either
+        # automatically.
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.12"]
     steps:
