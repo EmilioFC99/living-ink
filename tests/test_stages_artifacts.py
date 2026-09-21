@@ -31,6 +31,17 @@ class TestPreparingAPageForOcr:
 
         assert Image.open(out).size == (60, 90)
 
+    def test_large_page_is_capped_at_max_dimension(self, tmp_path):
+        """Pages larger than MAX_DIMENSION are capped to prevent context overflow."""
+        source = write_png(tmp_path / "page-1.png", size=(1404, 1872))
+        out = tmp_path / "pre" / "page-1.png"
+
+        preprocess_image(source, out)
+
+        w, h = Image.open(out).size
+        assert max(w, h) == 1800
+        assert w == 1350
+
     def test_transparency_is_flattened_onto_white(self, tmp_path):
         """A transparent render OCRs as a black page without this."""
         source = tmp_path / "page-1.png"

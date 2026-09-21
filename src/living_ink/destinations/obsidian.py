@@ -659,8 +659,9 @@ class ObsidianDestination(FileSystemDestination):
             )
 
         # Text lifted out of the PDF or EPUB itself, which is worth publishing
-        # only when no page produced anything — otherwise it duplicates them.
-        if doc.body_text and not any(page.text.strip() for page in doc.pages):
+        # only when the document has no annotated pages — otherwise it duplicates
+        # the entire book onto a note meant only for the user's annotations.
+        if doc.body_text and not doc.pages:
             layout.blocks.append(
                 NoteBlock(_BODY_BLOCK, rendered(list(to_blocks(doc.body_text.strip()))))
             )

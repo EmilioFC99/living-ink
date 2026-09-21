@@ -1099,3 +1099,26 @@ class TestObsidianGapMarker:
 
         assert len(callouts) == 1
         assert callouts[0].children == ()
+
+
+class TestObsidianBodyTextHandling:
+    """Documents with annotated pages must not have the full document text dumped."""
+
+    def test_body_text_published_when_no_pages(self, tmp_path):
+        """Unannotated documents publish their body_text layer."""
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        doc, ctx = make_both("Book", pages=[], body_text="Full book text layer")
+        result = dest.publish(doc, ctx)
+        assert result.ok is True
+        written = (tmp_path / result.target).read_text(encoding="utf-8")
+        assert "Full book text layer" in written
+
+    def test_body_text_omitted_when_pages_present(self, tmp_path):
+        """Annotated documents with pages never dump body_text even if page text is empty."""
+        dest = ObsidianDestination(vault_path=str(tmp_path))
+        page = make_page(1, "")  # Page with empty/failed OCR text
+        doc, ctx = make_both("Book", pages=[page], body_text="Full book text layer")
+        result = dest.publish(doc, ctx)
+        assert result.ok is True
+        written = (tmp_path / result.target).read_text(encoding="utf-8")
+        assert "Full book text layer" not in written

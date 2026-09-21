@@ -15,6 +15,11 @@ from PIL import Image, ImageFilter, ImageOps
 #: JPEG-quality save at this size and disappear below it.
 UPSCALE = 1.5
 
+#: Maximum dimension (width or height) for preprocessed images to ensure they
+#: fit within standard local LLM vision context limits (e.g. Ollama's 4096-token
+#: window) without sacrificing handwriting legibility.
+MAX_DIMENSION = 1800
+
 
 def preprocess_image(in_path: Path, out_path: Path) -> None:
     """Flatten, sharpen and enlarge one page image.
@@ -36,9 +41,15 @@ def preprocess_image(in_path: Path, out_path: Path) -> None:
     # Autocontrast
     im = ImageOps.autocontrast(im, cutoff=2)
 
-    # Upscale 1.5x (rounded)
+    # Upscale, capped at MAX_DIMENSION so vision tokens fit LLM context limits
     w, h = im.size
-    im = im.resize((int(w * UPSCALE), int(h * UPSCALE)), resample=Image.Resampling.LANCZOS)
+    target_w = int(w * UPSCALE)
+    target_h = int(h * UPSCALE)
+    if max(target_w, target_h) > MAX_DIMENSION:
+        scale = MAX_DIMENSION / max(target_w, target_h)
+        target_w = int(target_w * scale)
+        target_h = int(target_h * scale)
+    im = im.resize((target_w, target_h), resample=Image.Resampling.LANCZOS)
 
     # Sharpen
     im = im.filter(ImageFilter.SHARPEN)
