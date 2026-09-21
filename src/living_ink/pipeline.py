@@ -938,11 +938,6 @@ class SyncPipeline:
         """Whether this run was asked to say nothing below a warning."""
         return getattr(self.settings, "verbosity", None) == "quiet"
 
-    @property
-    def verbose(self) -> bool:
-        """Whether this run was asked to emit verbose logs."""
-        return getattr(self.settings, "verbosity", None) == "verbose"
-
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
         from living_ink.api import get_rmapi

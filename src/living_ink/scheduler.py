@@ -76,24 +76,6 @@ SCHEDULE_PRESETS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("Every Monday at 09:00", "0 9 * * 1"),
 )
 
-#: Offered in the timezone picker above the free-text escape hatch.
-#: ``zoneinfo.available_timezones()`` has about six hundred entries, and six
-#: hundred entries in a picker is not a choice, it is a search problem.
-COMMON_TIMEZONES: Tuple[str, ...] = (
-    "UTC",
-    "Europe/Madrid",
-    "Europe/London",
-    "Europe/Berlin",
-    "America/New_York",
-    "America/Chicago",
-    "America/Los_Angeles",
-    "America/Sao_Paulo",
-    "Asia/Tokyo",
-    "Asia/Shanghai",
-    "Asia/Kolkata",
-    "Australia/Sydney",
-)
-
 _DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 
 #: Where the whole-machine locks live, relative to the data directory.

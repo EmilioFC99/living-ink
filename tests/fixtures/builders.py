@@ -24,7 +24,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, List, Optional, Sequence, Tuple
 
 from rmscene import (
     AuthorIdsBlock,
@@ -273,22 +273,6 @@ def write_rm(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
         write_blocks(handle, page_blocks(layers, text=text))
-    return path
-
-
-def write_blocks_to(path: Path, blocks: Iterable[Block]) -> Path:
-    """Write an arbitrary block stream, for fixtures the helpers do not cover.
-
-    Args:
-        path: Destination file. Parent directories are created.
-        blocks: The blocks to write.
-
-    Returns:
-        The path written, for chaining.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        write_blocks(handle, blocks)
     return path
 
 

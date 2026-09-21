@@ -814,7 +814,7 @@ class TestUnpublishDefault:
             def check(self):
                 return DestinationStatus(ok=True, detail="ready")
 
-            def publish(self, notebook_name, text_content, image_paths, **kwargs):
+            def publish(self, doc, ctx):
                 return PublishResult(ok=True)
 
         assert (

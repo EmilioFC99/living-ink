@@ -279,7 +279,7 @@ def select(
         The selection, with every excluded document accounted for.
     """
     id_map = {document_id(item): item for item in listing}
-    recipes = _RecipeCache(destinations, settings)
+    recipes = _RecipeCache(settings)
 
     candidates: List[Candidate] = []
     skipped: List[Tuple[Any, str]] = []
@@ -569,12 +569,10 @@ class _RecipeCache:
     them per document would read those files twice per notebook.
     """
 
-    def __init__(self, destinations: Sequence["Destination"], settings: Settings) -> None:
+    def __init__(self, settings: Settings) -> None:
         """Args:
-        destinations: The enabled destinations.
         settings: The run's resolved settings.
         """
-        self._destinations = {dest.state_key: dest for dest in destinations}
         self._settings = settings
         self._cache: Dict[Tuple[str, str], str] = {}
 
