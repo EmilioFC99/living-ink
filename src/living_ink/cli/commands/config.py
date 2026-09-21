@@ -563,22 +563,71 @@ class ConfigMenu:
         The spec asks for the file to be *opened*, not for its path to be
         printed: a user told where a file is has been given homework, and the
         two prompts are the most useful thing in the product to tune.
+
+        It opens what a *run* would read, resolved through ``ai.prompt_dir``,
+        rather than the packaged copy. The two are the same until that setting
+        is pointed somewhere, and while it is pointed somewhere the packaged
+        copy is the one file an edit must not land in — an upgrade replaces the
+        installed package, so an edit made there is an edit with an expiry date.
         """
         from living_ink import clean
 
+        prompt_dir = self.origins()["ai_prompt_dir"].value
+        ocr_path, cleanup_path = clean.prompt_paths(prompt_dir)
         files = (
-            ("OCR", clean.OCR_PROMPT_FILE, "What the model is told when it reads a page."),
-            ("Cleanup", clean.PROMPT_FILE, "What it is told when it tidies the text up."),
+            (
+                "OCR",
+                ocr_path,
+                clean.OCR_PROMPT_FILE,
+                "What the model is told when it reads a page.",
+            ),
+            (
+                "Cleanup",
+                cleanup_path,
+                clean.PROMPT_FILE,
+                "What it is told when it tidies the text up.",
+            ),
         )
         rows = [
             ui.Choice(str(path), f"{name:<8} {path.name}", description=note)
-            for name, path, note in files
+            for name, path, _packaged, note in files
         ]
         rows.append(ui.Choice(BACK, "Back"))
         picked = ui.required(ui.select("Which prompt?", rows))
         if picked == BACK:
             return
-        self.open_in_editor(Path(picked))
+
+        target = Path(picked)
+        packaged = next(p for _n, path, p, _d in files if str(path) == picked)
+        if prompt_dir and target == packaged:
+            # ai.prompt_dir names a directory that does not hold this prompt
+            # yet. Seeding it from the packaged copy is the difference between
+            # editing the shipped prompt and starting your own from a blank
+            # file: neither is what the user asked for by setting the key.
+            target = Path(prompt_dir).expanduser() / packaged.name
+            if not self._seed_prompt(packaged, target):
+                return
+        self.open_in_editor(target)
+
+    def _seed_prompt(self, packaged: Path, target: Path) -> bool:
+        """Copy the packaged prompt to the user's prompt directory.
+
+        Args:
+            packaged: The prompt that ships inside the installed package.
+            target: Where ``ai.prompt_dir`` says the user's copy belongs.
+
+        Returns:
+            True if ``target`` now holds a prompt to edit.
+        """
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(packaged.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError as error:
+            console(ui.yellow(f"  ⚠ Could not create {target}: {error}"))
+            console(ui.dim("    Check that ai.prompt_dir names a directory you can write to."))
+            return False
+        console(ui.dim(f"  Copied the shipped prompt to {target}."))
+        return True
 
     def open_in_editor(self, target: Path) -> None:
         """Hand a file to ``$VISUAL``/``$EDITOR`` and wait for it.
