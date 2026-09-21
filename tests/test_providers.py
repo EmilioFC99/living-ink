@@ -1210,3 +1210,86 @@ class TestProviderSecretRegistration:
             assert redact_mod.registered_secrets() == set()
         finally:
             redact_mod.clear_secrets()
+
+
+class TestFetchOllamaModels:
+    """fetch_ollama_models discovers models locally installed in Ollama."""
+
+    def test_parses_native_api_tags_response(self, monkeypatch):
+        import urllib.request
+
+        from living_ink.providers import fetch_ollama_models
+
+        payload = json.dumps(
+            {
+                "models": [
+                    {"name": "qwen2.5vl:3b", "model": "qwen2.5vl:3b"},
+                    {"name": "moondream:latest", "model": "moondream:latest"},
+                ]
+            }
+        ).encode("utf-8")
+
+        class FakeResponse:
+            status = 200
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: FakeResponse())
+        models = fetch_ollama_models("http://localhost:11434/v1")
+        assert models == ["moondream:latest", "qwen2.5vl:3b"]
+
+    def test_parses_openai_v1_models_response(self, monkeypatch):
+        import urllib.error
+        import urllib.request
+
+        from living_ink.providers import fetch_ollama_models
+
+        payload = json.dumps(
+            {
+                "object": "list",
+                "data": [
+                    {"id": "qwen2.5vl:3b"},
+                    {"id": "moondream:latest"},
+                ],
+            }
+        ).encode("utf-8")
+
+        class FakeResponse:
+            status = 200
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        def fake_urlopen(req, timeout=None):
+            if req.full_url.endswith("/api/tags"):
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+            return FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        models = fetch_ollama_models("http://localhost:11434/v1")
+        assert models == ["moondream:latest", "qwen2.5vl:3b"]
+
+    def test_returns_empty_list_when_unreachable(self, monkeypatch):
+        import urllib.error
+        import urllib.request
+
+        from living_ink.providers import fetch_ollama_models
+
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.URLError("Connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        assert fetch_ollama_models() == []

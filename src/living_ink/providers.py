@@ -758,3 +758,49 @@ def get_provider(settings: Settings) -> TextRepairProvider:
         auth_prefix=preset.get("auth_prefix"),
         provider_label=provider_name,
     )
+
+
+def fetch_ollama_models(base_url: Optional[str] = None, timeout: float = 1.5) -> list[str]:
+    """Fetch the list of installed models from a local Ollama instance.
+
+    Args:
+        base_url: Optional base URL. Defaults to the Ollama preset base_url
+            (``http://localhost:11434/v1``).
+        timeout: Network timeout in seconds (kept short for interactive responsiveness).
+
+    Returns:
+        Sorted list of installed model names (e.g. ``['moondream:latest', 'qwen2.5vl:3b']``),
+        or an empty list if Ollama is unreachable or has no models installed.
+    """
+    raw_url = (
+        base_url or PROVIDER_PRESETS.get("ollama", {}).get("base_url", "http://localhost:11434/v1")
+    ).rstrip("/")
+    # Try the native Ollama /api/tags first (by stripping /v1 if present)
+    root = raw_url[:-3] if raw_url.endswith("/v1") else raw_url
+    endpoints = [f"{root}/api/tags", f"{raw_url}/models"]
+
+    for endpoint in endpoints:
+        try:
+            req = urllib.request.Request(endpoint, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                    models: list[str] = []
+                    # /api/tags returns {"models": [{"name": "..."}, ...]}
+                    if isinstance(payload, dict) and isinstance(payload.get("models"), list):
+                        for item in payload["models"]:
+                            name = item.get("name") or item.get("model")
+                            if name and isinstance(name, str):
+                                models.append(name)
+                    # /v1/models returns {"data": [{"id": "..."}, ...]}
+                    elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                        for item in payload["data"]:
+                            model_id = item.get("id")
+                            if model_id and isinstance(model_id, str):
+                                models.append(model_id)
+                    if models:
+                        return sorted(set(models))
+        except Exception:
+            continue
+
+    return []

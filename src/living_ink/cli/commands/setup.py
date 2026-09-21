@@ -417,9 +417,7 @@ class Wizard:
                 ui.text("API base URL (OpenAI-compatible)")
             ).strip()
 
-        self.answers.ai_model = ui.required(
-            ui.text("Model", default=str(preset.get("default_model", "")))
-        ).strip()
+        self.answers.ai_model = self._ask_for_model(provider, preset)
 
         # Ollama is the one provider that authenticates by being local.
         if preset.get("auth_header") is None and provider in PROVIDER_PRESETS:
@@ -427,6 +425,27 @@ class Wizard:
             return
 
         self._ask_for_key()
+
+    def _ask_for_model(self, provider: str, preset: dict) -> str:
+        """Prompt for the AI model, offering installed models if local provider."""
+        from living_ink.providers import fetch_ollama_models
+
+        default_model = str(preset.get("default_model", ""))
+        if provider == "ollama":
+            base_url = self.answers.ai_base_url or preset.get("base_url")
+            installed = fetch_ollama_models(base_url)
+            if installed:
+                custom_tag = "__custom__"
+                choices = [ui.Choice(name, name) for name in installed]
+                choices.append(ui.Choice(custom_tag, "Other (enter model name manually)"))
+                default_choice = default_model if default_model in installed else installed[0]
+                picked = ui.required(
+                    ui.select("Which Ollama model?", choices, default=default_choice)
+                )
+                if picked != custom_tag:
+                    return str(picked).strip()
+
+        return ui.required(ui.text("Model", default=default_model)).strip()
 
     def _choose_other_provider(self) -> str:
         """Ask which of the remaining presets, or a custom endpoint.

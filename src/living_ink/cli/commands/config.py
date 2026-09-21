@@ -381,6 +381,9 @@ class ConfigMenu:
         if setting.kind == LIST:
             return self._edit_list(setting, current)
 
+        if setting.field == "ai_model":
+            return self._edit_ai_model(setting, current)
+
         if setting.kind == PATH:
             typed = ui.path("Path (empty to use the default)", default=str(current or ""))
         else:
@@ -389,6 +392,45 @@ class ConfigMenu:
                 default="" if current is None else str(current),
                 validate=validator_for(setting),
             )
+        if typed is None:
+            return None
+        typed = typed.strip()
+        return REMOVED_VALUE if not typed else coerce(setting, typed)
+
+    def _edit_ai_model(self, setting: Setting, current: Any) -> Any:
+        """Edit the AI model, offering installed Ollama models if provider is Ollama."""
+        from living_ink.providers import fetch_ollama_models
+
+        pending = self.pending_config()
+        provider = (
+            self.edits.get("ai_provider")
+            or pending.get("ai", {}).get("provider")
+            or self.raw.get("ai", {}).get("provider")
+            or "gemini"
+        )
+        if provider == "ollama":
+            base_url = (
+                self.edits.get("ai_base_url")
+                or pending.get("ai", {}).get("base_url")
+                or self.raw.get("ai", {}).get("base_url")
+            )
+            installed = fetch_ollama_models(base_url)
+            if installed:
+                custom_tag = "__custom__"
+                choices = [ui.Choice(name, name) for name in installed]
+                choices.append(ui.Choice(custom_tag, "Other (enter model name manually)"))
+                default_val = str(current) if current in installed else installed[0]
+                picked = ui.select("Which Ollama model?", choices, default=default_val)
+                if picked is None:
+                    return None
+                if picked != custom_tag:
+                    return str(picked).strip()
+
+        typed = ui.text(
+            "New value (empty to use the default)",
+            default="" if current is None else str(current),
+            validate=validator_for(setting),
+        )
         if typed is None:
             return None
         typed = typed.strip()

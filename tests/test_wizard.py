@@ -241,6 +241,29 @@ class TestTheFlow:
         _result, script = run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
         assert not any("also pair with the cloud" in q.lower() for q in script.asked)
 
+    def test_ollama_flow_lists_and_selects_model(self, monkeypatch, tmp_path, vault, probes):
+        """When Ollama is selected, installed models are offered for single selection."""
+        answers = {
+            **CLOUD_ONLY,
+            "which ai provider": "ollama",
+            "which ollama model": "qwen2.5vl:3b",
+        }
+        del answers["model"]
+        del answers["api key"]
+
+        with patch(
+            "living_ink.providers.fetch_ollama_models",
+            return_value=["moondream:latest", "qwen2.5vl:3b"],
+        ):
+            result, script = run_wizard(monkeypatch, tmp_path, answers, vault)
+
+        assert result.saved is True
+        config_file = saved_config(tmp_path)
+        cfg = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        assert cfg["ai"]["provider"] == "ollama"
+        assert cfg["ai"]["model"] == "qwen2.5vl:3b"
+        assert any("which ollama model" in q.lower() for q in script.asked)
+
     def test_a_new_folder_is_named_by_the_user(self, monkeypatch, tmp_path, vault, probes):
         """Choosing 'create a new folder' asks what to call it."""
         answers = {

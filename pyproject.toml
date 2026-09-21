@@ -1,6 +1,6 @@
 [project]
 name = "living-ink"
-version = "1.0.0"
+version = "1.0.2"
 description = "Automated pipeline syncing reMarkable tablet notes to Obsidian"
 readme = "README.md"
 license = { text = "MIT" }

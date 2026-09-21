@@ -323,6 +323,25 @@ class TestNothingIsWrittenUntilSave:
         )
         assert menu.edits == {"ai_model": "new-model"}
 
+    def test_editing_ai_model_with_ollama_lists_installed_models(self, config_file, monkeypatch):
+        write(config_file, {"ai": {"provider": "ollama", "model": "llama3.2"}})
+        monkeypatch.setattr(
+            "living_ink.providers.fetch_ollama_models",
+            lambda *args, **kwargs: ["moondream:latest", "qwen2.5vl:3b"],
+        )
+        menu = drive(
+            [
+                ("what would you like to change", "ai"),
+                ("ai —", "ai_model"),
+                ("which ollama model", "qwen2.5vl:3b"),
+                ("ai —", BACK),
+                ("what would you like to change", DISCARD),
+                ("throw away", True),
+            ],
+            monkeypatch,
+        )
+        assert menu.edits == {"ai_model": "qwen2.5vl:3b"}
+
     def test_declining_the_save_confirmation_writes_nothing(self, config_file, monkeypatch):
         write(config_file, {"ai": {"model": "old-model"}})
         drive(
