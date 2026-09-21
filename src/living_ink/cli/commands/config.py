@@ -310,17 +310,23 @@ class ConfigMenu:
 
         Returns:
             The value, then the layer that supplied it, then an edited marker.
+            Uncoloured, and that is not an oversight: this is a menu row, not
+            console output. The provenance note used to be ``ui.dim`` and the
+            marker ``ui.cyan``, which reached the terminal as a literal
+            ``^[[2m(config file)^[[0m`` — see :func:`living_ink.ui.plain`,
+            which now strips it centrally, and which is why a colour helper
+            here would be dead weight rather than a fallback.
         """
         from living_ink.settings import SOURCE_DEFAULT, SOURCE_ENV
 
         text = origin.display()
         if origin.source == SOURCE_DEFAULT:
-            note = ui.dim("(default)")
+            note = "(default)"
         elif origin.source == SOURCE_ENV:
-            note = ui.yellow(f"({origin.origin_detail})")
+            note = f"({origin.origin_detail})"
         else:
-            note = ui.dim(f"({origin.source})")
-        marker = ui.cyan("  • edited") if setting.field in self.edits else ""
+            note = f"({origin.source})"
+        marker = "  • edited" if setting.field in self.edits else ""
         return f"{text}  {note}{marker}"
 
     # -- one setting --------------------------------------------------------

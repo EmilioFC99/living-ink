@@ -32,6 +32,7 @@ every module that wanted a green tick imported the onboarding flow to get one.
 """
 
 import os
+import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -258,6 +259,39 @@ def dim(value: str) -> str:
     return _c(value, "2")
 
 
+#: Every ANSI SGR escape the colour helpers above can emit, and the resets
+#: that close them. Matched rather than assumed: a caller composes a label out
+#: of several helpers, so the stripping has to survive nesting.
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(value: str) -> str:
+    """Strip ANSI styling out of text bound for a widget.
+
+    The colour helpers are for :func:`~living_ink.logs.console`, which writes
+    to a terminal that reads the escapes. A widget does not: ``questionary``
+    hands a plain-string title to ``prompt_toolkit``, which renders every byte
+    of it literally, so ``ui.dim("(default)")`` in a menu row arrives on screen
+    as ``^[[2m(default)^[[0m``. The config menu's value column is where this
+    showed up, and it is the sort of thing every future caller would have to
+    remember, so it is done here instead — every widget runs its message, its
+    labels and its descriptions through this.
+
+    Colour is *dropped* rather than translated on purpose. ``questionary``
+    accepts a list of style/text pairs as a title, but the branch that renders
+    one skips the shortcut prefix and the highlight class entirely
+    (``prompts/common.py``), so a coloured row would cost the ``1)`` numbers
+    and the cursor. Styling inside a widget belongs to :data:`THEME`.
+
+    Args:
+        value: Text that may carry escapes.
+
+    Returns:
+        The same text with every SGR escape removed.
+    """
+    return _SGR.sub("", value)
+
+
 def _ask(question: Any) -> Any:
     """Run a widget and turn either way out of it into ``None``.
 
@@ -320,7 +354,7 @@ def select(
     shortcuts = len(options) <= SHORTCUT_LIMIT
     return _ask(
         questionary.select(
-            message,
+            plain(message),
             choices=options,
             default=selected,
             style=THEME,
@@ -365,7 +399,7 @@ def checkbox(
         )
         for choice in choices
     ]
-    answer = _ask(questionary.checkbox(message, choices=options, style=THEME, **_DRIVER))
+    answer = _ask(questionary.checkbox(plain(message), choices=options, style=THEME, **_DRIVER))
     return None if answer is None else tuple(answer)
 
 
@@ -380,7 +414,7 @@ def confirm(message: str, *, default: bool = False) -> Optional[bool]:
         The answer, or None if the user cancelled. ``False`` and ``None`` are
         not the same: one declined, the other left.
     """
-    return _ask(questionary.confirm(message, default=default, style=THEME, **_DRIVER))
+    return _ask(questionary.confirm(plain(message), default=default, style=THEME, **_DRIVER))
 
 
 def text(
@@ -401,7 +435,7 @@ def text(
     """
     return _ask(
         questionary.text(
-            message,
+            plain(message),
             default=default,
             validate=validate,
             style=THEME,
@@ -426,7 +460,7 @@ def password(message: str, *, validate: Optional[Validator] = None) -> Optional[
     Returns:
         The entered secret, or None if the user cancelled.
     """
-    return _ask(questionary.password(message, validate=validate, style=THEME, **_DRIVER))
+    return _ask(questionary.password(plain(message), validate=validate, style=THEME, **_DRIVER))
 
 
 def path(message: str, *, default: str = "", must_exist: bool = False) -> Optional[str]:
@@ -459,7 +493,7 @@ def path(message: str, *, default: str = "", must_exist: bool = False) -> Option
 
     return _ask(
         questionary.path(
-            message,
+            plain(message),
             default=default,
             validate=_validate,
             style=THEME,
@@ -483,8 +517,8 @@ def _as_questionary_choice(choice: Choice, *, checked: Optional[bool] = None) ->
         The equivalent ``questionary.Choice``.
     """
     return questionary.Choice(
-        title=choice.label,
+        title=plain(choice.label),
         value=choice.value,
-        description=choice.description,
+        description=None if choice.description is None else plain(choice.description),
         checked=checked,
     )
