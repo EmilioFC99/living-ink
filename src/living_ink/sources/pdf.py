@@ -27,7 +27,7 @@ class PdfRenderer:
     not an empty one.
     """
 
-    version = 1
+    version = 2
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Put the underlying PDF on disk.
