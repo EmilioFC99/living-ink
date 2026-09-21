@@ -381,6 +381,9 @@ class ConfigMenu:
         if setting.kind == LIST:
             return self._edit_list(setting, current)
 
+        if setting.field == "ai_provider":
+            return self._edit_ai_provider(setting, current)
+
         if setting.field == "ai_model":
             return self._edit_ai_model(setting, current)
 
@@ -396,6 +399,43 @@ class ConfigMenu:
             return None
         typed = typed.strip()
         return REMOVED_VALUE if not typed else coerce(setting, typed)
+
+    def _edit_ai_provider(self, setting: Setting, current: Any) -> Any:
+        """Pick an AI provider from presets and registered providers, or enter a custom one."""
+        from living_ink.providers import PROVIDER_PRESETS, PROVIDER_REGISTRY
+
+        provider_labels = {
+            "gemini": "Google Gemini",
+            "openai": "OpenAI",
+            "ollama": "Ollama (local)",
+            "groq": "Groq",
+            "openrouter": "OpenRouter",
+            "mistral": "Mistral AI",
+            "together": "Together AI",
+            "custom": "Custom endpoint",
+            "none": "None (no AI cleanup pass)",
+        }
+        all_providers = sorted({*PROVIDER_PRESETS, *PROVIDER_REGISTRY, "custom", "none"})
+        headline = ["gemini", "openai", "ollama"]
+        ordered = [p for p in headline if p in all_providers]
+        ordered += [p for p in all_providers if p not in headline and p not in ("custom", "none")]
+        ordered += [p for p in ("custom", "none") if p in all_providers]
+
+        custom_tag = "__custom__"
+        rows = [ui.Choice(p, provider_labels.get(p, p.capitalize())) for p in ordered]
+        rows.append(ui.Choice(custom_tag, "Other (enter provider name manually)"))
+        rows.append(ui.Choice(RESET, f"Use the default ({render_default(setting)})"))
+
+        picked = ui.select("Which AI provider?", rows, default=str(current or "gemini"))
+        if picked is None:
+            return None
+        if picked == custom_tag:
+            typed = ui.text("Provider name", default=str(current or "custom"))
+            if typed is None:
+                return None
+            typed = typed.strip()
+            return REMOVED_VALUE if not typed else typed
+        return _reset_or(picked)
 
     def _edit_ai_model(self, setting: Setting, current: Any) -> Any:
         """Edit the AI model, offering installed Ollama models if provider is Ollama."""
