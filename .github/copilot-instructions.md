@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to **Apple Notes** and **Obsidian**. It connects over USB SSH or reMarkable Cloud, renders pages to images, transcribes them with a multimodal LLM (Gemini, OpenAI, Ollama, …), and publishes structured notes.
+**Living Ink** syncs handwritten notebooks from a **reMarkable tablet** to an **Obsidian vault**. It connects over USB SSH or reMarkable Cloud, renders pages to images, transcribes them with a multimodal LLM (Gemini, OpenAI, Ollama, …), and publishes structured Markdown.
 
 - **Language**: Python 3.10+
 - **Package Manager**: [uv](https://docs.astral.sh/uv/) (never pip)
@@ -15,58 +15,67 @@
 ```
 living-ink/
 ├── src/living_ink/
-│   ├── __main__.py              # python -m living_ink entry point
-│   ├── cli.py                   # CLI entry point (`living-ink`): sync | watch | setup | status
-│   ├── pipeline.py              # SyncPipeline orchestrator + processing stages
-│   ├── settings.py              # Settings: resolved, typed configuration
-│   ├── config.py                # XDG path resolution & config helpers
-│   ├── models.py                # Shared data models
-│   ├── transport.py             # RemarkableTransport Protocol
-│   ├── api.py                   # Client factory + automatic fallback
-│   ├── sync.py                  # Cloud sync protocol (v3/v4)
-│   ├── ssh.py                   # USB SSH transport
-│   ├── extract.py               # .rm → SVG → PNG, PDF/EPUB handling
-│   ├── clean.py                 # Vision OCR & text cleanup
-│   ├── providers.py             # AI providers (presets + registry)
-│   ├── destinations.py          # Publish targets (ABC + registry)
-│   ├── setup_wizard.py          # Interactive onboarding
-│   ├── ocr_prompt.txt           # System prompt for vision OCR
-│   ├── openai_cleanup_prompt.txt# System prompt for text repair
-│   └── cleanup_prompt.txt       # System prompt for local cleanup
-├── tests/                       # pytest suite + test_docker.sh smoke tests
-├── docs/                        # SETUP_GUIDE.md, USER_MANUAL.md, TEST_PLAN.md
-├── pyproject.toml               # Project metadata, Hatchling config, dependencies
-├── install.sh                   # One-line installer
-├── Dockerfile                   # Multi-stage production container image
-└── docker-compose.yml           # Compose file (CLI & background daemon)
+│   ├── __main__.py          # python -m living_ink entry point
+│   ├── cli/                 # Command Pattern: one BaseCommand subclass per command
+│   ├── config/              # paths.py, validate.py, credentials.py, schema.py, writer.py
+│   ├── core/                # What a run and a preview must agree on (+ core/stages/)
+│   ├── destinations/        # base.py (ABC + registry), filesystem.py, markup.py, obsidian.py
+│   ├── sources/             # base.py (registry), notebook.py, pdf.py, epub.py
+│   ├── pipeline.py          # SyncPipeline: owns the order of the stages
+│   ├── settings.py          # Settings: resolved, typed, frozen configuration
+│   ├── transport.py         # RemarkableTransport Protocol
+│   ├── api.py               # Client factory + automatic fallback
+│   ├── sync.py              # Cloud sync protocol (v3/v4)
+│   ├── ssh.py               # USB SSH transport
+│   ├── extract.py           # .rm → SVG → PNG, PDF/EPUB handling
+│   ├── clean.py             # Vision OCR & text cleanup
+│   ├── providers.py         # AI providers (presets + registry)
+│   ├── notemerge.py         # Splice generated blocks without destroying user text
+│   ├── scheduler.py         # Cron arithmetic for `watch` (imports only `state`)
+│   ├── setup_wizard.py      # Interactive onboarding
+│   ├── ocr_prompt.txt       # System prompt for vision OCR
+│   └── cleanup_prompt.txt   # System prompt for text repair
+├── tests/                   # pytest suite
+├── docs/USER_MANUAL.md      # End-user reference
+├── pyproject.toml
+└── install.sh               # One-line installer
 ```
 
-Deeper architectural notes — the transport Protocol, the destination and provider registries, and the notebook processing stages — live in `AGENTS.md`.
+The commands are `sync`, `watch`, `setup`, `info`, `config`, `uninstall`, and a deliberately-hidden `completions`. There is no `status` command — `info` is the one read-only surface.
+
+Deeper architectural notes — the transport Protocol, the destination/provider/source registries, and the pipeline stages — live in `AGENTS.md`. Read it before changing anything structural.
 
 ## Stateless Repository & XDG Standards
 
 The repository is completely stateless:
-- **User Config**: Resolves to `~/.config/living-ink/config.yml` (overridable via `LIVING_INK_CONFIG` or `LIVING_INK_CONFIG_DIR`).
-- **Runtime Data**: Resolves to `~/.local/share/living-ink/` (overridable via `LIVING_INK_DATA_DIR`).
+
+- **User Config**: `~/.config/living-ink/config.yml` (overridable via `--config`, `LIVING_INK_CONFIG`, `LIVING_INK_CONFIG_DIR`).
+- **Credentials**: one file per secret in `<config dir>/credentials/`, mode `0600`. **Never in `config.yml`.**
+- **Runtime Data**: `~/.local/share/living-ink/` (overridable via `LIVING_INK_DATA_DIR`).
 - Personal tokens, credentials, and downloaded notebooks must NEVER be committed to git.
 
 ## Configuration
 
-Settings are resolved once by `settings.Settings.resolve(config)`, which merges `config.yml` with the environment into one frozen typed object. Precedence is **CLI options > env var > config file > default**. A new setting means one field on `Settings`, one entry in `FIELD_ENV_VARS`, and one line in `resolve()`; do not write settings back into `os.environ`. `living-ink status` prints every resolved setting alongside the layer that supplied it, via `Settings.explain()`.
+Every setting is declared exactly once, as a `Setting(...)` entry in `config/schema.py` — field, config key, kind, default, help, env var, CLI flag, choices, store and legacy keys. Adding a setting is **one schema entry plus one dataclass field on `Settings`**; `settings._assert_parity()` raises at import if those two sides disagree.
+
+`settings.Settings.resolve(config)` merges the layers into one frozen typed object. Precedence is **flag > env var > credentials store > config file (current key, then `legacy_keys`) > default**, implemented once in `Settings._layers` / `._pick`. There is no `FIELD_ENV_VARS` table and no per-field config reader. Never write settings back into `os.environ`.
+
+`living-ink info` prints every resolved setting alongside the layer that supplied it, via `Settings.explain()`.
+
+Retire a setting with its `status` field; never delete it from the schema, because an unrecognised section is a hard error.
+
+## Import Layering
+
+`tests/test_layering.py` parses module-level imports with `ast` and enforces the import graph. `config/`, `core/`, `destinations/`, `sources/` and `scheduler.py` each have rules about what they may import. Run it before assuming a new import is fine.
 
 ## Package Management
 
 **Always use `uv` for all package management operations.**
 
 ```bash
-# Install dependencies
-uv sync --all-extras
-
-# Add a dependency
-uv add <package>
-
-# Add a dev dependency
-uv add --dev <package>
+uv sync --all-extras      # install dependencies
+uv add <package>          # add a dependency
+uv add --dev <package>    # add a dev dependency
 ```
 
 ## Running Tests & Quality Checks
@@ -74,26 +83,20 @@ uv add --dev <package>
 **Before committing, always run:**
 
 ```bash
-# 1. Lint code
 uv run ruff check .
-
-# 2. Check formatting
 uv run ruff format --check .
-
-# 3. Run test suite
 uv run pytest -v
 ```
 
 ## Running the Application
 
 ```bash
-# Run CLI via uv
 uv run living-ink --help
-uv run living-ink status
-uv run living-ink sync
+uv run living-ink info
+uv run living-ink sync --preview
 
 # Or run as module
-uv run python -m living_ink status
+uv run python -m living_ink info
 ```
 
 ## Conventions

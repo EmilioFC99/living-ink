@@ -52,11 +52,10 @@ living-ink/
 │   ├── destinations/        # base.py (ABC + registry), filesystem.py, markup.py, obsidian.py
 │   ├── sources/             # base.py (registry), notebook.py, pdf.py, epub.py
 │   └── *_prompt.txt         # LLM system prompts (edit these, not the Python)
-├── tests/                   # pytest suite + test_docker.sh smoke tests
+├── tests/                   # pytest suite
+├── docs/USER_MANUAL.md      # End-user reference: every command, every setting
 ├── pyproject.toml
-├── install.sh               # One-line installer
-├── Dockerfile               # Multi-stage production image
-└── docker-compose.yml       # CLI and background daemon services
+└── install.sh               # One-line installer
 ```
 
 ## Architecture
@@ -138,7 +137,7 @@ Obsidian's frontmatter carries three dates that mean three different things: `cr
 | env var | `SYNC_TRANSCRIPT_CACHE` / `SYNC_RENDER_CACHE` / `SYNC_CACHE_MAX_AGE_DAYS` | Cache overrides |
 | env var | `LIVING_INK_CONFIG` / `LIVING_INK_CONFIG_DIR` / `LIVING_INK_DATA_DIR` | Path overrides |
 
-Every env var is declared in `config/schema.py`. If a name is not there, nothing reads it — which is what made `docker-compose.yml` hand containers three keys that named no setting at all.
+Every env var is declared in `config/schema.py`. If a name is not there, nothing reads it — a plausible-looking spelling like `GEMINI_API_KEY` or `REMARKABLE_DEVICE_TOKEN` is silently nothing, so a process handed a key runs with none.
 
 ## Commands
 
@@ -161,7 +160,6 @@ uv run ruff check .           # lint
 uv run ruff format --check .  # format check (`ruff format .` to fix)
 uv run pytest -v              # full suite
 uv run pytest tests/test_pipeline.py::test_name -v    # single test
-./tests/test_docker.sh        # Docker build + smoke tests (slow)
 ```
 
 Before committing: `uv run ruff check . && uv run ruff format --check . && uv run pytest -v`.
