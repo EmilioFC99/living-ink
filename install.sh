@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Living Ink — One-Line Installer
-# Sync your reMarkable notebooks to Obsidian & Apple Notes
+# Turn handwritten reMarkable notebooks into Markdown in your Obsidian vault
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/EmilioFC99/living-ink/main/install.sh | bash
@@ -36,7 +36,7 @@ fi
 echo -e "${BOLD}${CYAN}"
 echo "============================================================"
 echo "              🖋️   Living Ink Installer  🖋️                "
-echo "   Sync your reMarkable notebooks to Obsidian & Apple Notes "
+echo "     Handwritten reMarkable notebooks → your Obsidian vault "
 echo "============================================================"
 echo -e "${RESET}"
 
@@ -60,17 +60,9 @@ if ! command -v git &> /dev/null; then
     exit 1
 fi
 
-# Check Cairo on Linux (required by cairosvg for rendering strokes)
-if [ "$OS" = "Linux" ]; then
-    if ! ldconfig -p 2>/dev/null | grep -q 'libcairo\.so\.2' && ! [ -f /usr/lib/libcairo.so.2 ] && ! [ -f /usr/lib64/libcairo.so.2 ] && ! ls /usr/lib/*-linux-gnu/libcairo.so.2 &>/dev/null; then
-        echo -e "${YELLOW}Notice: libcairo2 is recommended on Linux to render handwritten notebook strokes.${RESET}"
-        if command -v apt-get &>/dev/null; then
-            echo -e "${DIM}You can install it with: sudo apt update && sudo apt install -y libcairo2${RESET}"
-        elif command -v dnf &>/dev/null; then
-            echo -e "${DIM}You can install it with: sudo dnf install -y cairo${RESET}"
-        fi
-    fi
-fi
+# No system libraries to check for. Rendering used to go through cairosvg,
+# which needed libcairo2 on Linux; it does not any more, and a notice telling
+# people to apt-install a library nothing loads is worse than no notice at all.
 
 # ------------------------------------------------------------------------------
 # 2. Check / Install uv (Fast Python package manager)
