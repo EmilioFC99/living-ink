@@ -46,6 +46,31 @@ tags: [meeting, q3]
 > The bottleneck is review, not authoring.
 ```
 
+## See it in action
+
+Compare the original reMarkable pages with the structured notes synced into Obsidian:
+
+### Handwritten notebooks
+Transcribes handwriting into clean Markdown, preserving headings, lists, and interactive checkboxes.
+
+| On the reMarkable | In Obsidian |
+| :---: | :---: |
+| <img src="docs/imgs/handwritten_note_remarkable.png" width="400" alt="reMarkable handwritten note" /> | <img src="docs/imgs/handwritten_note_transcript.png" width="400" alt="Obsidian transcribed note" /> |
+
+### Annotated PDFs
+Detects hand-drawn boxes, margin marks, and highlights, converting them into structured callouts with page numbers and breadcrumbs.
+
+| On the reMarkable | In Obsidian |
+| :---: | :---: |
+| <img src="docs/imgs/pdf_remarkable.png" width="400" alt="reMarkable annotated PDF" /> | <img src="docs/imgs/pdf_transcript.png" width="400" alt="Obsidian PDF highlights" /> |
+
+### EPUB highlights & margin notes
+Extracts highlighter passages, boxed sections, and handwritten margin notes into categorized callouts.
+
+| On the reMarkable | In Obsidian |
+| :---: | :---: |
+| <img src="docs/imgs/epub_remarkable.png" width="400" alt="reMarkable annotated EPUB" /> | <img src="docs/imgs/epub_transcript.png" width="400" alt="Obsidian EPUB highlights" /> |
+
 ## Requirements
 
 | | |

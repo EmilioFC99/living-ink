@@ -13,7 +13,7 @@ invisible and left every consumer re-parsing ``"true"`` for itself.
 Precedence, highest first:
 
 1. Explicit CLI options.
-2. Environment variables — a deliberate override, e.g. in Docker or CI.
+2. Environment variables — a deliberate override, e.g. in CI or automated environments.
 3. The YAML config file, or the credentials directory for a secret.
 4. The defaults in :mod:`living_ink.config.schema`.
 
@@ -473,7 +473,7 @@ class Settings:
         """Resolve settings and say where each value came from.
 
         Precedence is invisible in the resolved object alone, which makes a
-        stray environment variable in a shell profile or a Docker file very
+        stray environment variable in a shell profile or automated script very
         hard to spot. This reports the same merge :meth:`resolve` performs —
         literally the same call — annotated with the layer that supplied each
         value.

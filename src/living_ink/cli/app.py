@@ -261,7 +261,7 @@ class LivingInkCLI:
         banner and burned a network call. Refusing before the first step is
         also the only way the refusal can be a clean exit code rather than an
         ``EOFError`` traceback out of a prompt reading a closed pipe — which is
-        what ``living-ink setup < /dev/null`` in a Dockerfile used to produce.
+        what non-interactive ``living-ink setup < /dev/null`` used to produce.
 
         Args:
             cmd_cls: The command class to instantiate and run.
