@@ -938,6 +938,18 @@ class SyncPipeline:
         """Whether this run was asked to say nothing below a warning."""
         return getattr(self.settings, "verbosity", None) == "quiet"
 
+    @property
+    def verbose(self) -> bool:
+        """Whether this run was asked for a line per page.
+
+        The summary reads this to decide between the one-line totals and the
+        per-document table. It used to be ``getattr(self, "verbose", False)``
+        against an attribute nothing ever set, so ``--verbose`` raised the log
+        level and then printed the same compact summary as a quiet run — the
+        table in :meth:`living_ink.report.RunReport.render` was unreachable.
+        """
+        return getattr(self.settings, "verbosity", None) == "verbose"
+
     def connect(self) -> Any:
         """Establish connection to reMarkable tablet (via SSH or Cloud)."""
         from living_ink.api import get_rmapi
@@ -2644,4 +2656,4 @@ class SyncPipeline:
             print(self.report.as_json())
             _logger.info("Run summary: %s", self.report.as_json())
             return
-        log(self.report.render(detailed=getattr(self, "verbose", False)))
+        log(self.report.render(detailed=self.verbose))

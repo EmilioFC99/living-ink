@@ -3269,6 +3269,35 @@ class TestRunSummary:
 
         assert "Pages:" in capsys.readouterr().out
 
+    def test_the_default_summary_is_the_compact_one(self, capsys):
+        pipe = self._pipeline()
+        pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
+
+        assert pipe.verbose is False
+        pipe._print_summary()
+
+        assert "Notes" not in capsys.readouterr().out
+
+    def test_verbose_lists_every_document(self, capsys):
+        """``--verbose`` used to raise the log level and then print the same
+        compact block, because ``_print_summary`` read a ``self.verbose`` that
+        nothing ever set — the per-document table was unreachable."""
+        pipe = self._pipeline()
+        pipe.settings = Settings.resolve({}, flags={"verbosity": "verbose"})
+        pipe.report.add(DocumentOutcome(name="Notes", status=SKIPPED))
+
+        assert pipe.verbose is True
+        pipe._print_summary()
+
+        assert "Notes" in capsys.readouterr().out
+
+    def test_quiet_is_not_verbose(self):
+        pipe = self._pipeline()
+        pipe.settings = Settings.resolve({}, flags={"verbosity": "quiet"})
+
+        assert pipe.quiet is True
+        assert pipe.verbose is False
+
     def test_json_output_is_machine_readable(self, capsys):
         pipe = self._pipeline()
         pipe.settings = Settings.resolve({}, flags={"output_json": True})
