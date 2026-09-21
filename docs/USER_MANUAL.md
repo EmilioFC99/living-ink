@@ -306,12 +306,16 @@ It walks through:
 
 1. **Tablet** — pick USB or Cloud, test the connection for real, and pair if
    needed.
-2. **AI** — pick a provider, enter a key, and **verify it by sending a real
+2. **What to sync** — tick the document types you want (`sync.types`).
+   Handwritten notebooks are ticked by default; annotated PDFs and EPUBs are
+   the two you opt into, and each annotated page of one costs an AI call the
+   same way a handwritten page does. Ticking nothing keeps notebooks.
+3. **AI** — pick a provider, enter a key, and **verify it by sending a real
    image**. A text-only model fails here rather than at page 200.
-3. **Vault** — find or type your Obsidian vault path, and choose the folder
+4. **Vault** — find or type your Obsidian vault path, and choose the folder
    layout.
-4. **Schedule** — optionally install the background watcher.
-5. **Summary** — everything you chose, then a cost sketch for the first run.
+5. **Schedule** — optionally install the background watcher.
+6. **Summary** — everything you chose, then a cost sketch for the first run.
 
 **Nothing reaches disk until you confirm the summary.** Cancel at any point with
 Ctrl+C and your existing config is untouched.
@@ -606,15 +610,16 @@ The Cloud token is written by pairing during `setup`, not typed.
 | `sync.tags` | *(none)* | `--tag` | `SYNC_TAGS` |
 | `sync.exclude` | `Trash`, `Templates`, `Quick sheets` | `--exclude` | `SYNC_EXCLUDE` |
 | `sync.skip_empty` | `false` | `--skip-empty` | `SYNC_SKIP_EMPTY` |
-| `sync.limit` | `1`, or `5` from the wizard | `--limit` | `SYNC_MAX_NOTEBOOKS` |
+| `sync.limit` | `1`, or `0` from the wizard | `--limit` | `SYNC_MAX_NOTEBOOKS` |
 | `sync.prune` | `false` | `--prune` | `SYNC_PRUNE` |
 
 - `sync.types` accepts any of `notebook`, `pdf`, `epub`. Only annotated PDFs and
   EPUBs produce anything: an unannotated PDF has no pages to render, and its
   embedded text layer is published on its own.
-- **`sync.limit` is `5` in a config the wizard wrote**, and `1` only as the
-  schema default for a config you hand-wrote without the key. `0` means no limit.
-  This is the single most common surprise on a first run.
+- **`sync.limit` is `0` — no limit — in a config the wizard wrote.** The schema
+  default is `1`, and that applies only to a config you hand-wrote without the
+  key: a low cap protects a *scripted* run from an accidentally enormous one,
+  whereas a first run's whole job is to get the tablet into the vault.
 - `sync.exclude` matches tablet folder names. Setting it replaces the default
   list, so include `Trash` yourself if you still want it skipped.
 - `sync.skip_empty` — off by default, so an all-blank result is published rather
@@ -729,7 +734,7 @@ ocr:
 sync:
   types: [notebook, pdf]
   exclude: [Trash, Templates, Quick sheets, Scratch]
-  limit: 5
+  limit: 0
   skip_empty: false
 
 obsidian:
@@ -1145,8 +1150,9 @@ success, 1 on failure, 130 on Ctrl+C.
 
 ### Only a few notebooks synced
 
-`sync.limit` caps a run — `5` in a wizard-written config. Use
-`living-ink sync --limit 0`, or change `sync.limit` in `config → sync`.
+`sync.limit` caps a run. The wizard writes `0`, which means no cap, so this is
+a config that was hand-written or edited since. Use `living-ink sync --limit 0`
+for one run, or change `sync.limit` in `config → sync`.
 
 ### My annotated PDFs are ignored
 

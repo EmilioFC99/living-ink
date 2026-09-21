@@ -85,17 +85,18 @@ To upgrade, re-run the installer or `uv tool install --force "git+https://github
 ## Quickstart
 
 ```bash
-living-ink setup            # 1. the wizard: tablet, AI provider, vault
+living-ink setup            # 1. the wizard: tablet, what to sync, AI provider, vault
 living-ink sync --preview   # 2. see what would happen — free, no API calls
 living-ink sync             # 3. do it
 ```
 
-**Two defaults worth knowing before your first run:**
+**Two things the wizard decides for you, and you can change:**
 
-- A sync processes **5 documents at a time** (whatever `sync.limit` says in your
-  config). Use `living-ink sync --limit 0` for the whole backlog.
-- Only **handwritten notebooks** sync. Annotated PDFs and EPUBs are opt-in:
-  `living-ink sync --pdf --epub`.
+- A sync processes **every pending document** (`sync.limit: 0`). Set
+  `sync.limit` to a number if you would rather cap each run.
+- Only **handwritten notebooks** sync, unless you ticked more in the wizard.
+  Either way `sync.types` is the setting, and `living-ink sync --pdf --epub`
+  overrides it for one run.
 
 Trash, Templates and Quick sheets are always skipped.
 
@@ -122,7 +123,7 @@ pages untranscribed. Everything else is skipped, and skipping is free.
 ```bash
 living-ink sync --preview                # what would happen; no download, no OCR, no cost
 living-ink sync                          # sync
-living-ink sync --limit 0                # the whole backlog in one run
+living-ink sync --limit 3                # cap this run at three documents
 living-ink sync --notebook "Work/Ideas"  # one notebook, by name, path or id
 ```
 
@@ -258,7 +259,7 @@ Full reference: [User Manual → Configuration](docs/USER_MANUAL.md#configuratio
 
 | Symptom | Cause and fix |
 |---|---|
-| Only a few notebooks synced | `sync.limit` caps a run. `living-ink sync --limit 0` takes all of them. |
+| Only a few notebooks synced | `sync.limit` caps a run. `0` means no cap — `living-ink sync --limit 0` takes all of them. |
 | My annotated PDFs are ignored | Notebooks only, by default. `living-ink sync --pdf --epub`, or set `sync.types`. |
 | Tablet not found over USB | Plug the cable in and enable the USB web interface. `living-ink info` prints the exact remedy, including the `ssh-copy-id` line. |
 | Pages came back blank | Usually a rate limit. Lower `ocr.concurrency`. Failed pages publish a warning callout and are retried automatically on the next sync — only they are billed again. |

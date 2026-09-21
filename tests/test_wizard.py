@@ -84,6 +84,7 @@ CLOUD_ONLY = {
     "how should living ink reach": "cloud",
     "reuse the remarkable pairing": True,
     "also set up the usb cable": False,
+    "which document types": ("notebook",),
     "which ai provider": "gemini",
     "model": "gemini-2.0-flash",
     "api key": "AIzaTestKey",
@@ -101,6 +102,7 @@ USB_ONLY = {
     "ssh host": "10.11.99.1",
     "also pair with the cloud": False,
     "reuse the remarkable pairing": True,
+    "which document types": ("notebook",),
     "which ai provider": "gemini",
     "model": "gemini-2.0-flash",
     "api key": "AIzaTestKey",
@@ -542,6 +544,72 @@ class TestWhatTheWizardWrites:
         run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
         problems = validate_config(read_config_file(saved_config(tmp_path)))
         assert [p for p in problems if p.level == ERROR] == []
+
+    def test_the_first_run_is_not_capped(self, monkeypatch, tmp_path, vault, probes):
+        """A wizard-written config syncs the whole tablet, not five of it.
+
+        The cap used to be 5, which made the first sync of a real tablet take
+        as many runs as the user had notebooks — and the setting that lifted
+        it was one they had to go and find.
+        """
+        run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["sync"]["limit"] == 0
+
+
+class TestWhichTypesGetSynced:
+    """The wizard asks, and what it asks is what the schema offers."""
+
+    def test_the_default_answer_is_notebooks_only(self, monkeypatch, tmp_path, vault, probes):
+        """Handwriting alone, because every other type bills per page."""
+        run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["sync"]["types"] == ["notebook"]
+
+    def test_ticking_more_types_writes_them_all(self, monkeypatch, tmp_path, vault, probes):
+        """A user who annotates PDFs says so once, here."""
+        answers = {**CLOUD_ONLY, "which document types": ("notebook", "pdf", "epub")}
+        run_wizard(monkeypatch, tmp_path, answers, vault)
+
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["sync"]["types"] == ["notebook", "pdf", "epub"]
+
+    def test_ticking_nothing_falls_back_to_notebooks(self, monkeypatch, tmp_path, vault, probes):
+        """An empty tick list is a real answer from the widget, and a useless
+        one — a sync with no types matches no document, so saving it would
+        write a config that can only ever do nothing."""
+        answers = {**CLOUD_ONLY, "which document types": ()}
+        run_wizard(monkeypatch, tmp_path, answers, vault)
+
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["sync"]["types"] == ["notebook"]
+
+    def test_the_options_come_from_the_schema(self, monkeypatch, tmp_path, vault, probes):
+        """Retyping the list here is how it drifts from the sources registry."""
+        from living_ink.config.schema import SETTINGS
+
+        offered: List[tuple] = []
+        Script({**CLOUD_ONLY, "which vault": str(vault)}).install(monkeypatch)
+        scripted = ui.checkbox
+
+        def spy(message, choices, **kwargs):
+            if "document types" in message.lower():
+                offered.append(tuple(choice.value for choice in choices))
+            return scripted(message, choices, **kwargs)
+
+        # After ``install``, so the spy wraps the script rather than being
+        # replaced by it.
+        monkeypatch.setattr(ui, "checkbox", spy)
+        Wizard(root=tmp_path, bin_dir=tmp_path / "bin").run()
+
+        setting = next(s for s in SETTINGS if s.field == "sync_types")
+        assert offered == [tuple(choice.value for choice in setting.choices)]
+
+    def test_the_summary_says_what_will_be_synced(self):
+        """A cost the user agreed to is a cost they were shown."""
+        wizard = Wizard()
+        wizard.answers.sync_types = ("notebook", "pdf")
+        assert dict(wizard._summary_rows())["Syncing"] == "notebook, pdf"
 
 
 class TestTabCompletion:
