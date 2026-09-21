@@ -127,6 +127,15 @@ class TestRenderedSummary:
         report.warn("same")
         assert report.warnings == ["same"]
 
+    def test_compact_summary_shows_only_pages_api_calls_cache_and_time(self):
+        report = RunReport()
+        report.add(_published(pages=1, transcribed=0, cached=1))
+        rendered = report.finish().render(detailed=False)
+        assert "Pages: 1   API calls: 0   From cache: 1 (100%)" in rendered
+        assert "Time: " in rendered
+        assert "Synced" not in rendered
+        assert "Meeting Notes" not in rendered
+
 
 class TestJsonSummary:
     """``--json`` emits the same facts, for scripting."""

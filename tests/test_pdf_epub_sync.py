@@ -152,6 +152,17 @@ class TestPdfRendering:
     def test_render_composite_pdf_page_out_of_bounds(self, sample_pdf):
         assert render_composite_pdf_page(sample_pdf, 999, b"") is None
 
+    def test_render_composite_pdf_page_with_rm(self, sample_pdf):
+        from tests.fixtures.build_corpus import CORPUS_DIR, DOC_HANDWRITTEN
+
+        rm_file = next((CORPUS_DIR / DOC_HANDWRITTEN).glob("*.rm"))
+        rm_bytes = rm_file.read_bytes()
+        png_bytes = render_composite_pdf_page(sample_pdf, 0, rm_bytes=rm_bytes)
+        assert png_bytes is not None
+        img = Image.open(io.BytesIO(png_bytes))
+        assert img.width > 0
+        assert img.height > 0
+
 
 class TestDestinationDocumentPublishing:
     """Test document publishing in Obsidian and Apple Notes destinations."""
@@ -376,3 +387,109 @@ class TestPageSectionHeaderFormatting:
         assert "> !!!" in normalized
         assert "> [!quote] Highlight" in normalized
         assert '> "Important text"' in normalized
+
+
+class TestEpubPdfCompositing:
+    """Test EpubRenderer when reMarkable provides an embedded reflowed PDF."""
+
+    def test_epub_prefers_embedded_pdf(self, tmp_path):
+        from living_ink.sources.base import RenderContext, SourceBundle
+        from living_ink.sources.epub import EPUB
+        from living_ink.transport import DeviceInfo
+
+        pdf_path = tmp_path / "mock.pdf"
+        doc = fitz.open()
+        p1 = doc.new_page(width=300, height=400)
+        p1.insert_text((50, 50), "EPUB Page 1 Text", fontsize=14)
+        p2 = doc.new_page(width=300, height=400)
+        p2.insert_text((50, 50), "EPUB Page 2 Text", fontsize=14)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        content_json = {
+            "cPages": {
+                "pages": [
+                    {"id": "p-1", "redir": {"value": 0}},
+                    {"id": "p-2", "redir": {"value": 1}},
+                ]
+            }
+        }
+        zip_file = tmp_path / "doc.zip"
+        with zipfile.ZipFile(zip_file, "w") as zf:
+            zf.writestr("doc.content", json.dumps(content_json))
+            zf.writestr("doc.epub", b"mock epub data")
+            zf.writestr("doc.pdf", pdf_path.read_bytes())
+            zf.writestr("p-2.rm", b"")
+
+        bundle = SourceBundle(
+            doc_id="doc",
+            title="Book",
+            zip_path=zip_file,
+            source_path=tmp_path / "source.epub",
+        )
+        ctx = RenderContext(
+            device=DeviceInfo(
+                model="reMarkable 2", firmware="3.0", screen=(1404, 1872), color=False
+            )
+        )
+
+        assert EPUB.renderer.prepare(bundle, ctx) is True
+        assert bundle.source_path == tmp_path / "source.pdf"
+        assert bundle.source_path.exists()
+
+        pages = list(EPUB.renderer.pages(bundle, ctx))
+        assert len(pages) == 1
+        assert pages[0].number == 2
+        assert pages[0].detail["pdf_page_index"] == 1
+
+        png_bytes = EPUB.renderer.render(bundle, pages[0], ctx)
+        assert png_bytes is not None
+        img = Image.open(io.BytesIO(png_bytes))
+        assert img.width > 0 and img.height > 0
+
+        descriptions = EPUB.renderer.describe_pages(bundle, pages)
+        assert len(descriptions) == 1
+        assert descriptions[0].label == "Page 2"
+
+
+class TestEpubObsidianPublishing:
+    """Test Obsidian publishing for EPUBs with embedded PDFs."""
+
+    def test_epub_publishes_pdf_attachment_and_cleans_old_epub(self, tmp_path):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        dest = ObsidianDestination(
+            vault_path=str(vault),
+            root_folder="Remarkable",
+            attachments_folder="_attachments",
+        )
+
+        dummy_pdf = tmp_path / "Book.pdf"
+        dummy_pdf.write_bytes(b"%PDF-1.4 dummy book content")
+
+        # Simulate a previous sync that left Book.epub
+        old_attach_dir = vault / "Remarkable" / "_attachments" / "Book"
+        old_attach_dir.mkdir(parents=True)
+        old_epub = old_attach_dir / "Book.epub"
+        old_epub.write_bytes(b"old epub bytes")
+
+        success = dest.publish(
+            *make_both("Book", "Notes on Book", source="epub", source_file=dummy_pdf)
+        )
+        assert success.ok is True
+
+        # Note created
+        note_file = vault / "Remarkable" / "Book.md"
+        assert note_file.exists()
+        content = note_file.read_text(encoding="utf-8")
+        assert "type: epub" in content
+        assert "tags:\n  - remarkable\n  - epub" in content
+        assert 'document: "[[Remarkable/_attachments/Book/Book.pdf]]"' in content
+
+        # PDF attachment copied
+        attach_pdf = vault / "Remarkable" / "_attachments" / "Book" / "Book.pdf"
+        assert attach_pdf.exists()
+        assert attach_pdf.read_bytes() == b"%PDF-1.4 dummy book content"
+
+        # Old EPUB attachment deleted
+        assert not old_epub.exists()

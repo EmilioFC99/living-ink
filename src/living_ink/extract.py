@@ -405,6 +405,96 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
         return []
 
 
+def render_rm_for_pdf_page(
+    rm_file_path: Path,
+    pdf_width: float,
+    pdf_height: float,
+    dpi: int = 150,
+) -> Optional[Image.Image]:
+    """Render handwritten .rm strokes mapped to a PDF page's coordinate space.
+
+    On a reMarkable tablet, pen strokes on a PDF page are anchored in PDF point
+    space (72 DPI), with the horizontal axis centered at zero (``x = 0`` is
+    ``pdf_width / 2``) and the vertical axis starting at ``y = 0`` at the top of
+    the page.
+
+    Args:
+        rm_file_path: Path to the .rm file.
+        pdf_width: Width of the PDF page in points.
+        pdf_height: Height of the PDF page in points.
+        dpi: Resolution for rasterizing the stroke overlay.
+
+    Returns:
+        RGBA PIL Image matching the rendered resolution of the PDF page, or None
+        if the page has no strokes or could not be rendered.
+
+    Raises:
+        UnsupportedRmFormat: If the file declares an unsupported .rm format.
+        BlankRenderError: If a page with strokes rendered to empty markup.
+    """
+    version = read_rm_version(rm_file_path)
+    if version is not None and version not in SUPPORTED_RM_VERSIONS:
+        supported = ", ".join(str(v) for v in sorted(SUPPORTED_RM_VERSIONS))
+        raise UnsupportedRmFormat(
+            f"{rm_file_path.name} is .rm format version {version}; this build reads "
+            f"version {supported}. Upgrade living-ink, or file an issue naming the "
+            f"version and your firmware."
+        )
+
+    tmp_svg_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
+            tmp_svg_path = Path(tmp_svg.name)
+
+        try:
+            _patch_rmc()
+            from rmc.exporters.svg import rm_to_svg
+
+            rm_to_svg(str(rm_file_path), str(tmp_svg_path))
+        except Exception as e:
+            logger.warning("rm_to_svg failed for %s: %s", rm_file_path, e, exc_info=True)
+            return None
+
+        if not tmp_svg_path.exists() or tmp_svg_path.stat().st_size == 0:
+            return None
+
+        if not _svg_has_ink(tmp_svg_path):
+            stats = inspect_rm_page(rm_file_path)
+            if stats is not None and stats.has_content:
+                held = f"{stats.strokes} strokes"
+                if stats.unreadable:
+                    held += f" and {stats.unreadable} blocks this build cannot decode"
+                raise BlankRenderError(
+                    f"{rm_file_path.name} holds {held} but rendered to an empty image. "
+                    f"Known cause: an rmc/rmscene version that cannot draw what this "
+                    f"firmware wrote — try upgrading living-ink."
+                )
+            return None
+
+        svg_text = tmp_svg_path.read_text(encoding="utf-8", errors="replace")
+        new_header = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'height="{pdf_height}" width="{pdf_width}" '
+            f'viewBox="-{pdf_width / 2.0} 0.0 {pdf_width} {pdf_height}">'
+        )
+        modified_svg = re.sub(r"<svg[^>]+>", new_header, svg_text, count=1)
+
+        try:
+            with (
+                quiet_mupdf(),
+                fitz.open(stream=modified_svg.encode("utf-8"), filetype="svg") as svg_doc,
+            ):
+                svg_page = svg_doc[0]
+                svg_pix = svg_page.get_pixmap(dpi=dpi, alpha=True)
+                return Image.frombytes("RGBA", [svg_pix.width, svg_pix.height], svg_pix.samples)
+        except _DOC_ERRORS as e:
+            logger.warning("Failed to rasterize SVG stroke overlay for %s: %s", rm_file_path, e)
+            return None
+    finally:
+        if tmp_svg_path is not None:
+            tmp_svg_path.unlink(missing_ok=True)
+
+
 def render_composite_pdf_page(
     pdf_path: Path,
     page_index: int,
@@ -419,8 +509,8 @@ def render_composite_pdf_page(
         page_index: 0-indexed page number in the PDF.
         rm_bytes: Raw bytes of the .rm pen stroke file.
         dpi: Resolution for rendering the PDF page.
-        screen: Panel size of the tablet that drew the annotations. See
-            :func:`render_rm_file_to_png`.
+        screen: Panel size of the tablet that drew the annotations. Kept for
+            API compatibility.
 
     Returns:
         PNG image bytes of the composite page, or None if rendering failed.
@@ -432,34 +522,35 @@ def render_composite_pdf_page(
             page = doc[page_index]
             pix = page.get_pixmap(dpi=dpi)
             pdf_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            page_w = page.rect.width
+            page_h = page.rect.height
 
         if not rm_bytes:
             out_buf = io.BytesIO()
             pdf_img.save(out_buf, format="PNG")
             return out_buf.getvalue()
 
-        # Render the .rm file
+        # Render the .rm file mapped to PDF coordinate space
         with tempfile.NamedTemporaryFile(suffix=".rm", delete=False) as f:
             f.write(rm_bytes)
             tmp_rm = Path(f.name)
 
         try:
-            rm_png = render_rm_file_to_png(tmp_rm, screen=screen)
+            rm_overlay = render_rm_for_pdf_page(tmp_rm, page_w, page_h, dpi=dpi)
         except RenderError as e:
             # The PDF page underneath is still worth having, and still worth
             # transcribing. Losing the annotation layer is not losing the page.
             logger.warning("Annotation layer on PDF page %s: %s", page_index, e)
-            rm_png = None
+            rm_overlay = None
         finally:
             tmp_rm.unlink(missing_ok=True)
 
-        if rm_png:
-            rm_img = Image.open(io.BytesIO(rm_png))
-            rm_resized = rm_img.resize((pix.width, pix.height), Image.Resampling.LANCZOS)
-            if rm_resized.mode == "RGBA":
-                pdf_img.paste(rm_resized, (0, 0), rm_resized)
-            else:
-                pdf_img.paste(rm_resized, (0, 0))
+        if rm_overlay is not None:
+            if (rm_overlay.width, rm_overlay.height) != (pdf_img.width, pdf_img.height):
+                rm_overlay = rm_overlay.resize(
+                    (pdf_img.width, pdf_img.height), Image.Resampling.LANCZOS
+                )
+            pdf_img.paste(rm_overlay, (0, 0), rm_overlay)
 
         out_buf = io.BytesIO()
         pdf_img.save(out_buf, format="PNG")
@@ -669,6 +760,103 @@ def _patch_rmc() -> None:
         # CrdtSequence.__iter__ reads this by module global, so rebinding the
         # name is enough; there is no other importer of it in rmscene.
         cs.toposort_items = _toposort_items
+
+        import textwrap
+
+        import rmc.exporters.svg as rmc_svg
+
+        def _wrap_paragraph(p: Any, width: int = 64) -> List[Tuple[str, List[Any], Any]]:
+            chars: List[str] = []
+            ids: List[Any] = []
+            for subp in p.contents:
+                for ch, cid in zip(subp.s, subp.i):
+                    chars.append(ch)
+                    ids.append(cid)
+
+            full_text = "".join(chars)
+            if not full_text.strip():
+                return [("", [], p.start_id)]
+
+            wrapped_lines = textwrap.wrap(
+                full_text, width=width, break_long_words=False, break_on_hyphens=False
+            )
+            if not wrapped_lines:
+                return [("", [], p.start_id)]
+
+            result = []
+            curr_idx = 0
+            for line_str in wrapped_lines:
+                start = full_text.find(line_str, curr_idx)
+                if start == -1:
+                    start = curr_idx
+                end = start + len(line_str)
+                curr_idx = end
+                line_ids = ids[start:end]
+                first_id = ids[start] if start < len(ids) else p.start_id
+                result.append((line_str, line_ids, first_id))
+
+            return result
+
+        def safe_build_anchor_pos(text: Any) -> Dict[Any, int]:
+            anchor_pos = {
+                si.CrdtId(0, 281474976710654): 100,
+                si.CrdtId(0, 281474976710655): 100,
+            }
+            if text is not None:
+                doc = rmc_svg.TextDocument.from_scene_item(text)
+                ypos = text.pos_y + rmc_svg.TEXT_TOP_Y
+                for p in doc.contents:
+                    lh = rmc_svg.LINE_HEIGHTS.get(p.style.value, 70)
+                    wrap_w = 35 if p.style.value == si.ParagraphStyle.HEADING else 64
+                    lines = _wrap_paragraph(p, width=wrap_w)
+                    for _, line_ids, first_id in lines:
+                        ypos += lh
+                        anchor_pos[first_id] = ypos
+                        for cid in line_ids:
+                            anchor_pos[cid] = ypos
+            return anchor_pos
+
+        def safe_draw_text(text: si.Text, output: Any) -> None:
+            output.write('\t\t<g class="root-text" style="display:inline">')
+            output.write("""
+            <style>
+                text.heading {
+                    font: 14pt serif;
+                }
+                text.bold {
+                    font: 8pt sans-serif bold;
+                }
+                text, text.plain {
+                    font: 7pt sans-serif;
+                }
+            </style>
+""")
+            y_offset = rmc_svg.TEXT_TOP_Y
+            doc = rmc_svg.TextDocument.from_scene_item(text)
+            for p in doc.contents:
+                lh = rmc_svg.LINE_HEIGHTS.get(p.style.value, 70)
+                cls = p.style.value.name.lower()
+                wrap_w = 35 if p.style.value == si.ParagraphStyle.HEADING else 64
+                lines = _wrap_paragraph(p, width=wrap_w)
+                for line_str, _, _ in lines:
+                    y_offset += lh
+                    xpos = text.pos_x
+                    ypos = text.pos_y + y_offset
+                    if line_str.strip():
+                        escaped = (
+                            line_str.replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;")
+                            .replace('"', "&quot;")
+                        )
+                        output.write(
+                            f'\t\t\t<text x="{rmc_svg.xx(xpos)}" y="{rmc_svg.yy(ypos)}" '
+                            f'class="{cls}">{escaped}</text>\n'
+                        )
+            output.write("\t\t</g>\n")
+
+        rmc_svg.build_anchor_pos = safe_build_anchor_pos
+        rmc_svg.draw_text = safe_draw_text
     except (ImportError, AttributeError):
         # rmc or rmscene is absent, or an upgrade moved what this patches.
         logger.debug("Could not patch rmc", exc_info=True)

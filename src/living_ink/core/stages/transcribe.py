@@ -6,6 +6,7 @@ page. Everything here exists to make the second reading of a page free and to
 stop one unreadable page from costing the other 199.
 """
 
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,9 +14,10 @@ from typing import List, Optional, Sequence, Tuple
 
 from living_ink.cache import TranscriptCache
 from living_ink.clean import ocr_and_repair, transcription_fingerprint
-from living_ink.logs import log
 from living_ink.redact import redact
 from living_ink.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 #: What one page came back as: its text, and why it has none.
 PageResult = Tuple[str, Optional[str]]
@@ -65,7 +67,7 @@ class Transcriber:
         if width <= 1:
             return [self.transcribe_one(p) for p in paths]
 
-        log(f"Transcribing {len(paths)} pages, {width} at a time...")
+        logger.debug("Transcribing %d pages, %d at a time...", len(paths), width)
         with ThreadPoolExecutor(max_workers=width) as pool:
             # ``map`` yields in submission order, so pages stay in page order
             # however the calls happen to finish.
@@ -90,7 +92,7 @@ class Transcriber:
             if cached is not None:
                 with self._lock:
                     self.hits += 1
-                log(f"  Cached: {path.name}")
+                logger.debug("  Cached: %s", path.name)
                 return cached, None
 
         try:
@@ -150,10 +152,10 @@ class Transcriber:
         Returns:
             The cleaned text, or an empty string if vision returned nothing.
         """
-        log(f"  AI Vision OCR: {path.name}...")
+        logger.debug("  AI Vision OCR: %s...", path.name)
         cleaned_text = ocr_and_repair(str(path))
         if cleaned_text:
             return cleaned_text
 
-        log(f"  AI Vision returned empty for {path.name}")
+        logger.debug("  AI Vision returned empty for %s", path.name)
         return ""

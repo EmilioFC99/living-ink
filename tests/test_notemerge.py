@@ -509,3 +509,25 @@ class TestInspectExisting:
         (tmp_path / "bad.md").write_bytes(b"\xff")
         assert notemerge.read_existing(tmp_path / "bad.md") is None
         assert notemerge.read_existing(tmp_path / "gone.md") is None
+
+
+class TestDividerNewlineSeparation:
+    """A horizontal divider immediately under an HTML comment must have a blank line."""
+
+    def test_divider_has_blank_line_after_begin_marker(self):
+        segment = notemerge.Segment(block_id="page-1", content="---\n\nHeader content")
+        rendered = notemerge.render_segments([segment])
+        expected = f"{begin()} -->\n\n---\n\nHeader content\n{end()}"
+        assert rendered == expected
+
+    def test_divider_segments_round_trip(self):
+        segment = notemerge.Segment(block_id="page-1", content="---\n\nHeader content")
+        rendered = notemerge.render_segments([segment])
+        round_tripped = notemerge.parse_segments(rendered)
+        assert round_tripped == [segment]
+
+    def test_non_divider_has_no_extra_blank_line(self):
+        segment = notemerge.Segment(block_id="page-1", content="# Title\n\nBody")
+        rendered = notemerge.render_segments([segment])
+        expected = f"{begin()} -->\n# Title\n\nBody\n{end()}"
+        assert rendered == expected

@@ -355,15 +355,15 @@ def render_segments(segments: Iterable[Segment]) -> str:
         # line is a divider and not a setext underline for whatever precedes it.
         if parts and parts[-1] != "" and not parts[-1].endswith("\n"):
             parts.append("")
-        parts.append(
-            "\n".join(
-                [
-                    begin_marker(segment.block_id, segment.written_hash),
-                    segment.content,
-                    end_marker(segment.block_id),
-                ]
-            )
-        )
+        block_parts = [begin_marker(segment.block_id, segment.written_hash)]
+        # A blank line after the begin marker when content starts with a divider,
+        # so CommonMark / Obsidian renders the '---' as a horizontal rule instead
+        # of swallowing it into the HTML comment block.
+        if segment.content.lstrip().startswith(("---", "- - -", "***", "___")):
+            block_parts.append("")
+        block_parts.append(segment.content)
+        block_parts.append(end_marker(segment.block_id))
+        parts.append("\n".join(block_parts))
     return "\n".join(parts)
 
 
@@ -443,9 +443,12 @@ def merge_segments(
             # Writing the fresh block and dropping their version would punish a
             # mistake with a deletion. Both survive; the user decides.
             # The leading blank line is the same courtesy a begin marker gets:
-            # the parked copy is the one thing here the user is meant to
-            # notice, and butted against the end marker it reads as noise.
-            parked = f"\n{PARKED_PREFIX} {block_id}, kept below -->\n{current.content}"
+            sep = (
+                "\n\n"
+                if current.content.lstrip().startswith(("---", "- - -", "***", "___"))
+                else "\n"
+            )
+            parked = f"\n{PARKED_PREFIX} {block_id}, kept below -->{sep}{current.content}"
             merged.insert(at + 1, Segment(content=parked))
             seen = {key: (value + 1 if value > at else value) for key, value in seen.items()}
             anchor = at + 1

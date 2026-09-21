@@ -587,8 +587,16 @@ class ObsidianDestination(FileSystemDestination):
         source = doc.source_file
         if source and source.exists():
             filename = f"{stem}{source.suffix.lower()}"
-            shutil.copy2(source, self.contained(attach_dir, filename))
+            dest_file = self.contained(attach_dir, filename)
+            shutil.copy2(source, dest_file)
             layout.doc_link_target = f"{link_prefix}{filename}"
+            if source.suffix.lower() == ".pdf":
+                old_epub = self.contained(attach_dir, f"{stem}.epub")
+                if old_epub.exists() and old_epub != dest_file:
+                    try:
+                        old_epub.unlink()
+                    except OSError:
+                        pass
 
         for page in doc.pages:
             image = page.image_path
@@ -603,6 +611,22 @@ class ObsidianDestination(FileSystemDestination):
                 filename = f"{stem}_{page_filename}"
             shutil.copy2(image, self.contained(attach_dir, filename))
             layout.attachment_links[page.index] = f"{link_prefix}{filename}"
+
+        if self.attachment_policy is AttachmentPolicy.OWNED and attach_dir.is_dir():
+            active_names = {Path(target).name for target in layout.attachment_links.values()}
+            if layout.doc_link_target:
+                active_names.add(Path(layout.doc_link_target).name)
+            for existing in attach_dir.iterdir():
+                if (
+                    existing.is_file()
+                    and existing.name not in active_names
+                    and existing.name.startswith("page-")
+                    and existing.suffix.lower() == ".png"
+                ):
+                    try:
+                        existing.unlink()
+                    except OSError:
+                        pass
 
     def render_body(self, doc: Document, ctx: PublishContext, layout: NoteLayout) -> None:
         """Stage 5 — assemble the note's content, one managed block per page.
@@ -675,7 +699,11 @@ class ObsidianDestination(FileSystemDestination):
         )
 
         source = doc.source_file
-        doc_type = source.suffix.lstrip(".").lower() if source and source.exists() else None
+        doc_type = (
+            doc.source
+            if doc.source in ("pdf", "epub")
+            else (source.suffix.lstrip(".").lower() if source and source.exists() else None)
+        )
 
         # The one owned key that is merged rather than replaced. A `#todo` a
         # user adds to a synced note is the single frontmatter edit they are
