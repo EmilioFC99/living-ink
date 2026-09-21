@@ -874,7 +874,7 @@ def generate_config_yaml(
     obsidian_vault_path: str = "",
     obsidian_root_folder: str = "Living Ink",
     obsidian_mirror_folders: bool = True,
-    max_notebooks_per_run: int = 5,
+    max_notebooks_per_run: int = 0,
     watch_schedule: str = "",
     watch_timezone: str = "",
 ) -> str:
@@ -899,7 +899,12 @@ def generate_config_yaml(
         obsidian_vault_path: Absolute path to Obsidian vault.
         obsidian_root_folder: Root folder inside the vault.
         obsidian_mirror_folders: Whether to mirror reMarkable folder hierarchy.
-        max_notebooks_per_run: Maximum notebooks to process per sync run.
+        max_notebooks_per_run: Most documents to process per sync run, ``0``
+            for no cap. A first run's job is to get the whole tablet into the
+            vault; a cap makes that take as many runs as the user has
+            notebooks, and one they have to discover a setting to lift. The
+            schema's own default stays low, because that one protects a
+            *scripted* run from an accidentally enormous one.
         watch_schedule: A cron expression, or "" for no automatic syncing.
         watch_timezone: The zone that expression is read in, written only
             alongside a schedule — a timezone with nothing to schedule is a

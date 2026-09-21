@@ -543,6 +543,17 @@ class TestWhatTheWizardWrites:
         problems = validate_config(read_config_file(saved_config(tmp_path)))
         assert [p for p in problems if p.level == ERROR] == []
 
+    def test_the_first_run_is_not_capped(self, monkeypatch, tmp_path, vault, probes):
+        """A wizard-written config syncs the whole tablet, not five of it.
+
+        The cap used to be 5, which made the first sync of a real tablet take
+        as many runs as the user had notebooks — and the setting that lifted
+        it was one they had to go and find.
+        """
+        run_wizard(monkeypatch, tmp_path, CLOUD_ONLY, vault)
+        cfg = yaml.safe_load(saved_config(tmp_path).read_text(encoding="utf-8"))
+        assert cfg["sync"]["limit"] == 0
+
 
 class TestTabCompletion:
     """The script is installed without asking; the rc line is asked about.
