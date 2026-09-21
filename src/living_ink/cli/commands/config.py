@@ -401,8 +401,14 @@ class ConfigMenu:
         return REMOVED_VALUE if not typed else coerce(setting, typed)
 
     def _edit_ai_provider(self, setting: Setting, current: Any) -> Any:
-        """Pick an AI provider from presets and registered providers, or enter a custom one."""
-        from living_ink.providers import PROVIDER_PRESETS, PROVIDER_REGISTRY
+        """Pick an AI provider and guide through setting its model and API key."""
+        from living_ink.config import credentials
+        from living_ink.config.credentials import ai_key_name
+        from living_ink.providers import (
+            PROVIDER_PRESETS,
+            PROVIDER_REGISTRY,
+            fetch_ollama_models,
+        )
 
         provider_labels = {
             "gemini": "Google Gemini",
@@ -429,13 +435,105 @@ class ConfigMenu:
         picked = ui.select("Which AI provider?", rows, default=str(current or "gemini"))
         if picked is None:
             return None
+        if picked == RESET:
+            return REMOVED_VALUE
         if picked == custom_tag:
             typed = ui.text("Provider name", default=str(current or "custom"))
             if typed is None:
                 return None
             typed = typed.strip()
-            return REMOVED_VALUE if not typed else typed
-        return _reset_or(picked)
+            if not typed:
+                return REMOVED_VALUE
+            new_provider = typed
+        else:
+            new_provider = picked
+
+        if new_provider.strip().lower() == str(current or "").strip().lower():
+            return new_provider
+
+        self.edits["ai_provider"] = new_provider
+
+        # 1. Custom provider needs base URL
+        if new_provider == "custom":
+            pending_base = (
+                self.edits.get("ai_base_url")
+                or self.pending_config().get("ai", {}).get("base_url")
+                or self.raw.get("ai", {}).get("base_url")
+            )
+            base_url = ui.text(
+                "API base URL (OpenAI-compatible)",
+                default=str(pending_base or "http://localhost:8000/v1"),
+            )
+            if base_url is not None and base_url.strip():
+                self.edits["ai_base_url"] = base_url.strip()
+
+        # 2. Model selection
+        if new_provider == "none":
+            self.edits["ai_model"] = ""
+            console(ui.green("  No AI cleanup pass will be run."))
+        elif new_provider == "ollama":
+            base_url = (
+                self.edits.get("ai_base_url")
+                or self.pending_config().get("ai", {}).get("base_url")
+                or self.raw.get("ai", {}).get("base_url")
+            )
+            installed = fetch_ollama_models(base_url)
+            preset = PROVIDER_PRESETS.get("ollama", {})
+            default_model = str(preset.get("default_model", "llama3.2"))
+            if installed:
+                custom_tag_model = "__custom__"
+                choices = [ui.Choice(name, name) for name in installed]
+                choices.append(ui.Choice(custom_tag_model, "Other (enter model name manually)"))
+                default_choice = default_model if default_model in installed else installed[0]
+                picked_model = ui.select("Which Ollama model?", choices, default=default_choice)
+                if picked_model == custom_tag_model:
+                    typed_model = ui.text("Model", default=default_model)
+                    if typed_model is not None and typed_model.strip():
+                        self.edits["ai_model"] = typed_model.strip()
+                elif picked_model is not None:
+                    self.edits["ai_model"] = str(picked_model).strip()
+            else:
+                prompt = f"Model ({default_model} recommended)"
+                typed_model = ui.text(prompt, default=default_model)
+                if typed_model is not None and typed_model.strip():
+                    self.edits["ai_model"] = typed_model.strip()
+        else:
+            preset = PROVIDER_PRESETS.get(new_provider, {})
+            default_model = str(preset.get("default_model", ""))
+            prompt = f"Model ({default_model} recommended)" if default_model else "Model"
+            typed_model = ui.text(prompt, default=default_model)
+            if typed_model is not None and typed_model.strip():
+                self.edits["ai_model"] = typed_model.strip()
+
+        # 3. API key
+        if new_provider in ("ollama", "none"):
+            console(ui.green("  No API key needed."))
+            self.edits.pop("ai_api_key", None)
+        else:
+            try:
+                secret_name = ai_key_name(new_provider)
+            except ValueError:
+                secret_name = None
+
+            if secret_name:
+                existing_key = credentials.read_secret(secret_name, config_path=self.config_file)
+                if existing_key:
+                    console(
+                        ui.green(f"  ✓ Existing API key found ({credentials.mask(existing_key)}).")
+                    )
+                    keep = ui.confirm("Keep this API key?", default=True)
+                    if not keep:
+                        typed_key = ui.password(f"{new_provider.capitalize()} API key")
+                        if typed_key is not None and typed_key.strip():
+                            self.edits["ai_api_key"] = typed_key.strip()
+                    else:
+                        self.edits.pop("ai_api_key", None)
+                else:
+                    typed_key = ui.password(f"{new_provider.capitalize()} API key")
+                    if typed_key is not None and typed_key.strip():
+                        self.edits["ai_api_key"] = typed_key.strip()
+
+        return new_provider
 
     def _edit_ai_model(self, setting: Setting, current: Any) -> Any:
         """Edit the AI model, offering installed Ollama models if provider is Ollama."""

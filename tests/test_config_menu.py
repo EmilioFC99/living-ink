@@ -344,18 +344,22 @@ class TestNothingIsWrittenUntilSave:
 
     def test_editing_ai_provider_shows_selection_list(self, config_file, monkeypatch):
         write(config_file, {"ai": {"provider": "gemini"}})
+        monkeypatch.setattr(
+            "living_ink.providers.fetch_ollama_models", lambda _url=None: ["qwen2.5vl:3b"]
+        )
         menu = drive(
             [
                 ("what would you like to change", "ai"),
                 ("ai —", "ai_provider"),
                 ("which ai provider", "ollama"),
+                ("which ollama model", "qwen2.5vl:3b"),
                 ("ai —", BACK),
                 ("what would you like to change", DISCARD),
                 ("throw away", True),
             ],
             monkeypatch,
         )
-        assert menu.edits == {"ai_provider": "ollama"}
+        assert menu.edits == {"ai_provider": "ollama", "ai_model": "qwen2.5vl:3b"}
 
     def test_declining_the_save_confirmation_writes_nothing(self, config_file, monkeypatch):
         write(config_file, {"ai": {"model": "old-model"}})
@@ -895,10 +899,83 @@ class TestSecrets:
             provider_steps=(
                 ("ai —", "ai_provider"),
                 ("which ai provider", "openai"),
+                ("model", "gpt-4o-mini"),
+                ("openai api key", "sk-temp"),
             ),
         )
         assert credentials.read_secret("ai.api_key.openai", config_path=config_file) == "sk-openai"
         assert credentials.read_secret("ai.api_key.gemini", config_path=config_file) is None
+
+    def test_changing_ai_provider_guides_through_model_and_key(self, config_file, monkeypatch):
+        """Changing ai_provider prompts for model and API key and saves all three."""
+        write(config_file, {"ai": {"provider": "gemini"}})
+        drive(
+            [
+                ("what would you like to change", "ai"),
+                ("ai —", "ai_provider"),
+                ("which ai provider", "openai"),
+                ("model", "gpt-4o-mini"),
+                ("openai api key", "sk-guided-key"),
+                ("ai —", BACK),
+                ("what would you like to change", SAVE),
+                ("save?", True),
+            ],
+            monkeypatch,
+        )
+        assert saved(config_file)["ai"]["provider"] == "openai"
+        assert saved(config_file)["ai"]["model"] == "gpt-4o-mini"
+        assert (
+            credentials.read_secret("ai.api_key.openai", config_path=config_file) == "sk-guided-key"
+        )
+
+    def test_changing_ai_provider_to_ollama_prompts_for_installed_model(
+        self, config_file, monkeypatch
+    ):
+        """Changing ai_provider to ollama lists installed models and needs no key."""
+        write(config_file, {"ai": {"provider": "gemini"}})
+        monkeypatch.setattr(
+            "living_ink.providers.fetch_ollama_models",
+            lambda _url=None: ["llama3.2-vision:11b", "qwen2.5vl:3b"],
+        )
+        drive(
+            [
+                ("what would you like to change", "ai"),
+                ("ai —", "ai_provider"),
+                ("which ai provider", "ollama"),
+                ("which ollama model", "llama3.2-vision:11b"),
+                ("ai —", BACK),
+                ("what would you like to change", SAVE),
+                ("save?", True),
+            ],
+            monkeypatch,
+        )
+        assert saved(config_file)["ai"]["provider"] == "ollama"
+        assert saved(config_file)["ai"]["model"] == "llama3.2-vision:11b"
+
+    def test_changing_ai_provider_with_existing_key_offers_to_keep_it(
+        self, config_file, monkeypatch
+    ):
+        """Changing ai_provider to a provider with an existing key offers to keep it."""
+        write(config_file, {"ai": {"provider": "gemini"}})
+        credentials.write_secret("ai.api_key.openai", "sk-existing", config_path=config_file)
+        drive(
+            [
+                ("what would you like to change", "ai"),
+                ("ai —", "ai_provider"),
+                ("which ai provider", "openai"),
+                ("model", "gpt-4o-mini"),
+                ("keep this api key", True),
+                ("ai —", BACK),
+                ("what would you like to change", SAVE),
+                ("save?", True),
+            ],
+            monkeypatch,
+        )
+        assert saved(config_file)["ai"]["provider"] == "openai"
+        assert saved(config_file)["ai"]["model"] == "gpt-4o-mini"
+        assert (
+            credentials.read_secret("ai.api_key.openai", config_path=config_file) == "sk-existing"
+        )
 
     def test_a_key_with_no_provider_is_refused_rather_than_misfiled(
         self, config_file, monkeypatch, capsys
