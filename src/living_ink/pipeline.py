@@ -1584,10 +1584,9 @@ class SyncPipeline:
                 refs = list(renderer.pages(bundle, ctx))
                 job.extracted_doc_text = renderer.text_layer(bundle, ctx) or ""
 
-                # Not `not refs`: an unannotated PDF and an EPUB with no
-                # annotations both render zero pages and publish their text
-                # layer instead. Only a document with neither has nothing to
-                # say.
+                # A document that yields neither pages nor text has nothing to
+                # render; _nothing_to_render decides whether that is a skip or
+                # a failure based on source.empty_is_skip.
                 if not refs and not job.extracted_doc_text:
                     self._nothing_to_render(job, source)
 
@@ -1623,9 +1622,8 @@ class SyncPipeline:
         """Stop processing a document that produced neither pages nor text.
 
         Whether that is a skip or a failure is the source's declaration, not a
-        guess made here: an empty notebook is a user who has not written
-        anything yet, while a PDF that yielded nothing was supposed to have
-        content and did not.
+        guess made here: an empty notebook or unannotated PDF/EPUB is treated as
+        a skip when empty_is_skip is True.
 
         Raises:
             _StopProcessing: Always.

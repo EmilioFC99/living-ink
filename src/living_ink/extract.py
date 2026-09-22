@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import pymupdf as fitz  # PyMuPDF
 from PIL import Image
@@ -156,6 +156,39 @@ class RmPageStats:
         return bool(self.strokes or self.unreadable)
 
 
+def inspect_rm_bytes(rm_bytes: bytes) -> Optional[RmPageStats]:
+    """Count what raw ``.rm`` bytes hold, without rendering them.
+
+    Args:
+        rm_bytes: Raw bytes of a ``.rm`` file.
+
+    Returns:
+        The page's block counts, or None if the bytes could not be inspected.
+    """
+    if not rm_bytes or not rm_bytes.startswith(b"reMarkable .lines file, version="):
+        return None
+
+    try:
+        from rmscene import read_blocks
+        from rmscene.scene_stream import SceneLineItemBlock, UnreadableBlock
+    except ImportError:
+        return None
+
+    strokes = 0
+    unreadable = 0
+    try:
+        for block in read_blocks(io.BytesIO(rm_bytes)):
+            if isinstance(block, UnreadableBlock):
+                unreadable += 1
+            elif isinstance(block, SceneLineItemBlock) and block.item.value is not None:
+                strokes += 1
+    except Exception:
+        logger.debug("Could not inspect .rm bytes", exc_info=True)
+        return None
+
+    return RmPageStats(strokes=strokes, unreadable=unreadable)
+
+
 def inspect_rm_page(rm_file_path: Path) -> Optional[RmPageStats]:
     """Count what a ``.rm`` file holds, without rendering it.
 
@@ -171,28 +204,12 @@ def inspect_rm_page(rm_file_path: Path) -> Optional[RmPageStats]:
         in which case the caller must not conclude anything from it.
     """
     try:
-        from rmscene import read_blocks
-        from rmscene.scene_stream import SceneLineItemBlock, UnreadableBlock
-    except ImportError:
+        data = rm_file_path.read_bytes()
+    except OSError:
+        logger.debug("Could not read %s to inspect", rm_file_path, exc_info=True)
         return None
 
-    strokes = 0
-    unreadable = 0
-    try:
-        with open(rm_file_path, "rb") as f:
-            for block in read_blocks(f):
-                if isinstance(block, UnreadableBlock):
-                    unreadable += 1
-                elif isinstance(block, SceneLineItemBlock) and block.item.value is not None:
-                    strokes += 1
-    except Exception:
-        # Deliberately broad, and for the same reason the render path is: this
-        # walks a binary format written by firmware nobody here controls. A
-        # count we could not take is "unknown", never "zero".
-        logger.debug("Could not inspect %s", rm_file_path, exc_info=True)
-        return None
-
-    return RmPageStats(strokes=strokes, unreadable=unreadable)
+    return inspect_rm_bytes(data)
 
 
 def _svg_has_ink(svg_path: Path) -> bool:
@@ -213,6 +230,44 @@ def _svg_has_ink(svg_path: Path) -> bool:
         return True
 
     return any(element in markup for element in _SVG_INK_ELEMENTS)
+
+
+def is_image_blank(
+    image: Union[Path, str, Image.Image],
+    tolerance: int = 3,
+) -> bool:
+    """Report whether an image is completely blank (uniform colour or fully transparent).
+
+    Args:
+        image: Path to an image file or an open PIL Image.
+        tolerance: Maximum difference between min and max brightness in grayscale.
+            Defaults to 3, allowing for minor compression or antialiasing noise.
+
+    Returns:
+        True if the image contains no visible strokes, drawings or text.
+    """
+    if isinstance(image, (str, Path)):
+        try:
+            im = Image.open(image)
+        except Exception:
+            logger.debug("Could not open image to check blankness: %s", image, exc_info=True)
+            return False
+    else:
+        im = image
+
+    if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+        im_rgba = im.convert("RGBA")
+        alpha = im_rgba.getchannel("A")
+        _, max_a = alpha.getextrema()
+        if max_a == 0:
+            return True
+        bg = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
+        bg.paste(im_rgba, (0, 0), im_rgba)
+        im = bg.convert("RGB")
+
+    gray = im.convert("L")
+    min_val, max_val = gray.getextrema()
+    return (max_val - min_val) <= tolerance
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
@@ -545,12 +600,16 @@ def render_composite_pdf_page(
         finally:
             tmp_rm.unlink(missing_ok=True)
 
-        if rm_overlay is not None:
-            if (rm_overlay.width, rm_overlay.height) != (pdf_img.width, pdf_img.height):
-                rm_overlay = rm_overlay.resize(
-                    (pdf_img.width, pdf_img.height), Image.Resampling.LANCZOS
-                )
-            pdf_img.paste(rm_overlay, (0, 0), rm_overlay)
+        if rm_overlay is None or is_image_blank(rm_overlay):
+            # No visible annotations on this PDF page. Return None so bare PDF
+            # pages are not sent to AI vision OCR.
+            return None
+
+        if (rm_overlay.width, rm_overlay.height) != (pdf_img.width, pdf_img.height):
+            rm_overlay = rm_overlay.resize(
+                (pdf_img.width, pdf_img.height), Image.Resampling.LANCZOS
+            )
+        pdf_img.paste(rm_overlay, (0, 0), rm_overlay)
 
         out_buf = io.BytesIO()
         pdf_img.save(out_buf, format="PNG")

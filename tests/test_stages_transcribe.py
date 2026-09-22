@@ -300,3 +300,16 @@ class TestTranscriptionCaching:
             transcriber.transcribe(paths)
 
         assert peak <= 2
+
+    def test_a_blank_image_skips_ocr_and_returns_empty(self, tmp_path):
+        """An empty or blank page is not sent to AI vision OCR."""
+        from PIL import Image
+
+        blank = tmp_path / "blank.png"
+        Image.new("RGB", (100, 100), (255, 255, 255)).save(blank)
+
+        transcriber = make_transcriber(tmp_path)
+        with patch.object(transcriber, "_read") as ocr:
+            assert transcriber.transcribe_one(blank) == ("", None)
+
+        assert ocr.call_count == 0

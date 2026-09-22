@@ -305,21 +305,17 @@ class TestPdfRenderer:
         assert PDF.renderer.prepare(bundle, ctx()) is False
 
     def test_an_unannotated_pdf_renders_zero_pages(self, tmp_path, sample_pdf):
-        """It used to render its cover, which is not content the user wrote.
-
-        One OCR call per document, spent transcribing somebody else's title
-        page. What an unannotated PDF has worth publishing is its text layer.
-        """
         bundle = self._bundle(tmp_path, sample_pdf, {})
         assert list(PDF.renderer.pages(bundle, ctx())) == []
 
-    def test_an_unannotated_pdf_still_has_its_text(self, tmp_path, sample_pdf):
+    def test_an_unannotated_pdf_has_no_text_layer(self, tmp_path, sample_pdf):
+        """PDFs only sync annotated pages and carry no text layer."""
         bundle = self._bundle(tmp_path, sample_pdf, {})
-        assert "Chapter 1" in PDF.renderer.text_layer(bundle, ctx())
+        assert PDF.renderer.text_layer(bundle, ctx()) is None
 
-    def test_a_pdf_with_neither_is_a_failure_not_a_skip(self):
-        """It was supposed to have content and did not."""
-        assert PDF.empty_is_skip is False
+    def test_an_unannotated_pdf_is_a_skip(self):
+        """An unannotated PDF has 0 pages and is skipped."""
+        assert PDF.empty_is_skip is True
 
     def test_page_numbers_are_sparse(self, tmp_path, sample_pdf):
         """Annotating page 3 of a 3-page PDF yields page 3, not page 1."""
@@ -406,10 +402,10 @@ class TestEpubRenderer:
         )
         assert EPUB.renderer.prepare(bundle, ctx()) is False
 
-    def test_an_epub_with_neither_is_a_failure_not_a_skip(self):
-        assert EPUB.empty_is_skip is False
+    def test_an_unannotated_epub_is_a_skip(self):
+        assert EPUB.empty_is_skip is True
 
-    def test_a_missing_book_has_no_text_rather_than_an_empty_one(self, tmp_path):
+    def test_an_epub_has_no_text_layer(self, tmp_path):
         bundle = SourceBundle(doc_id="d1", title="Book", source_path=tmp_path / "gone.epub")
         assert EPUB.renderer.text_layer(bundle, ctx()) is None
 

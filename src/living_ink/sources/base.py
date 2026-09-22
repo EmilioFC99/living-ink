@@ -237,10 +237,9 @@ class SourceType:
             nothing else matches. It used to be ``"notebook"``, hardcoded in
             four places.
         empty_is_skip: Whether "nothing to render" is a skip or a failure. An
-            empty notebook is a skip: there is nothing wrong, the user has not
-            written anything. A PDF that yielded neither pages nor text is a
-            failure: it was supposed to have content. The disagreement used to
-            be two unrelated early returns; here it is a declaration.
+            empty document (notebook, PDF, or EPUB with 0 annotated pages) is
+            a skip: there is nothing wrong, the user has not written or
+            highlighted anything.
         renderer: The :class:`Renderer` for this type.
         label: Display name for menus and the report.
     """

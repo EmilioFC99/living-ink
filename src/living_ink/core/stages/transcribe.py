@@ -86,6 +86,12 @@ class Transcriber:
             error here costs one page, never the document: the caller marks a
             gap and publishes the rest.
         """
+        from living_ink.extract import is_image_blank
+
+        if is_image_blank(path):
+            logger.debug("  Page %s is blank; skipping AI vision call.", path.name)
+            return "", None
+
         key = self.cache_key(path)
         if key:
             cached = self.cache.get(key)

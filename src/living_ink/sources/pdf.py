@@ -18,16 +18,12 @@ from living_ink.sources.base import (
 class PdfRenderer:
     """Renders the pages of a PDF that were written on, and nothing else.
 
-    **An unannotated PDF renders zero pages.** It used to render its first page
-    as a "cover preview", which is not content the user wrote, costs one OCR
-    call per document, and produced a note whose whole body was a transcription
-    of somebody else's title page. What an unannotated PDF has that is worth
-    publishing is its text layer, and :meth:`text_layer` is where that lives —
-    so a document with no pages and a text layer is a complete, valid result,
-    not an empty one.
+    **An unannotated PDF renders zero pages and is skipped.** A PDF only syncs
+    pages that carry handwritten notes, highlights, or annotations, and has
+    no separate text layer to publish.
     """
 
-    version = 2
+    version = 3
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Put the underlying PDF on disk.
@@ -46,7 +42,7 @@ class PdfRenderer:
         200 and 377. The annotation bytes are read here, both to key the page
         on its content and so :meth:`render` does not reopen the zip per page.
         """
-        from living_ink.extract import get_pdf_annotated_page_map
+        from living_ink.extract import get_pdf_annotated_page_map, inspect_rm_bytes
 
         annotated = get_pdf_annotated_page_map(bundle.zip_path)
         if not annotated:
@@ -58,6 +54,9 @@ class PdfRenderer:
             for ordinal, info in enumerate(annotated):
                 rm_name = info["rm_file_name"]
                 rm_bytes = zf.read(rm_name) if rm_name in names else b""
+                stats = inspect_rm_bytes(rm_bytes)
+                if stats is not None and not stats.has_content:
+                    continue
                 # Both halves matter: the same strokes over a different page of
                 # the PDF is a different image, and the composite is what is
                 # cached.
@@ -93,13 +92,8 @@ class PdfRenderer:
         )
 
     def text_layer(self, bundle: SourceBundle, ctx: RenderContext) -> Optional[str]:
-        """Return the PDF's embedded text, or None when it has none."""
-        from living_ink.extract import extract_text_from_pdf
-
-        source = bundle.source_file()
-        if source is None:
-            return None
-        return extract_text_from_pdf(source) or None
+        """Return None: only annotated pages are synced from PDFs."""
+        return None
 
     def describe_pages(
         self, bundle: SourceBundle, pages: Sequence[PageRef]
@@ -127,6 +121,6 @@ PDF = register_source(
         source_suffix="pdf",
         renderer=PdfRenderer(),
         label="PDF",
-        empty_is_skip=False,
+        empty_is_skip=True,
     )
 )

@@ -25,7 +25,7 @@ class EpubRenderer:
     back to rendering ink on a plain canvas.
     """
 
-    version = 2
+    version = 3
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Put the book or its device-rendered PDF on disk.
@@ -70,7 +70,11 @@ class EpubRenderer:
         import hashlib
         import zipfile
 
-        from living_ink.extract import get_page_source_hashes, get_pdf_annotated_page_map
+        from living_ink.extract import (
+            get_page_source_hashes,
+            get_pdf_annotated_page_map,
+            inspect_rm_bytes,
+        )
 
         pdf_path = self._pdf_path(bundle)
         if pdf_path and bundle.zip_path and bundle.zip_path.exists():
@@ -82,6 +86,9 @@ class EpubRenderer:
                     for ordinal, info in enumerate(annotated):
                         rm_name = info["rm_file_name"]
                         rm_bytes = zf.read(rm_name) if rm_name in names else b""
+                        stats = inspect_rm_bytes(rm_bytes)
+                        if stats is not None and not stats.has_content:
+                            continue
                         digest = hashlib.sha256()
                         digest.update(str(info["pdf_page_index"]).encode("utf-8"))
                         digest.update(b"\0")
@@ -125,17 +132,8 @@ class EpubRenderer:
         )
 
     def text_layer(self, bundle: SourceBundle, ctx: RenderContext) -> Optional[str]:
-        """Return the book's text, or None when the book could not be read."""
-        from living_ink.extract import extract_text_from_epub, extract_text_from_pdf
-
-        pdf_path = self._pdf_path(bundle)
-        if pdf_path:
-            return extract_text_from_pdf(pdf_path) or None
-
-        book = bundle.source_file()
-        if book is None:
-            return None
-        return extract_text_from_epub(book) or None
+        """Return None: only annotated pages are synced from EPUBs."""
+        return None
 
     def describe_pages(
         self, bundle: SourceBundle, pages: Sequence[PageRef]
@@ -169,6 +167,6 @@ EPUB = register_source(
         source_suffix="epub",
         renderer=EpubRenderer(),
         label="EPUB",
-        empty_is_skip=False,
+        empty_is_skip=True,
     )
 )

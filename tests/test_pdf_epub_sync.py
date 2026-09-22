@@ -493,3 +493,91 @@ class TestEpubObsidianPublishing:
 
         # Old EPUB attachment deleted
         assert not old_epub.exists()
+
+
+class TestUnannotatedDocumentsSkipped:
+    """Unannotated PDFs and EPUBs have zero pages, no text layer, and are skipped."""
+
+    def test_unannotated_pdf_has_no_pages_and_no_text(self, tmp_path):
+        from living_ink.sources.base import RenderContext, SourceBundle
+        from living_ink.sources.pdf import PDF
+        from living_ink.transport import DeviceInfo
+
+        pdf_path = tmp_path / "sample.pdf"
+        doc = fitz.open()
+        p = doc.new_page(width=300, height=400)
+        p.insert_text((50, 50), "PDF Article Content", fontsize=14)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        zip_file = tmp_path / "doc.zip"
+        with zipfile.ZipFile(zip_file, "w") as zf:
+            zf.writestr("doc.content", json.dumps({"cPages": {"pages": [{"id": "p-1"}]}}))
+            zf.writestr("doc.pdf", pdf_path.read_bytes())
+
+        bundle = SourceBundle(
+            doc_id="doc",
+            title="Article",
+            zip_path=zip_file,
+            source_path=tmp_path / "source.pdf",
+        )
+        ctx = RenderContext(
+            device=DeviceInfo(
+                model="reMarkable 2", firmware="3.0", screen=(1404, 1872), color=False
+            )
+        )
+
+        assert PDF.renderer.prepare(bundle, ctx) is True
+        assert list(PDF.renderer.pages(bundle, ctx)) == []
+        assert PDF.renderer.text_layer(bundle, ctx) is None
+        assert PDF.empty_is_skip is True
+
+    def test_unannotated_epub_has_no_text_layer(self, tmp_path):
+        from living_ink.sources.base import RenderContext, SourceBundle
+        from living_ink.sources.epub import EPUB
+        from living_ink.transport import DeviceInfo
+
+        bundle = SourceBundle(
+            doc_id="doc",
+            title="Book",
+            source_path=tmp_path / "source.epub",
+        )
+        ctx = RenderContext(
+            device=DeviceInfo(
+                model="reMarkable 2", firmware="3.0", screen=(1404, 1872), color=False
+            )
+        )
+        assert EPUB.renderer.text_layer(bundle, ctx) is None
+        assert EPUB.empty_is_skip is True
+
+    def test_blank_rm_overlay_returns_none_in_composite_pdf_page(self, tmp_path):
+        from living_ink.extract import render_composite_pdf_page
+
+        pdf_path = tmp_path / "sample.pdf"
+        doc = fitz.open()
+        p = doc.new_page(width=300, height=400)
+        p.insert_text((50, 50), "PDF Text", fontsize=14)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        # Passing rm_bytes with no strokes returns None instead of bare PDF
+        with patch("living_ink.extract.render_rm_for_pdf_page", return_value=None):
+            result = render_composite_pdf_page(pdf_path, 0, rm_bytes=b"fake rm bytes")
+            assert result is None
+
+    def test_is_image_blank_utility(self, tmp_path):
+        from living_ink.extract import is_image_blank
+
+        white = tmp_path / "white.png"
+        Image.new("RGB", (50, 50), (255, 255, 255)).save(white)
+        assert is_image_blank(white) is True
+
+        transparent = tmp_path / "transparent.png"
+        Image.new("RGBA", (50, 50), (0, 0, 0, 0)).save(transparent)
+        assert is_image_blank(transparent) is True
+
+        with_ink = tmp_path / "ink.png"
+        im = Image.new("RGB", (50, 50), (255, 255, 255))
+        im.putpixel((25, 25), (0, 0, 0))
+        im.save(with_ink)
+        assert is_image_blank(with_ink) is False
