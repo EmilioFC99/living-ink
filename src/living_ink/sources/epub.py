@@ -25,7 +25,7 @@ class EpubRenderer:
     back to rendering ink on a plain canvas.
     """
 
-    version = 3
+    version = 4
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Put the book or its device-rendered PDF on disk.

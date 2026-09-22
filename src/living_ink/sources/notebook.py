@@ -24,7 +24,7 @@ class NotebookRenderer:
     #: ``RENDER_FORMAT_VERSION`` it replaces had reached 4, but it also covered
     #: the PDF and EPUB paths, so carrying its number forward here would claim
     #: a history this renderer does not have.
-    version = 3
+    version = 4
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Report whether the notebook has any pages at all.
