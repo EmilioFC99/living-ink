@@ -305,7 +305,7 @@ def test_main_version_flag(capsys):
         except SystemExit:
             pass
     captured = capsys.readouterr()
-    assert "living-ink 1.0.2" in captured.out
+    assert "living-ink 1.0.3" in captured.out
 
 
 # ---------------------------------------------------------------------------

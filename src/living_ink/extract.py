@@ -87,7 +87,7 @@ _RM_HEADER_LENGTH = 43
 SUPPORTED_RM_VERSIONS = frozenset({6})
 
 #: SVG elements rmc emits for ink. An SVG carrying none of them drew nothing.
-_SVG_INK_ELEMENTS = ("<path", "<polyline", "<line", "<text", "<image")
+_SVG_INK_ELEMENTS = ("<path", "<polyline", "<line", "<text", "<image", "<rect")
 
 
 class RenderError(RuntimeError):
@@ -171,6 +171,13 @@ def inspect_rm_bytes(rm_bytes: bytes) -> Optional[RmPageStats]:
     try:
         from rmscene import read_blocks
         from rmscene.scene_stream import SceneLineItemBlock, UnreadableBlock
+
+        try:
+            from rmscene.scene_stream import SceneGlyphItemBlock
+
+            content_blocks = (SceneLineItemBlock, SceneGlyphItemBlock)
+        except ImportError:
+            content_blocks = (SceneLineItemBlock,)
     except ImportError:
         return None
 
@@ -180,7 +187,7 @@ def inspect_rm_bytes(rm_bytes: bytes) -> Optional[RmPageStats]:
         for block in read_blocks(io.BytesIO(rm_bytes)):
             if isinstance(block, UnreadableBlock):
                 unreadable += 1
-            elif isinstance(block, SceneLineItemBlock) and block.item.value is not None:
+            elif isinstance(block, content_blocks) and block.item.value is not None:
                 strokes += 1
     except Exception:
         logger.debug("Could not inspect .rm bytes", exc_info=True)
@@ -914,8 +921,73 @@ def _patch_rmc() -> None:
                         )
             output.write("\t\t</g>\n")
 
+        def safe_draw_glyph_range(glyph: Any, output: Any) -> None:
+            color_val = glyph.color.value if hasattr(glyph.color, "value") else glyph.color
+            rgb = wt.RM_PALETTE.get(color_val, (251, 247, 25))
+            color_str = f"rgb({rgb[0]}, {rgb[1]}, {rgb[2]})"
+            for r in getattr(glyph, "rectangles", []):
+                output.write(
+                    f'\t\t\t<rect x="{rmc_svg.xx(r.x):.3f}" y="{rmc_svg.yy(r.y):.3f}" '
+                    f'width="{rmc_svg.scale(r.w):.3f}" height="{rmc_svg.scale(r.h):.3f}" '
+                    f'fill="{color_str}" opacity="0.3" />\n'
+                )
+
+        def safe_draw_group(item: si.Group, output: Any, anchor_pos: Any) -> None:
+            anchor_x, anchor_y = rmc_svg.get_anchor(item, anchor_pos)
+            output.write(
+                f'\t\t<g id="{item.node_id}" transform="translate({rmc_svg.xx(anchor_x)}, {rmc_svg.yy(anchor_y)})">\n'
+            )
+            for child_id in item.children:
+                child = item.children[child_id]
+                if isinstance(child, si.Group):
+                    safe_draw_group(child, output, anchor_pos)
+                elif isinstance(child, si.Line):
+                    rmc_svg.draw_stroke(child, output)
+                elif hasattr(si, "GlyphRange") and isinstance(child, si.GlyphRange):
+                    safe_draw_glyph_range(child, output)
+            output.write("\t\t</g>\n")
+
+        def safe_get_bounding_box(
+            item: si.Group,
+            anchor_pos: Any,
+            default: Tuple[int, int, int, int] = (
+                -rmc_svg.SCREEN_WIDTH // 2,
+                rmc_svg.SCREEN_WIDTH // 2,
+                0,
+                rmc_svg.SCREEN_HEIGHT,
+            ),
+        ) -> Tuple[int, int, int, int]:
+            x_min, x_max, y_min, y_max = default
+
+            for child_id in item.children:
+                child = item.children[child_id]
+                if isinstance(child, si.Group):
+                    anchor_x, anchor_y = rmc_svg.get_anchor(child, anchor_pos)
+                    x_min_t, x_max_t, y_min_t, y_max_t = safe_get_bounding_box(
+                        child, anchor_pos, (0, 0, 0, 0)
+                    )
+                    x_min = min(x_min, x_min_t + anchor_x)
+                    x_max = max(x_max, x_max_t + anchor_x)
+                    y_min = min(y_min, y_min_t + anchor_y)
+                    y_max = max(y_max, y_max_t + anchor_y)
+                elif isinstance(child, si.Line):
+                    x_min = min([x_min] + [p.x for p in child.points])
+                    x_max = max([x_max] + [p.x for p in child.points])
+                    y_min = min([y_min] + [p.y for p in child.points])
+                    y_max = max([y_max] + [p.y for p in child.points])
+                elif hasattr(si, "GlyphRange") and isinstance(child, si.GlyphRange):
+                    for r in getattr(child, "rectangles", []):
+                        x_min = min(x_min, r.x)
+                        x_max = max(x_max, r.x + r.w)
+                        y_min = min(y_min, r.y)
+                        y_max = max(y_max, r.y + r.h)
+
+            return x_min, x_max, y_min, y_max
+
         rmc_svg.build_anchor_pos = safe_build_anchor_pos
         rmc_svg.draw_text = safe_draw_text
+        rmc_svg.draw_group = safe_draw_group
+        rmc_svg.get_bounding_box = safe_get_bounding_box
     except (ImportError, AttributeError):
         # rmc or rmscene is absent, or an upgrade moved what this patches.
         logger.debug("Could not patch rmc", exc_info=True)

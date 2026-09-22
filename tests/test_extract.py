@@ -701,3 +701,87 @@ class TestOutputSize:
 
         assert not hasattr(extract, "REMARKABLE_WIDTH")
         assert not hasattr(extract, "REMARKABLE_HEIGHT")
+
+
+class TestGlyphRangeHighlights:
+    """PDF text-selection highlights are stored as GlyphRange items."""
+
+    def test_svg_ink_elements_recognizes_rect(self):
+        from living_ink.extract import _SVG_INK_ELEMENTS
+
+        assert "<rect" in _SVG_INK_ELEMENTS
+
+    def test_svg_has_ink_detects_rect_highlights(self, tmp_path):
+        from living_ink.extract import _svg_has_ink
+
+        svg = tmp_path / "highlight.svg"
+        svg.write_text('<svg><rect x="10" y="20" width="100" height="15" fill="yellow" /></svg>')
+        assert _svg_has_ink(svg)
+
+    def test_draw_group_renders_glyph_range_rectangles(self):
+        import io
+
+        import rmc.exporters.svg as rmc_svg
+        from rmscene.crdt_sequence import CrdtSequence
+        from rmscene.scene_items import CrdtId, GlyphRange, Group, LwwValue, PenColor, Rectangle
+
+        from living_ink import extract
+
+        extract._patch_rmc()
+
+        rect = Rectangle(x=10.0, y=20.0, w=100.0, h=15.0)
+        glyph = GlyphRange(
+            start=0,
+            length=10,
+            text="sample text",
+            color=PenColor.HIGHLIGHT if hasattr(PenColor, "HIGHLIGHT") else 9,
+            rectangles=[rect],
+        )
+        group = Group(
+            node_id=CrdtId(0, 1),
+            children=CrdtSequence(),
+            label=LwwValue(timestamp=CrdtId(0, 0), value=""),
+            visible=LwwValue(timestamp=CrdtId(0, 0), value=True),
+            anchor_id=None,
+            anchor_type=None,
+            anchor_threshold=None,
+            anchor_origin_x=None,
+        )
+        from rmscene.crdt_sequence import CrdtSequenceItem
+
+        group.children.add(
+            CrdtSequenceItem(
+                item_id=CrdtId(1, 1),
+                left_id=CrdtId(0, 0),
+                right_id=CrdtId(0, 0),
+                deleted_length=0,
+                value=glyph,
+            )
+        )
+
+        buf = io.StringIO()
+        rmc_svg.draw_group(group, buf, anchor_pos={})
+        output = buf.getvalue()
+
+        assert "<rect" in output
+        assert f'width="{rmc_svg.scale(100.0):.3f}"' in output
+        assert f'height="{rmc_svg.scale(15.0):.3f}"' in output
+        assert 'fill="rgb(251, 247, 25)"' in output
+        assert 'opacity="0.3"' in output
+
+    def test_inspect_rm_bytes_counts_glyph_blocks(self, monkeypatch):
+        from rmscene.crdt_sequence import CrdtSequenceItem
+        from rmscene.scene_items import CrdtId
+        from rmscene.scene_stream import SceneGlyphItemBlock
+
+        from living_ink.extract import inspect_rm_bytes
+
+        item = CrdtSequenceItem(CrdtId(1, 1), CrdtId(0, 0), CrdtId(0, 0), 0, "some glyph")
+        fake_blocks = [SceneGlyphItemBlock(CrdtId(0, 1), item)]
+        monkeypatch.setattr("rmscene.read_blocks", lambda _: iter(fake_blocks))
+
+        header = b"reMarkable .lines file, version=6       \x00\x00\x00\x00\x00\x00\x00\x00"
+        stats = inspect_rm_bytes(header)
+        assert stats is not None
+        assert stats.strokes == 1
+        assert stats.has_content
