@@ -123,7 +123,7 @@ living-ink sync             # 3. do it
   Either way `sync.types` is the setting, and `living-ink sync --pdf --epub`
   overrides it for one run.
 
-Trash, Templates and Quick sheets are always skipped.
+Trash, Templates, and Quick sheets are always skipped. Unannotated or empty documents (notebooks with no handwriting, or PDFs/EPUBs without any highlights or marks) are also skipped automatically without making AI calls.
 
 ## Commands
 
@@ -144,6 +144,10 @@ Downloads what changed, reads it, publishes it. A notebook re-syncs when you
 edited it on the tablet, when a setting that changes the output changed (a new
 model, an edited prompt, a different vault folder), or when a previous run left
 pages untranscribed. Everything else is skipped, and skipping is free.
+
+**Empty documents are not synced:** Notebooks with no handwriting, as well as PDFs and
+EPUBs without any highlights, boxes, or handwritten notes, have nothing to process
+and are automatically skipped without making AI calls.
 
 ```bash
 living-ink sync --preview                # what would happen; no download, no OCR, no cost
