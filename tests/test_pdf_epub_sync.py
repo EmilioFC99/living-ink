@@ -163,6 +163,80 @@ class TestPdfRendering:
         assert img.width > 0
         assert img.height > 0
 
+    def test_margin_ink_grows_the_canvas_past_the_page(self, sample_pdf):
+        """Ink written beside the printed page must survive, not be cropped."""
+        from living_ink.extract import InkOverlay
+
+        dpi = 72  # one pixel per point keeps the arithmetic readable
+        # Page is 300x400 pt. Canvas: 100 pt of extra room left, 50 pt below.
+        overlay = Image.new("RGBA", (400, 450), (0, 0, 0, 0))
+        overlay.putpixel((10, 10), (0, 0, 0, 255))
+        ink = InkOverlay(image=overlay, left=-250.0, top=0.0)
+
+        with patch("living_ink.extract.render_rm_for_pdf_page", return_value=ink):
+            png_bytes = render_composite_pdf_page(sample_pdf, 0, b"rm", dpi=dpi)
+
+        out = Image.open(io.BytesIO(png_bytes))
+        assert out.size == (400, 450)
+        assert out.getpixel((10, 10)) == (0, 0, 0)  # margin ink made it through
+        assert out.getpixel((5, 440)) == (255, 255, 255)  # empty margin stays white
+
+    def test_ink_inside_the_page_keeps_the_page_size(self, sample_pdf):
+        from living_ink.extract import InkOverlay
+
+        dpi = 72
+        overlay = Image.new("RGBA", (300, 400), (0, 0, 0, 0))
+        overlay.putpixel((50, 50), (0, 0, 0, 255))
+        ink = InkOverlay(image=overlay, left=-150.0, top=0.0)
+
+        with patch("living_ink.extract.render_rm_for_pdf_page", return_value=ink):
+            png_bytes = render_composite_pdf_page(sample_pdf, 0, b"rm", dpi=dpi)
+
+        assert Image.open(io.BytesIO(png_bytes)).size == (300, 400)
+
+
+class TestPdfInkCanvas:
+    """The canvas that holds a PDF page and the ink around it."""
+
+    def test_ink_inside_page_leaves_page_rect(self):
+        from living_ink.extract import _canvas_bounds
+
+        assert _canvas_bounds((-100, 50, 100, 300), 300, 400) == (-150, 0, 150, 400)
+
+    def test_no_ink_extent_leaves_page_rect(self):
+        from living_ink.extract import _canvas_bounds
+
+        assert _canvas_bounds(None, 300, 400) == (-150, 0, 150, 400)
+
+    def test_only_crossed_edges_move_and_get_padding(self):
+        from living_ink.extract import _PAGE_MARGIN_PAD, _canvas_bounds
+
+        x0, y0, x1, y1 = _canvas_bounds((-250, 10, 100, 450), 300, 400)
+        assert x0 == -250 - _PAGE_MARGIN_PAD
+        assert y0 == 0  # top untouched
+        assert x1 == 150  # right untouched
+        assert y1 == 450 + _PAGE_MARGIN_PAD
+
+    def test_stray_stroke_far_off_page_is_capped(self):
+        from living_ink.extract import _MAX_MARGIN_FACTOR, _canvas_bounds
+
+        x0, _, x1, _ = _canvas_bounds((-90000, 0, 90000, 100), 300, 400)
+        assert x0 == -150 - _MAX_MARGIN_FACTOR * 300
+        assert x1 == 150 + _MAX_MARGIN_FACTOR * 300
+
+    def test_svg_ink_extent_reads_viewbox(self):
+        from living_ink.extract import _svg_ink_extent
+
+        svg = '<svg xmlns="x" height="9" width="9" viewBox="-478.5 -82 914.5 877.5"><g/></svg>'
+        assert _svg_ink_extent(svg) == (-478.5, -82.0, 436.0, 795.5)
+
+    def test_svg_ink_extent_rejects_a_bad_viewbox(self):
+        from living_ink.extract import _svg_ink_extent
+
+        assert _svg_ink_extent('<svg viewBox="a b c d"></svg>') is None
+        assert _svg_ink_extent("<svg></svg>") is None
+        assert _svg_ink_extent('<svg viewBox="0 0 0 10"></svg>') is None
+
 
 class TestDestinationDocumentPublishing:
     """Test document publishing in Obsidian and Apple Notes destinations."""

@@ -23,7 +23,7 @@ class PdfRenderer:
     no separate text layer to publish.
     """
 
-    version = 4
+    version = 5
 
     def prepare(self, bundle: SourceBundle, ctx: RenderContext) -> bool:
         """Put the underlying PDF on disk.
