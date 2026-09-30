@@ -467,18 +467,98 @@ def get_pdf_annotated_page_map(zip_path: Path) -> List[Dict[str, Any]]:
         return []
 
 
+#: Room left around margin ink that falls outside the printed page, in PDF points.
+_PAGE_MARGIN_PAD = 10.0
+
+#: How far past each page edge ink is still kept, as a multiple of the page's
+#: size on that axis. A stray stroke far off the page must not balloon the canvas.
+_MAX_MARGIN_FACTOR = 2.0
+
+
+@dataclass(frozen=True)
+class InkOverlay:
+    """The stroke layer of a PDF page, and where it sits relative to the page.
+
+    Attributes:
+        image: RGBA raster of the strokes. It covers the printed page and any
+            ink written beyond its edges, so it can be larger than the page.
+        left: Canvas left edge in PDF points; ``-pdf_width / 2`` when no ink
+            leaves the page, less when some does.
+        top: Canvas top edge in PDF points; ``0`` when no ink leaves the page.
+    """
+
+    image: Image.Image
+    left: float
+    top: float
+
+
+def _svg_ink_extent(svg_text: str) -> Optional[Tuple[float, float, float, float]]:
+    """Read the ink's bounding box from the viewBox rmc wrote.
+
+    Args:
+        svg_text: The SVG rmc produced for one ``.rm`` page.
+
+    Returns:
+        ``(x0, y0, x1, y1)`` in the same units as the strokes, or None if the
+        header carries no usable viewBox.
+    """
+    header = re.search(r"<svg[^>]+>", svg_text)
+    box = re.search(r'viewBox="([^"]+)"', header.group(0)) if header else None
+    if box is None:
+        return None
+    try:
+        x, y, w, h = (float(v) for v in box.group(1).split())
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def _canvas_bounds(
+    ink: Optional[Tuple[float, float, float, float]],
+    pdf_width: float,
+    pdf_height: float,
+) -> Tuple[float, float, float, float]:
+    """Choose the canvas that holds the printed page and the ink around it.
+
+    An edge only moves when ink crosses it, so a page annotated entirely inside
+    its own rectangle gets exactly that rectangle, as before.
+
+    Args:
+        ink: The ink's bounding box, or None if unknown.
+        pdf_width: Width of the PDF page in points.
+        pdf_height: Height of the PDF page in points.
+
+    Returns:
+        ``(x0, y0, x1, y1)`` in PDF points, x centered on the page.
+    """
+    page = (-pdf_width / 2.0, 0.0, pdf_width / 2.0, pdf_height)
+    if ink is None:
+        return page
+    reach_x = _MAX_MARGIN_FACTOR * pdf_width
+    reach_y = _MAX_MARGIN_FACTOR * pdf_height
+    x0 = max(ink[0] - _PAGE_MARGIN_PAD, page[0] - reach_x) if ink[0] < page[0] else page[0]
+    y0 = max(ink[1] - _PAGE_MARGIN_PAD, page[1] - reach_y) if ink[1] < page[1] else page[1]
+    x1 = min(ink[2] + _PAGE_MARGIN_PAD, page[2] + reach_x) if ink[2] > page[2] else page[2]
+    y1 = min(ink[3] + _PAGE_MARGIN_PAD, page[3] + reach_y) if ink[3] > page[3] else page[3]
+    return (x0, y0, x1, y1)
+
+
 def render_rm_for_pdf_page(
     rm_file_path: Path,
     pdf_width: float,
     pdf_height: float,
     dpi: int = 150,
-) -> Optional[Image.Image]:
+) -> Optional[InkOverlay]:
     """Render handwritten .rm strokes mapped to a PDF page's coordinate space.
 
     On a reMarkable tablet, pen strokes on a PDF page are anchored in PDF point
     space (72 DPI), with the horizontal axis centered at zero (``x = 0`` is
     ``pdf_width / 2``) and the vertical axis starting at ``y = 0`` at the top of
-    the page.
+    the page. Nothing stops the pen at the page edge: margin notes written to
+    the side of, or below, the printed page are real ink, so the overlay grows
+    to hold them rather than cropping them away.
 
     Args:
         rm_file_path: Path to the .rm file.
@@ -487,8 +567,8 @@ def render_rm_for_pdf_page(
         dpi: Resolution for rasterizing the stroke overlay.
 
     Returns:
-        RGBA PIL Image matching the rendered resolution of the PDF page, or None
-        if the page has no strokes or could not be rendered.
+        The stroke overlay and its origin, or None if the page has no strokes
+        or could not be rendered.
 
     Raises:
         UnsupportedRmFormat: If the file declares an unsupported .rm format.
@@ -534,10 +614,11 @@ def render_rm_for_pdf_page(
             return None
 
         svg_text = tmp_svg_path.read_text(encoding="utf-8", errors="replace")
+        x0, y0, x1, y1 = _canvas_bounds(_svg_ink_extent(svg_text), pdf_width, pdf_height)
         new_header = (
             f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'height="{pdf_height}" width="{pdf_width}" '
-            f'viewBox="-{pdf_width / 2.0} 0.0 {pdf_width} {pdf_height}">'
+            f'height="{y1 - y0}" width="{x1 - x0}" '
+            f'viewBox="{x0} {y0} {x1 - x0} {y1 - y0}">'
         )
         modified_svg = re.sub(r"<svg[^>]+>", new_header, svg_text, count=1)
 
@@ -548,7 +629,8 @@ def render_rm_for_pdf_page(
             ):
                 svg_page = svg_doc[0]
                 svg_pix = svg_page.get_pixmap(dpi=dpi, alpha=True)
-                return Image.frombytes("RGBA", [svg_pix.width, svg_pix.height], svg_pix.samples)
+                image = Image.frombytes("RGBA", [svg_pix.width, svg_pix.height], svg_pix.samples)
+                return InkOverlay(image=image, left=x0, top=y0)
         except _DOC_ERRORS as e:
             logger.warning("Failed to rasterize SVG stroke overlay for %s: %s", rm_file_path, e)
             return None
@@ -607,19 +689,29 @@ def render_composite_pdf_page(
         finally:
             tmp_rm.unlink(missing_ok=True)
 
-        if rm_overlay is None or is_image_blank(rm_overlay):
+        if rm_overlay is None or is_image_blank(rm_overlay.image):
             # No visible annotations on this PDF page. Return None so bare PDF
             # pages are not sent to AI vision OCR.
             return None
 
-        if (rm_overlay.width, rm_overlay.height) != (pdf_img.width, pdf_img.height):
-            rm_overlay = rm_overlay.resize(
-                (pdf_img.width, pdf_img.height), Image.Resampling.LANCZOS
-            )
-        pdf_img.paste(rm_overlay, (0, 0), rm_overlay)
+        overlay = rm_overlay.image
+        if abs(overlay.width - pdf_img.width) <= 2 and abs(overlay.height - pdf_img.height) <= 2:
+            # No ink left the page; the overlay is the page, give or take rounding.
+            overlay = overlay.resize((pdf_img.width, pdf_img.height), Image.Resampling.LANCZOS)
+
+        # Margin ink makes the canvas larger than the page: the page sits at its
+        # offset inside a white field and the strokes go over the whole of it.
+        scale = dpi / 72.0
+        page_offset = (
+            round((-page_w / 2.0 - rm_overlay.left) * scale),
+            round(-rm_overlay.top * scale),
+        )
+        canvas = Image.new("RGB", overlay.size, "white")
+        canvas.paste(pdf_img, page_offset)
+        canvas.paste(overlay, (0, 0), overlay)
 
         out_buf = io.BytesIO()
-        pdf_img.save(out_buf, format="PNG")
+        canvas.save(out_buf, format="PNG")
         return out_buf.getvalue()
     except _DOC_ERRORS as e:
         logger.debug(f"Failed to render composite PDF page {page_index}: {e}")
